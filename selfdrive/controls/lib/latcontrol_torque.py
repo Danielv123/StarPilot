@@ -420,7 +420,7 @@ GENESIS_G90_TURN_IN_FRICTION_BOOST_RIGHT = 0.14
 GENESIS_G90_UNWIND_FRICTION_REDUCTION_LEFT = 0.04
 GENESIS_G90_UNWIND_FRICTION_REDUCTION_RIGHT = 0.30
 
-IONIQ_5_BASE_LAT_ACCEL_FACTOR_MULT = 1.2507
+IONIQ_5_BASE_LAT_ACCEL_FACTOR_MULT = 1.2101
 IONIQ_5_FF_ONSET = 0.10
 IONIQ_5_FF_ONSET_WIDTH = 0.05
 IONIQ_5_FF_CUTOFF = 1.20
@@ -441,6 +441,7 @@ IONIQ_5_TURN_IN_FRICTION_BOOST_LEFT = 0.04
 IONIQ_5_TURN_IN_FRICTION_BOOST_RIGHT = 0.03
 IONIQ_5_UNWIND_FRICTION_REDUCTION_LEFT = 0.34
 IONIQ_5_UNWIND_FRICTION_REDUCTION_RIGHT = 0.34
+IONIQ_5_FRICTION_SCALE_MULT = 0.7290
 IONIQ_5_CENTER_TAPER_MAX = 0.2362
 IONIQ_5_CENTER_TAPER_LAT = 0.12
 IONIQ_5_CENTER_TAPER_LAT_WIDTH = 0.03
@@ -2168,6 +2169,7 @@ class LatControlTorque(LatControl):
         friction_threshold = get_ioniq_5_friction_threshold(CS.vEgo, setpoint, desired_lateral_jerk)
         friction_scale = get_ioniq_5_friction_scale(CS.vEgo, setpoint, desired_lateral_jerk)
         friction_scale = 1.0 + ((friction_scale - 1.0) * ioniq_5_center_taper)
+        friction_scale *= IONIQ_5_FRICTION_SCALE_MULT
       elif ioniq_ev_old_active:
         ff *= get_ioniq_ev_old_ff_scale(setpoint, desired_lateral_jerk, CS.vEgo) * ioniq_ev_old_center_taper
         friction_scale = 1.0 + ((friction_scale - 1.0) * ioniq_ev_old_center_taper)

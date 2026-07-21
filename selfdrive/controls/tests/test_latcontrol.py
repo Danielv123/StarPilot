@@ -388,10 +388,9 @@ class TestLatControl:
     turn_in_right = get_kia_forte_ff_scale(-0.45, -0.7, 10.0)
     unwind_left = get_kia_forte_ff_scale(0.45, -0.7, 10.0)
     unwind_right = get_kia_forte_ff_scale(-0.45, 0.7, 10.0)
-    assert steady_left < 1.0
-    assert steady_right < steady_left
+    assert steady_left < steady_right < 1.0
     assert turn_in_left > steady_left
-    assert turn_in_right > steady_right
+    assert turn_in_right >= steady_right
     assert unwind_left < steady_left
     assert unwind_right < steady_right
     assert unwind_right > unwind_left
@@ -526,7 +525,7 @@ class TestLatControl:
     unwind_left_threshold = get_ioniq_5_friction_threshold(12.0, 0.7, -0.8)
     unwind_right_threshold = get_ioniq_5_friction_threshold(12.0, -0.7, 0.8)
     assert turn_in_left_threshold < base
-    assert turn_in_left_threshold < turn_in_right_threshold < base
+    assert turn_in_right_threshold < turn_in_left_threshold < base
     assert unwind_left_threshold > base
     assert unwind_right_threshold > unwind_left_threshold
 

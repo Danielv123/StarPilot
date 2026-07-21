@@ -134,6 +134,10 @@ speedvision = [
   "torchvision>=0.19",
   "ultralytics>=8.3,<9",
 ]
+tuning = [
+  "joblib>=1.5.3",
+  "scikit-learn>=1.9.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/commaai/openpilot"

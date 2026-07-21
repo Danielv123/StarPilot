@@ -47,6 +47,7 @@ config.json
 clcache
 compile_commands.json
 compare_runtime*.html
+artifacts/tuning/
 
 cereal/services.h
 cereal/gen

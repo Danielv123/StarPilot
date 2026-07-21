@@ -37,6 +37,7 @@ BASE_FEATURES = (
   "actual_lateral_accel",
   "steering_angle_deg",
   "steering_rate_deg",
+  "signed_steering_rate_deg_s",
   "steering_torque_eps",
   "v_ego",
   "a_ego",
@@ -44,7 +45,7 @@ BASE_FEATURES = (
 STATE_FEATURES = (
   "actual_lateral_accel",
   "steering_angle_deg",
-  "steering_rate_deg",
+  "signed_steering_rate_deg_s",
   "steering_torque_eps",
 )
 DIAGNOSTIC_FIELDS = (
@@ -92,6 +93,17 @@ def finite(value: Any, default: float = math.nan) -> float:
 
 def route_name(segment: str) -> str:
   return segment.rsplit("--", 1)[0] if "--" in segment else segment
+
+
+def signed_steering_rate(angles: np.ndarray, times: np.ndarray, max_gap_s: float = 0.09) -> np.ndarray:
+  """Reconstruct causal signed wheel motion; carState.steeringRateDeg is magnitude-only on this car."""
+  rate = np.zeros_like(angles, dtype=np.float32)
+  if len(rate) < 2:
+    return rate
+  dt = np.diff(times)
+  continuous = (dt > 1e-4) & (dt < max_gap_s)
+  rate[1:][continuous] = (np.diff(angles)[continuous] / dt[continuous]).astype(np.float32)
+  return rate
 
 
 def read_trajectory(path: Path, brand_filter: str, fingerprint_filter: str, sample_step: int) -> Trajectory | None:
@@ -157,6 +169,8 @@ def read_trajectory(path: Path, brand_filter: str, fingerprint_filter: str, samp
       "actual_lateral_accel": finite(nested(torque_state, "actualLateralAccel")),
       "steering_angle_deg": finite(nested(car_state, "steeringAngleDeg")),
       "steering_rate_deg": finite(nested(car_state, "steeringRateDeg")),
+      # Replaced with a causal angle derivative once the sampled timeline is complete.
+      "signed_steering_rate_deg_s": 0.0,
       "steering_torque_eps": finite(nested(car_state, "steeringTorqueEps")),
       "v_ego": finite(nested(car_state, "vEgo")),
       "a_ego": finite(nested(car_state, "aEgo")),
@@ -180,6 +194,7 @@ def read_trajectory(path: Path, brand_filter: str, fingerprint_filter: str, samp
     return None
   # Values were only appended for finite sampled times.
   values = {name: np.asarray(value, dtype=np.float32) for name, value in rows.items()}
+  values["signed_steering_rate_deg_s"] = signed_steering_rate(values["steering_angle_deg"], sampled_times)
   return Trajectory(
     segment=path.parent.name,
     route=route_name(path.parent.name),
@@ -254,14 +269,22 @@ def load_trajectories(args: argparse.Namespace) -> tuple[list[Trajectory], dict[
   return trajectories, stats, excluded
 
 
-def split_routes(trajectories: list[Trajectory], validation_fraction: float, seed: int) -> tuple[set[str], set[str]]:
+def split_routes(trajectories: list[Trajectory], validation_fraction: float, seed: int,
+                 holdout_route_prefixes: tuple[str, ...] = ()) -> tuple[set[str], set[str]]:
   routes = sorted({trajectory.route for trajectory in trajectories})
   if len(routes) < 2:
     raise SystemExit(f"Need at least two retained routes for a route-level split; found {len(routes)}.")
+  forced = {route for route in routes if any(route.startswith(prefix) for prefix in holdout_route_prefixes)}
+  missing = [prefix for prefix in holdout_route_prefixes if not any(route.startswith(prefix) for route in routes)]
+  if missing:
+    raise SystemExit(f"No retained route matches forced holdout prefix(es): {', '.join(missing)}")
+  if len(forced) >= len(routes):
+    raise SystemExit("Forced holdout routes leave no routes for plant training.")
   rng = np.random.default_rng(seed)
-  shuffled = list(np.asarray(routes)[rng.permutation(len(routes))])
+  remaining = [route for route in routes if route not in forced]
+  shuffled = list(np.asarray(remaining)[rng.permutation(len(remaining))])
   validation_count = max(1, min(len(routes) - 1, round(len(routes) * validation_fraction)))
-  validation = set(shuffled[:validation_count])
+  validation = forced | set(shuffled[:max(0, validation_count - len(forced))])
   return set(routes) - validation, validation
 
 
@@ -359,7 +382,8 @@ def rollout_metrics(model: Any, trajectories: list[Trajectory], routes: set[str]
 
 def train(args: argparse.Namespace) -> None:
   trajectories, route_stats, excluded_routes = load_trajectories(args)
-  train_routes, validation_routes = split_routes(trajectories, args.validation_fraction, args.random_state)
+  holdout_prefixes = tuple(args.holdout_route_prefix)
+  train_routes, validation_routes = split_routes(trajectories, args.validation_fraction, args.random_state, holdout_prefixes)
   x_train, y_train = stack_route_samples(trajectories, train_routes, args.history_steps, args.max_train_samples, args.random_state)
   x_validation, y_validation = stack_route_samples(trajectories, validation_routes, args.history_steps, args.max_validation_samples, args.random_state + 1)
   print(f"plant samples: train={len(x_train)} validation={len(x_validation)}")
@@ -399,6 +423,7 @@ def train(args: argparse.Namespace) -> None:
     "excluded_routes": excluded_routes,
     "train_routes": sorted(train_routes),
     "validation_routes": sorted(validation_routes),
+    "forced_holdout_route_prefixes": list(holdout_prefixes),
     "train_segments": [t.segment for t in trajectories if t.route in train_routes],
     "validation_segments": [t.segment for t in trajectories if t.route in validation_routes],
     "one_step": {"train": train_metrics, "validation": validation_metrics},
@@ -421,13 +446,15 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--car-fingerprint-contains", default="IONIQ5")
   parser.add_argument("--max-segments", type=int, default=0)
   parser.add_argument("--sample-step", type=int, default=5, help="100 Hz carState rows per retained plant step.")
-  parser.add_argument("--history-steps", type=int, default=6)
-  parser.add_argument("--rollout-steps", type=int, default=5)
+  parser.add_argument("--history-steps", type=int, default=12, help="Retained 50 ms states supplied to the plant (12 = 0.6 s).")
+  parser.add_argument("--rollout-steps", type=int, default=40, help="Open-loop validation horizon (40 = 2.0 s at the default sample step).")
+  parser.add_argument("--holdout-route-prefix", action="append", default=[],
+                      help="Force matching routes into validation; repeat for measured-regression routes.")
   parser.add_argument("--max-route-driver-overlay", type=float, default=0.50)
   parser.add_argument("--validation-fraction", type=float, default=0.20)
   parser.add_argument("--max-train-samples", type=int, default=350000)
   parser.add_argument("--max-validation-samples", type=int, default=90000)
-  parser.add_argument("--max-rollout-windows", type=int, default=30000)
+  parser.add_argument("--max-rollout-windows", type=int, default=5000)
   parser.add_argument("--max-iter", type=int, default=180)
   parser.add_argument("--learning-rate", type=float, default=0.06)
   parser.add_argument("--max-leaf-nodes", type=int, default=31)

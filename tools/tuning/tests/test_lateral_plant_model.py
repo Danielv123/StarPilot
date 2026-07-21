@@ -30,7 +30,8 @@ def test_predictor_features_exclude_controller_and_path_inputs():
   forbidden = {"desired_lateral_accel", "desired_lateral_jerk", "controller_i", "controller_output", "controller_error", "p", "i", "d", "f"}
   assert not forbidden.intersection(plant.BASE_FEATURES)
   assert set(plant.BASE_FEATURES) == {
-    "applied_torque", "actual_lateral_accel", "steering_angle_deg", "steering_rate_deg", "steering_torque_eps", "v_ego", "a_ego",
+    "applied_torque", "actual_lateral_accel", "steering_angle_deg", "steering_rate_deg", "signed_steering_rate_deg_s",
+    "steering_torque_eps", "v_ego", "a_ego",
   }
 
 
@@ -58,3 +59,20 @@ def test_overlay_rows_are_removed_from_plant_samples():
   trajectory.values["driver_overlay"][5] = 1.0
   x, _ = plant.trajectory_samples(trajectory, history_steps=3)
   assert x.shape[0] == 7
+
+
+def test_signed_steering_rate_preserves_direction_and_resets_across_gaps():
+  angles = np.asarray([0.0, 1.0, 0.5, 3.0], dtype=np.float32)
+  times = np.asarray([0.0, 0.05, 0.10, 0.30], dtype=np.float64)
+  rate = plant.signed_steering_rate(angles, times)
+  assert np.allclose(rate, [0.0, 20.0, -10.0, 0.0])
+
+
+def test_forced_holdout_routes_are_never_used_for_training():
+  trajectories = [make_trajectory() for _ in range(4)]
+  for index, trajectory in enumerate(trajectories):
+    trajectory.route = f"route-{index}"
+    trajectory.segment = f"route-{index}--0"
+  train, validation = plant.split_routes(trajectories, 0.25, 7, ("route-2",))
+  assert "route-2" in validation
+  assert "route-2" not in train

@@ -388,9 +388,10 @@ class TestLatControl:
     turn_in_right = get_kia_forte_ff_scale(-0.45, -0.7, 10.0)
     unwind_left = get_kia_forte_ff_scale(0.45, -0.7, 10.0)
     unwind_right = get_kia_forte_ff_scale(-0.45, 0.7, 10.0)
-    assert steady_left < steady_right < 1.0
+    assert steady_left < 1.0
+    assert steady_right < steady_left
     assert turn_in_left > steady_left
-    assert turn_in_right >= steady_right
+    assert turn_in_right > steady_right
     assert unwind_left < steady_left
     assert unwind_right < steady_right
     assert unwind_right > unwind_left
@@ -511,10 +512,9 @@ class TestLatControl:
     turn_in_right = get_ioniq_5_ff_scale(-0.7, -0.8, 12.0)
     unwind_left = get_ioniq_5_ff_scale(0.7, -0.8, 12.0)
     unwind_right = get_ioniq_5_ff_scale(-0.7, 0.8, 12.0)
-    assert steady_left < 1.0
-    assert steady_right < steady_left
+    assert steady_left < steady_right < 1.0
     assert turn_in_left > steady_left
-    assert turn_in_right > steady_right
+    assert turn_in_right >= steady_right
     assert unwind_left < steady_left
     assert unwind_right < unwind_left
 

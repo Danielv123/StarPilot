@@ -8,12 +8,14 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 from cereal import car, log, custom, messaging
 from opendbc.car.gm.values import GMFlags
 from opendbc.car.hyundai.values import HyundaiFlags
+from openpilot.starpilot.common.lateral_delay import full_lateral_delay
 
 @dataclass
 class StarPilotCarState:
     # ========== Car Type Detection ==========
     isGM: bool = False
     isHKG: bool = False
+    isJeep: bool = False
     isToyota: bool = False
     isSubaru: bool = False
     isVolt: bool = False
@@ -48,7 +50,7 @@ class StarPilotCarState:
     # ========== Car Values for Range Calculation ==========
     steerActuatorDelay: float = 0.0
     friction: float = 0.0
-    steerKp: float = 1.0
+    steerKp: float = 0.6
     latAccelFactor: float = 0.0
     steerRatio: float = 0.0
     longitudinalActuatorDelay: float = 0.0
@@ -86,8 +88,10 @@ class StarPilotState:
             from openpilot.selfdrive.ui.lib.fingerprint_catalog import FINGERPRINT_MAKE_TO_VALUES_DIR
             fallback_make_lower = fallback_make.lower()
             brand = FINGERPRINT_MAKE_TO_VALUES_DIR.get(fallback_make_lower, fallback_make_lower)
+            fallback_model_str = fallback_model or ""
             self.car_state.isGM = brand == "gm"
             self.car_state.isHKG = brand == "hyundai"
+            self.car_state.isJeep = brand == "chrysler" and fallback_model_str.startswith("JEEP_")
             self.car_state.isSubaru = brand == "subaru"
             self.car_state.isToyota = brand == "toyota"
             self.car_state.isHKGCanFd = False
@@ -98,6 +102,7 @@ class StarPilotState:
 
         if fallback_model:
             self.params.put("CarModel", fallback_model)
+            self.car_state.isJeep = fallback_model.startswith("JEEP_")
 
         if not starpilot_toggles:
             self.car_state.hasOpenpilotLongitudinal = True
@@ -161,6 +166,7 @@ class StarPilotState:
             self.car_state.isGM = car_make == "gm"
             self.car_state.isHKG = car_make == "hyundai"
             self.car_state.isHKGCanFd = self.car_state.isHKG and safety_model == car.CarParams.SafetyModel.hyundaiCanfd
+            self.car_state.isJeep = car_make == "chrysler" and car_fingerprint.startswith("JEEP_")
             self.car_state.isSubaru = car_make == "subaru"
             self.car_state.isToyota = car_make == "toyota"
             self.car_state.isTSK = bool(self._safe_get(CP, "secOcRequired", False))
@@ -174,7 +180,9 @@ class StarPilotState:
             )
             self.car_state.longitudinalActuatorDelay = float(self._safe_get(CP, "longitudinalActuatorDelay", self.car_state.longitudinalActuatorDelay))
             self.car_state.startAccel = float(self._safe_get(CP, "startAccel", self.car_state.startAccel))
-            self.car_state.steerActuatorDelay = float(self._safe_get(CP, "steerActuatorDelay", self.car_state.steerActuatorDelay))
+            vehicle_steer_delay = self._safe_get(CP, "steerActuatorDelay", None)
+            if vehicle_steer_delay is not None:
+                self.car_state.steerActuatorDelay = full_lateral_delay(vehicle_steer_delay)
             self.car_state.steerRatio = float(self._safe_get(CP, "steerRatio", self.car_state.steerRatio))
             self.car_state.stopAccel = float(self._safe_get(CP, "stopAccel", self.car_state.stopAccel))
             self.car_state.stoppingDecelRate = float(self._safe_get(CP, "stoppingDecelRate", self.car_state.stoppingDecelRate))
@@ -215,6 +223,27 @@ class StarPilotState:
                 self.car_state.hasAutoTune = event.liveTorqueParameters.useParams
             except Exception:
                 pass
+
+        # 4. Sync CP defaults into lateral tuning params (fallback for replay)
+        self._sync_lateral_params()
+
+    def _sync_lateral_params(self):
+        """Fallback: write CP defaults into lateral tuning params if unset.
+        Mirrors starpilot_variables._sync_stock_param for replay scenarios."""
+        if self.params.get("CarParamsPersistent") is None:
+            return
+        cs = self.car_state
+        for key, live_val in (
+            ("SteerDelay", cs.steerActuatorDelay),
+            ("SteerFriction", cs.friction),
+            ("SteerKP", cs.steerKp),
+            ("SteerLatAccel", cs.latAccelFactor),
+            ("SteerRatio", cs.steerRatio),
+        ):
+            if abs(live_val) < 1e-6:
+                continue
+            if abs(self.params.get_float(key)) < 1e-6:
+                self.params.put_float(key, live_val)
 
 # Global instance
 starpilot_state = StarPilotState()

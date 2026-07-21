@@ -5,7 +5,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N
 from openpilot.common.pid import PIDController
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.common.filter_simple import FirstOrderFilter
-from opendbc.car.gm.values import CarControllerParams, GMFlags
+from opendbc.car.gm.values import CAR, CarControllerParams, GMFlags
 from openpilot.starpilot.common.testing_grounds import testing_ground
 
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
@@ -13,9 +13,12 @@ clip = np.clip
 interp = np.interp
 STOPPING_RELEASE_HYSTERESIS = 0.35
 STOPPING_RELEASE_MIN_ACCEL = 0.15
+STOPPING_RELEASE_STRONG_ACCEL = 0.45
 MOVING_STOP_FOLLOW_MIN_GAP = 0.25
 NEGATIVE_TARGET_CREEP_GUARD_SPEED = 0.35
 NEGATIVE_TARGET_CREEP_GUARD_DECEL = 0.40
+BOLT_ACC_PEDAL_REGEN_LIMIT_BP = [0.0, 1.5, 4.0, 8.0, 15.0, 30.0]
+BOLT_ACC_PEDAL_REGEN_LIMIT_V = [-0.93, -1.28, -1.98, -2.58, -2.86, -2.95]
 
 LongCtrlState = car.CarControl.Actuators.LongControlState
 
@@ -27,6 +30,55 @@ def apply_deadzone(error, deadzone):
   else:
     error = 0.0
   return error
+
+
+def get_bolt_acc_pedal_friction_bias(output_accel, a_target, v_ego):
+  if output_accel >= -0.05 or a_target >= -0.80 or v_ego <= 5.0:
+    return 0.0
+
+  authority_gap = max(0.0, abs(a_target) - abs(output_accel))
+  if authority_gap <= 0.25:
+    return 0.0
+
+  speed_factor = interp(v_ego, [5.0, 10.0, 15.0, 25.0], [0.0, 0.55, 0.85, 1.0])
+  max_bias = interp(abs(a_target), [0.8, 1.4, 2.2, 3.5], [0.0, 0.14, 0.42, 0.70])
+  return float(min(authority_gap * 0.30, max_bias) * speed_factor)
+
+
+def get_bolt_acc_pedal_friction_floor(a_target, v_ego, pedal_regen_limit):
+  if v_ego <= 5.0 or a_target >= (pedal_regen_limit - 0.05):
+    return None
+
+  friction_request = max(0.0, pedal_regen_limit - a_target)
+  if friction_request <= 0.10:
+    return None
+
+  speed_factor = interp(v_ego, [5.0, 8.0, 12.0, 18.0, 25.0], [0.0, 0.45, 0.75, 0.90, 1.0])
+  demand_factor = interp(friction_request, [0.10, 0.25, 0.50, 0.90, 1.30], [0.0, 0.22, 0.50, 0.78, 1.0])
+  floor_fraction = float(clip(speed_factor * demand_factor, 0.0, 1.0))
+
+  return float(pedal_regen_limit - (friction_request * floor_fraction))
+
+
+def get_bolt_acc_pedal_feedforward_gain(feedforward_gain, a_target, v_ego, pedal_regen_limit, last_output_accel):
+  effective_gain = feedforward_gain
+  if a_target >= 0.0:
+    return effective_gain
+
+  restore = 0.0
+
+  if a_target < pedal_regen_limit:
+    friction_gap = pedal_regen_limit - a_target
+    restore = float(interp(friction_gap, [0.0, 0.25, 0.75], [0.0, 0.6, 1.0]))
+
+  if v_ego > 5.0 and a_target < -1.10:
+    authority_gap = max(0.0, abs(a_target) - abs(min(last_output_accel, 0.0)))
+    target_restore = float(interp(abs(a_target), [1.1, 1.6, 2.2, 3.0], [0.0, 0.25, 0.55, 1.0]))
+    gap_restore = float(interp(authority_gap, [0.2, 0.6, 1.0, 1.6], [0.0, 0.25, 0.60, 1.0]))
+    speed_factor = float(interp(v_ego, [5.0, 8.0, 12.0, 18.0], [0.0, 0.35, 0.75, 1.0]))
+    restore = max(restore, max(target_restore, gap_restore) * speed_factor)
+
+  return float(feedforward_gain + ((1.0 - feedforward_gain) * clip(restore, 0.0, 1.0)))
 
 
 def long_control_state_trans(CP, active, long_control_state, v_ego,
@@ -131,6 +183,17 @@ class LongControl:
     self.is_volt = bool(
       CP.brand == "gm" and str(CP.carFingerprint).startswith("CHEVROLET_VOLT")
     )
+    self.is_gm_stock_truck = bool(
+      CP.brand == "gm" and
+      getattr(CP, "carFingerprint", None) in (CAR.CHEVROLET_SILVERADO, CAR.CHEVROLET_SILVERADO_CC) and
+      not CP.enableGasInterceptorDEPRECATED
+    )
+    self.is_bolt_acc_pedal_friction_car = bool(
+      CP.brand == "gm" and
+      CP.enableGasInterceptorDEPRECATED and
+      getattr(CP, "carFingerprint", None) == CAR.CHEVROLET_BOLT_ACC_2022_2023_PEDAL and
+      (CP.flags & GMFlags.PEDAL_LONG.value)
+    )
 
   def update_mpc_mode(self, experimental_mode):
     new_mode = 'blended' if experimental_mode else 'acc'
@@ -166,7 +229,7 @@ class LongControl:
     if not preserve_stop_release:
       self.stop_release_counter = 0
 
-  def _stop_release_ready(self, CS, a_target, should_stop, starpilot_toggles):
+  def _stop_release_ready(self, CS, a_target, should_stop, has_lead, starpilot_toggles):
     if self.long_control_state != LongCtrlState.stopping:
       self.stop_release_counter = 0
       return True
@@ -176,6 +239,14 @@ class LongControl:
       return False
 
     if CS.vEgo > starpilot_toggles.vEgoStarting:
+      self.stop_release_counter = int(round(STOPPING_RELEASE_HYSTERESIS / DT_CTRL))
+      return True
+
+    if has_lead and a_target > STOPPING_RELEASE_MIN_ACCEL:
+      self.stop_release_counter = int(round(STOPPING_RELEASE_HYSTERESIS / DT_CTRL))
+      return True
+
+    if a_target >= STOPPING_RELEASE_STRONG_ACCEL and not CS.cruiseState.standstill:
       self.stop_release_counter = int(round(STOPPING_RELEASE_HYSTERESIS / DT_CTRL))
       return True
 
@@ -251,6 +322,30 @@ class LongControl:
     bleed = interp(abs(error), [0.25, 0.75, 1.5], [0.55, 0.25, 0.0])
     self.pid.i *= bleed
 
+  def _trim_gm_truck_positive_hold_integrator(self, a_target, error, CS):
+    if not self.is_gm_stock_truck or self.pid.i <= 0.0:
+      return
+    if self.last_output_accel <= 0.10:
+      return
+    light_accel_threshold = float(interp(CS.vEgo, [8.0, 15.0, 25.0], [0.03, 0.06, 0.10]))
+    if a_target > light_accel_threshold:
+      return
+    if CS.vEgo <= NEGATIVE_TARGET_CREEP_GUARD_SPEED and a_target > -NEGATIVE_TARGET_CREEP_GUARD_DECEL:
+      return
+
+    # Stock-ACC trucks are especially sensitive to hanging onto light positive
+    # torque after the planner has already crossed back to coast or mild decel.
+    # Bleed stale positive I faster in that narrow window so the command can
+    # settle instead of wobbling the converter lock state.
+    authority_mismatch = self.last_output_accel - max(a_target, 0.0)
+    if authority_mismatch <= 0.08 and error > -0.08:
+      return
+
+    target_factor = float(interp(a_target, [-0.30, -0.10, -0.02, light_accel_threshold], [0.20, 0.35, 0.60, 0.98]))
+    if error < -0.20:
+      target_factor *= 0.75
+    self.pid.i *= target_factor
+
   def _apply_pedal_long_brake_bias(self, output_accel, a_target, CS):
     if not self.is_gm_pedal_long:
       return output_accel
@@ -260,6 +355,14 @@ class LongControl:
       return output_accel
 
     authority_gap = max(0.0, abs(a_target) - abs(output_accel))
+    if self.is_bolt_acc_pedal_friction_car:
+      pedal_regen_limit = float(interp(CS.vEgo, BOLT_ACC_PEDAL_REGEN_LIMIT_BP, BOLT_ACC_PEDAL_REGEN_LIMIT_V))
+      bias = get_bolt_acc_pedal_friction_bias(output_accel, a_target, CS.vEgo)
+      floor = get_bolt_acc_pedal_friction_floor(a_target, CS.vEgo, pedal_regen_limit)
+      if floor is not None:
+        bias = max(bias, output_accel - floor)
+      return output_accel - float(max(bias, 0.0))
+
     if authority_gap <= 0.40:
       return output_accel
 
@@ -282,12 +385,23 @@ class LongControl:
     positive_cap = interp(a_target, [-1.5, -0.6, -0.1], [0.0, 0.0, 0.05])
     return min(output_accel, float(positive_cap))
 
-  def update(self, active, CS, a_target, should_stop, accel_limits, starpilot_toggles):
+  def _get_longitudinal_feedforward(self, a_target, v_ego):
+    feedforward = a_target * self.feedforward_gain
+    if not self.is_bolt_acc_pedal_friction_car or a_target >= 0.0:
+      return feedforward
+
+    pedal_regen_limit = float(interp(v_ego, BOLT_ACC_PEDAL_REGEN_LIMIT_BP, BOLT_ACC_PEDAL_REGEN_LIMIT_V))
+    effective_gain = get_bolt_acc_pedal_feedforward_gain(
+      self.feedforward_gain, a_target, v_ego, pedal_regen_limit, self.last_output_accel,
+    )
+    return a_target * effective_gain
+
+  def update(self, active, CS, a_target, should_stop, accel_limits, starpilot_toggles, has_lead=False):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     self.pid.neg_limit = accel_limits[0]
     self.pid.pos_limit = accel_limits[1]
 
-    allow_stopping_release = self._stop_release_ready(CS, a_target, should_stop, starpilot_toggles)
+    allow_stopping_release = self._stop_release_ready(CS, a_target, should_stop, has_lead, starpilot_toggles)
     self.long_control_state = long_control_state_trans(self.CP, active, self.long_control_state, CS.vEgo,
                                                        should_stop, CS.brakePressed,
                                                        CS.cruiseState.standstill, starpilot_toggles,
@@ -318,7 +432,8 @@ class LongControl:
       self.update_mpc_mode(self.experimental_mode)
       self._shape_volt_test_tune_integrator(error, CS.vEgo)
       self._trim_positive_overshoot_integrator(a_target, error, CS)
-      feedforward = a_target * self.feedforward_gain
+      self._trim_gm_truck_positive_hold_integrator(a_target, error, CS)
+      feedforward = self._get_longitudinal_feedforward(a_target, CS.vEgo)
       freeze_integrator = self._get_pedal_long_freeze(a_target, error, CS.vEgo, accel_limits)
       raw_output_accel = self.pid.update(error, speed=CS.vEgo, feedforward=feedforward,
                                          freeze_integrator=freeze_integrator)
@@ -404,7 +519,7 @@ class LongControl:
       error = self.v_pid - CS.vEgo
       error_deadzone = apply_deadzone(error, deadzone)
       freeze_integrator = prevent_overshoot or self._get_pedal_long_freeze(a_target, error_deadzone, CS.vEgo, accel_limits)
-      feedforward = a_target * self.feedforward_gain
+      feedforward = self._get_longitudinal_feedforward(a_target, CS.vEgo)
       output_accel = self.pid.update(error_deadzone, speed=CS.vEgo,
                                      feedforward=feedforward,
                                      freeze_integrator=freeze_integrator)

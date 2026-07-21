@@ -28,7 +28,7 @@ const LongitudinalLimits HYUNDAI_LONG_LIMITS = {
 #define HYUNDAI_COMMON_TX_MSGS(scc_bus) \
   {0x340, 0,       8, .check_relay = true},   /* LKAS11 Bus 0                              */ \
   {0x4F1, scc_bus, 4, .check_relay = false},  /* CLU11 Bus 0 (radar-SCC) or 2 (camera-SCC) */ \
-  {0x485, 0,       4, .check_relay = true},   /* LFAHDA_MFC Bus 0                          */ \
+  {0x485, 0,       8, .check_relay = true},   /* LFAHDA_MFC Bus 0                          */ \
 
 #define HYUNDAI_LONG_COMMON_TX_MSGS(scc_bus) \
   HYUNDAI_COMMON_TX_MSGS(scc_bus) \
@@ -68,6 +68,13 @@ const LongitudinalLimits HYUNDAI_LONG_LIMITS = {
 
 static const CanMsg HYUNDAI_TX_MSGS[] = {
   HYUNDAI_COMMON_TX_MSGS(0)
+};
+
+static const CanMsg HYUNDAI_LONG_TX_MSGS[] = {
+  HYUNDAI_LONG_COMMON_TX_MSGS(0)
+  {0x38D, 0, 8, .check_relay = false}, // FCA11 Bus 0
+  {0x483, 0, 8, .check_relay = false}, // FCA12 Bus 0
+  {0x7D0, 0, 8, .check_relay = false}, // radar UDS TX addr Bus 0 (for radar disable)
 };
 
 static bool hyundai_legacy = false;
@@ -322,13 +329,6 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
 }
 
 static safety_config hyundai_init(uint16_t param) {
-  static const CanMsg HYUNDAI_LONG_TX_MSGS[] = {
-    HYUNDAI_LONG_COMMON_TX_MSGS(0)
-    {0x38D, 0, 8, .check_relay = false}, // FCA11 Bus 0
-    {0x483, 0, 8, .check_relay = false}, // FCA12 Bus 0
-    {0x7D0, 0, 8, .check_relay = false}, // radar UDS TX addr Bus 0 (for radar disable)
-  };
-
   static const CanMsg HYUNDAI_CAMERA_SCC_TX_MSGS[] = {
     HYUNDAI_COMMON_TX_MSGS(2)
   };
@@ -556,9 +556,9 @@ static safety_config hyundai_legacy_init(uint16_t param) {
 
   hyundai_common_init(param);
   hyundai_legacy = true;
-  hyundai_longitudinal = false;
   hyundai_camera_scc = false;
-  return BUILD_SAFETY_CFG(hyundai_legacy_rx_checks, HYUNDAI_TX_MSGS);
+  return hyundai_longitudinal ? BUILD_SAFETY_CFG(hyundai_legacy_rx_checks, HYUNDAI_LONG_TX_MSGS) :
+                                BUILD_SAFETY_CFG(hyundai_legacy_rx_checks, HYUNDAI_TX_MSGS);
 }
 
 const safety_hooks hyundai_hooks = {

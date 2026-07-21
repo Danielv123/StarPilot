@@ -4,6 +4,7 @@ import math
 import time
 
 import cereal.messaging as messaging
+import numpy as np
 
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -11,7 +12,11 @@ from openpilot.common.gps import get_gps_location_service
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
-from openpilot.selfdrive.controls.lib.lead_behavior import is_radarless_matched_follow_window, should_track_lead
+from openpilot.selfdrive.controls.lib.lead_behavior import (
+  is_radarless_matched_follow_window,
+  should_hold_tracked_vision_lead,
+  should_track_lead,
+)
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import A_CHANGE_COST, DANGER_ZONE_COST, J_EGO_COST, STOP_DISTANCE
 
 from openpilot.starpilot.common.starpilot_utilities import calculate_lane_width, calculate_road_curvature
@@ -77,6 +82,7 @@ class StarPilotPlanner:
     self._lane_width_counter = 0
     self.lateral_acceleration = 0
     self.model_length = 0
+    self.lead_path_y = 0
     self.road_curvature = 0
     self.time_to_curve = 0
     self.v_cruise = 0
@@ -183,6 +189,12 @@ class StarPilotPlanner:
     self.CS_prev_right_blinker = CS.rightBlinker
 
     self.model_length = sm["modelV2"].position.x[-1]
+    model_position = sm["modelV2"].position
+    model_path_y = getattr(model_position, "y", [])
+    if len(model_path_y) == len(model_position.x):
+      self.lead_path_y = float(np.interp(self.lead_one.dRel, model_position.x, model_path_y))
+    else:
+      self.lead_path_y = 0.0
 
     self.raw_model_stopped = self.model_length < CRUISING_SPEED * PLANNER_TIME
     self.model_stopped = self.raw_model_stopped or self.starpilot_vcruise.forcing_stop
@@ -201,11 +213,11 @@ class StarPilotPlanner:
     self.starpilot_following.update(controls_enabled, v_ego, sm, starpilot_toggles)
 
     conditional_tracking_active = controls_enabled or sm["starpilotCarState"].alwaysOnLateralEnabled
-    if conditional_tracking_active and starpilot_toggles.conditional_experimental_mode:
+    if conditional_tracking_active and bool(getattr(starpilot_toggles, "conditional_experimental_mode", False)):
       # Keep CEM's filters warm in AOL so engagement can inherit the current scene.
       self.starpilot_cem.update(v_ego, sm, starpilot_toggles)
       self.starpilot_ccm.experimental_mode = True
-    elif conditional_tracking_active and starpilot_toggles.conditional_chill_mode:
+    elif conditional_tracking_active and bool(getattr(starpilot_toggles, "conditional_chill_mode", False)):
       self.starpilot_ccm.update(v_ego, v_cruise, sm, starpilot_toggles)
       self.starpilot_cem.experimental_mode = False
     else:
@@ -233,6 +245,19 @@ class StarPilotPlanner:
       v_lead=self.lead_one.vLead,
       radar=bool(getattr(self.lead_one, "radar", False)),
     )
+    continuity_candidate = self.tracking_lead or self.tracking_lead_filter.x >= THRESHOLD * 0.6
+    if not following_lead and continuity_candidate:
+      following_lead = should_hold_tracked_vision_lead(
+        self.lead_one.status,
+        self.lead_one.dRel,
+        self.model_length,
+        stop_distance,
+        v_ego,
+        model_prob=float(getattr(self.lead_one, "modelProb", 0.0)),
+        y_rel=float(getattr(self.lead_one, "yRel", 0.0)),
+        path_y=self.lead_path_y,
+        radar=bool(getattr(self.lead_one, "radar", False)),
+      )
     now_t = time.monotonic()
     lead_radar = bool(getattr(self.lead_one, "radar", False))
     t_follow = max(float(getattr(self.starpilot_following, "t_follow", 0.0)), 1.45)

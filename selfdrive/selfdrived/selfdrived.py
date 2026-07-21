@@ -25,6 +25,7 @@ from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
+from openpilot.selfdrive.selfdrived.alert_sound import filter_forcing_stop_alert_sound
 
 from openpilot.system.version import get_build_metadata
 from openpilot.system.hardware import HARDWARE
@@ -46,6 +47,8 @@ LaneChangeDirection = log.LaneChangeDirection
 EventName = log.OnroadEvent.EventName
 ButtonType = car.CarState.ButtonEvent.Type
 SafetyModel = car.CarParams.SafetyModel
+AlertLevel = log.DriverMonitoringState.AlertLevel
+MonitoringPolicy = log.DriverMonitoringState.MonitoringPolicy
 
 StarPilotEventName = custom.StarPilotOnroadEvent.EventName
 
@@ -91,6 +94,38 @@ def get_starpilot_alert_filters(current_alert_types: list[str], clear_event_type
     starpilot_clear_event_types.discard(ET.WARNING)
 
   return starpilot_alert_types, starpilot_clear_event_types
+
+
+def add_tesla_preap_starpilot_events(CP, CS, FPCS, starpilot_events: Events, prev_pedal_long_active: bool) -> bool:
+  if CP.brand != "tesla" or CP.carFingerprint != "TESLA_MODEL_S_PREAP":
+    return False
+
+  if CP.pcmCruise:
+    if getattr(FPCS, 'teslaCCEngaged', False):
+      starpilot_events.add(StarPilotEventName.teslaCCEngaged)
+    if getattr(FPCS, 'teslaCCDisengaged', False):
+      starpilot_events.add(StarPilotEventName.teslaCCDisengaged)
+    if getattr(FPCS, 'teslaCCNotArmed', False):
+      starpilot_events.add(StarPilotEventName.teslaCCNotArmed)
+    return False
+
+  from opendbc.car.tesla.preap.nap_conf import nap_conf
+  if not nap_conf.pedal_calibrated:
+    starpilot_events.add(StarPilotEventName.pedalNotCalibrated)
+
+  if not CP.openpilotLongitudinalControl:
+    return False
+
+  pedal_long_active = bool(CS.cruiseState.enabled and getattr(FPCS, 'pedalLongActive', False))
+  if pedal_long_active and not prev_pedal_long_active:
+    starpilot_events.add(StarPilotEventName.pedalCruiseEnabled)
+  elif prev_pedal_long_active and not pedal_long_active:
+    starpilot_events.add(StarPilotEventName.pedalCruiseDisabled)
+
+  if getattr(FPCS, 'pedalMaxRegen', False):
+    starpilot_events.add(StarPilotEventName.pedalMaxRegen)
+
+  return pedal_long_active
 
 
 class SelfdriveD:
@@ -176,6 +211,8 @@ class SelfdriveD:
     self.safe_mode = self.params.get_bool("SafeMode")
     self.personality = log.LongitudinalPersonality.relaxed if self.safe_mode else self.params.get("LongitudinalPersonality", return_default=True)
     self.recalibrating_seen = False
+    self.dm_lockout_set = False
+    self.dm_uncertain_alerted = False
     self.state_machine = StateMachine()
     self.rk = Ratekeeper(100, print_delay_threshold=None)
     self.prev_pedal_long_active = False
@@ -210,6 +247,13 @@ class SelfdriveD:
     self.display_timer = 0
     self.last_below_steer_speed_alert_time = -float("inf")
     self.last_steer_saturated_alert_time = -float("inf")
+    self.forcing_stop_chime_played = False
+
+    # Once-per-drive latch for belowSteerSpeed — shows the bottom alert once per
+    # onroad session for the first below-min crossing, suppresses subsequent ones.
+    self.below_steer_shown_this_drive = False
+    self.below_steer_has_been_above_min = False
+    self.below_steer_showing = False
 
     self.starpilot_events_prev = []
 
@@ -252,6 +296,11 @@ class SelfdriveD:
     switchback_mode_enabled = self.params_memory.get_bool("SwitchbackModeEnabled")
     switchback_mode_cooldown = max(0.0, float(getattr(self.starpilot_toggles, "switchback_mode_cooldown", 0.0)))
 
+    if not self.sm['deviceState'].started:
+      self.below_steer_shown_this_drive = False
+      self.below_steer_has_been_above_min = False
+      self.below_steer_showing = False
+
     if not self.sm['deviceState'].started or not switchback_mode_enabled:
       self.last_below_steer_speed_alert_time = -float("inf")
       self.last_steer_saturated_alert_time = -float("inf")
@@ -261,7 +310,7 @@ class SelfdriveD:
       self.startup_event = None
 
     if self.sm.recv_frame['lateralManeuverPlan'] > 0:
-      self.events.add(EventName.lateralManeuver)
+      self.starpilot_events.add(StarPilotEventName.lateralManeuver)
       self.startup_event = None
     elif self.sm.recv_frame['alertDebug'] > 0:
       self.events.add(EventName.longitudinalManeuver)
@@ -292,41 +341,74 @@ class SelfdriveD:
       return
 
     # Block resume if cruise never previously enabled
-    resume_pressed = any(be.type in (ButtonType.accelCruise, ButtonType.accelHardCruise, ButtonType.resumeCruise) for be in CS.buttonEvents)
+    resume_pressed = any(be.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for be in CS.buttonEvents)
     if not self.CP.pcmCruise and CS.vCruise > 250 and resume_pressed:
       self.events.add(EventName.resumeBlocked)
 
     if not self.CP.notCar:
-      self.events.add_from_msg(self.sm['driverMonitoringState'].events)
+      # Block engaging until lockout times out or ignition reset
+      if self.sm['driverMonitoringState'].lockout and not self.dm_lockout_set:
+        self.params.put_bool("DriverTooDistracted", True)
+        self.dm_lockout_set = True
+      elif not self.sm['driverMonitoringState'].lockout and self.dm_lockout_set:
+        self.params.remove("DriverTooDistracted")
+        self.dm_lockout_set = False
+      # No entry conditions
+      if self.sm['driverMonitoringState'].lockout or self.sm['driverMonitoringState'].alwaysOnLockout:
+        self.events.add(EventName.tooDistracted)
+      # Alerts
+      vision_dm = self.sm['driverMonitoringState'].activePolicy == MonitoringPolicy.vision
+      if self.sm['driverMonitoringState'].alertLevel == AlertLevel.one:
+        self.events.add(EventName.driverDistracted1 if vision_dm else EventName.driverUnresponsive1)
+      elif self.sm['driverMonitoringState'].alertLevel == AlertLevel.two:
+        self.events.add(EventName.driverDistracted2 if vision_dm else EventName.driverUnresponsive2)
+      elif self.sm['driverMonitoringState'].alertLevel == AlertLevel.three:
+        self.events.add(EventName.driverDistracted3 if vision_dm else EventName.driverUnresponsive3)
+      # Warn consistent DM uncertainty
+      if self.sm['driverMonitoringState'].visionPolicyState.uncertainOffroadAlertPercent >= 100 and not self.dm_uncertain_alerted:
+        set_offroad_alert("Offroad_DriverMonitoringUncertain", True)
+        self.dm_uncertain_alerted = True
 
     # Add car events, ignore if CAN isn't valid
     if CS.canValid:
       car_events = self.car_events.update(CS, self.CS_prev, self.sm['carControl']).to_msg()
-      has_below_steer_speed_event = any(e.name.raw == EventName.belowSteerSpeed for e in car_events)
-      if has_below_steer_speed_event:
+
+      # Once-per-drive latch for belowSteerSpeed — match old MinSteerSpeedBanner 1:1.
+      min_steer_speed = float(self.CP.minSteerSpeed)
+      under_min = min_steer_speed > 0.0 and float(CS.vEgo) < min_steer_speed
+
+      if not under_min:
+        self.below_steer_has_been_above_min = True
+
+      was_under_min_prev = min_steer_speed > 0.0 and float(self.CS_prev.vEgo) < min_steer_speed
+      crossed_below = under_min and not was_under_min_prev
+      if (not self.below_steer_shown_this_drive) and crossed_below and self.below_steer_has_been_above_min:
+        self.below_steer_shown_this_drive = True
+        self.below_steer_showing = True
+
+      if self.below_steer_showing and not under_min:
+        self.below_steer_showing = False
+
+      # Fully own the event — strip brand emissions, inject our own while active.
+      car_events = [e for e in car_events if e.name.raw != EventName.belowSteerSpeed]
+      show_alert = self.below_steer_showing and under_min
+
+      # Switchback cooldown: rate-limits the alert when car sits below min.
+      if show_alert and switchback_mode_enabled and switchback_mode_cooldown > 0.0:
         now = time.monotonic()
-        cooldown_active = switchback_mode_enabled and switchback_mode_cooldown > 0.0
-        if cooldown_active and (now - self.last_below_steer_speed_alert_time) < switchback_mode_cooldown:
-          car_events = [e for e in car_events if e.name.raw != EventName.belowSteerSpeed]
-        elif switchback_mode_enabled:
+        if (now - self.last_below_steer_speed_alert_time) < switchback_mode_cooldown:
+          show_alert = False
+        else:
           self.last_below_steer_speed_alert_time = now
+
+      if show_alert:
+        self.events.add(EventName.belowSteerSpeed)
+
       self.events.add_from_msg(car_events)
 
-      if (self.CP.brand == "tesla"
-          and self.CP.carFingerprint == "TESLA_MODEL_S_PREAP"
-          and self.CP.openpilotLongitudinalControl
-          and not self.CP.pcmCruise):
-        pedal_long_active = bool(CS.cruiseState.enabled and getattr(CS, 'pedalLongActive', False))
-        if pedal_long_active and not self.prev_pedal_long_active:
-          self.events.add(EventName.pedalCruiseEnabled)
-        elif self.prev_pedal_long_active and not pedal_long_active:
-          self.events.add(EventName.pedalCruiseDisabled)
-        self.prev_pedal_long_active = pedal_long_active
-
-        if getattr(CS, 'pedalMaxRegen', False):
-          self.events.add(EventName.pedalMaxRegen)
-      else:
-        self.prev_pedal_long_active = False
+      self.prev_pedal_long_active = add_tesla_preap_starpilot_events(
+        self.CP, CS, self.sm['starpilotCarState'], self.starpilot_events, self.prev_pedal_long_active
+      )
 
       if (getattr(self.starpilot_toggles, "nostalgia_mode", False) and
           self.CP.openpilotLongitudinalControl and
@@ -542,8 +624,9 @@ class SelfdriveD:
         self.CP.openpilotLongitudinalControl and not self.CP.pcmCruise
       )
       effective_pcm_cruise = self.CP.pcmCruise or preap_software_cruise
+      jeep_brake_hold = self.CP.brand == "chrysler" and getattr(CS, "brakeHoldActive", False)
       cruise_mismatch = should_flag_cruise_mismatch(self.CP, CS.cruiseState.enabled, self.enabled,
-                                                    effective_pcm_cruise) and not pacifica_hybrid_aol
+                                                    effective_pcm_cruise) and not pacifica_hybrid_aol and not jeep_brake_hold
       self.cruise_mismatch_counter = self.cruise_mismatch_counter + 1 if cruise_mismatch else 0
       if self.cruise_mismatch_counter > int(6. / DT_CTRL):
         self.events.add(EventName.cruiseMismatch)
@@ -753,14 +836,19 @@ class SelfdriveD:
     fpss.alertSize = self.starpilot_AM.current_alert.alert_size
     fpss.alertStatus = self.starpilot_AM.current_alert.alert_status
     fpss.alertType = self.starpilot_AM.current_alert.alert_type
-    fpss.alertSound = self.starpilot_AM.current_alert.audible_alert
+    fpss.alertSound, self.forcing_stop_chime_played = filter_forcing_stop_alert_sound(
+      fpss.alertType,
+      self.starpilot_AM.current_alert.audible_alert,
+      bool(self.sm["starpilotPlan"].forcingStop),
+      self.forcing_stop_chime_played,
+    )
 
     self.pm.send('starpilotSelfdriveState', fpss_msg)
 
     if (self.sm.frame % int(1. / DT_CTRL) == 0) or (self.starpilot_events.names != self.starpilot_events_prev):
-      fpce_send = messaging.new_message('starpilotOnroadEvents', len(self.starpilot_events))
+      fpce_send = messaging.new_message('starpilotOnroadEvents')
       fpce_send.valid = True
-      fpce_send.starpilotOnroadEvents = self.starpilot_events.to_msg()
+      fpce_send.starpilotOnroadEvents.events = self.starpilot_events.to_msg()
       self.pm.send('starpilotOnroadEvents', fpce_send)
     self.starpilot_events_prev = self.starpilot_events.names.copy()
 

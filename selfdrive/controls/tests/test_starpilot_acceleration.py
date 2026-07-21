@@ -8,6 +8,7 @@ from openpilot.starpilot.common.accel_profile import ACCELERATION_PROFILES, DECE
 from openpilot.starpilot.controls.lib.starpilot_acceleration import (
   A_CRUISE_MIN_ECO,
   StarPilotAcceleration,
+  get_max_accel_standard,
   get_slc_shaped_min_accel,
 )
 
@@ -149,3 +150,17 @@ def test_slc_coast_window_disabled_when_target_drop_is_not_slc():
   accel.update(57.0 * CV.MPH_TO_MS, sm, make_toggles(deceleration_profile=DECELERATION_PROFILES["ECO"]))
 
   assert accel.min_accel == pytest.approx(A_CRUISE_MIN_ECO)
+
+
+def test_truck_tuning_standard_profile_keeps_non_binding_launch_headroom():
+  assert get_max_accel_standard(0.0, ev_tuning=False, truck_tuning=True) == pytest.approx(6.0)
+  assert get_max_accel_standard(5.0, ev_tuning=False, truck_tuning=True) == pytest.approx(1.10)
+
+
+def test_truck_tuning_standard_profile_uses_proven_cruise_limits():
+  assert get_max_accel_standard(15.0, ev_tuning=False, truck_tuning=True) == pytest.approx(0.60)
+  assert get_max_accel_standard(25.0, ev_tuning=False, truck_tuning=True) == pytest.approx(0.45)
+
+
+def test_truck_tuning_standard_profile_limits_highway_run_up():
+  assert get_max_accel_standard(40.0, ev_tuning=False, truck_tuning=True) == pytest.approx(0.35)

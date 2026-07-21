@@ -73,7 +73,7 @@ def _save_status(params: Params, status):
     history = []
   status_copy["history"] = [str(line) for line in history if str(line).strip()][-120:]
   status_copy["updatedAtSec"] = float(status_copy.get("updatedAtSec") or time.monotonic())
-  params.put_nonblocking(STATUS_PARAM, json.dumps(status_copy, separators=(",", ":")))
+  params.put_nonblocking(STATUS_PARAM, status_copy)
   return status_copy
 
 
@@ -199,7 +199,7 @@ def main():
       "uiText2": "Set target speed and let lateral stabilize.",
       "updatedAtSec": time.monotonic(),
     })
-    _append_history(status, "Armed from The Pond. Stabilize on a straight, flat road to start.")
+    _append_history(status, "Armed from The Galaxy. Stabilize on a straight, flat road to start.")
 
   last_status_signature = ""
   last_status_write = 0.0

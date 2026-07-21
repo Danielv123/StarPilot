@@ -521,7 +521,7 @@ class GuiApplication:
       self._render_texture_width = max(1, int(round(self._scaled_width * self._pixel_scale_x)))
       self._render_texture_height = max(1, int(round(self._scaled_height * self._pixel_scale_y)))
 
-      needs_render_texture = self._scale != 1.0 or BURN_IN_MODE or RECORD or MICI_FORCE_RENDER_TEXTURE
+      needs_render_texture = (self._scale != 1.0 and not PC) or BURN_IN_MODE or RECORD or MICI_FORCE_RENDER_TEXTURE
       if PC and self._scale != 1.0:
         rl.set_mouse_scale(1 / self._scale, 1 / self._scale)
       if PC:
@@ -720,7 +720,7 @@ class GuiApplication:
       texture_obj = self._load_texture_from_image(image_obj)
 
     # Set logical size so widget layout math stays at 1x coordinates.
-    if self._render_texture is not None and width is not None and height is not None:
+    if width is not None and height is not None:
       texture_obj.width = width
       texture_obj.height = height
 
@@ -736,7 +736,7 @@ class GuiApplication:
       rl.image_alpha_premultiply(image)
 
     # Scale up load size for sharper rendering, capped at source resolution.
-    if self._render_texture is not None and width is not None and height is not None:
+    if width is not None and height is not None:
       width = min(int(width * self._scale * self._pixel_scale_x), image.width)
       height = min(int(height * self._scale * self._pixel_scale_y), image.height)
 
@@ -989,17 +989,19 @@ class GuiApplication:
     rl.draw_text_ex = _draw_text_ex_scaled
 
   def _patch_scissor_mode(self):
-    if self._scale == 1.0:
-      return
-
     if not hasattr(rl, "_orig_begin_scissor_mode"):
       rl._orig_begin_scissor_mode = rl.begin_scissor_mode
 
+    scale_x = self._scale * (self._pixel_scale_x if self._render_texture else 1.0)
+    scale_y = self._scale * (self._pixel_scale_y if self._render_texture else 1.0)
+    if scale_x == 1.0 and scale_y == 1.0:
+      rl.begin_scissor_mode = rl._orig_begin_scissor_mode
+      return
+
     def _begin_scissor_mode_scaled(x, y, width, height):
       return rl._orig_begin_scissor_mode(
-        int(x * self._scale * self._pixel_scale_x), int(y * self._scale * self._pixel_scale_y),
-        int(math.ceil(width * self._scale * self._pixel_scale_x)),
-        int(math.ceil(height * self._scale * self._pixel_scale_y)))
+        int(x * scale_x), int(y * scale_y),
+        int(math.ceil(width * scale_x)), int(math.ceil(height * scale_y)))
 
     rl.begin_scissor_mode = _begin_scissor_mode_scaled
 

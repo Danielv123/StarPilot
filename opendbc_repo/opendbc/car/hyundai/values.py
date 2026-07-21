@@ -54,6 +54,9 @@ class CarControllerParams:
     if CP.flags & HyundaiFlags.CANFD_ANGLE_STEERING:
       self.STEER_THRESHOLD = 175
 
+    elif CP.flags & HyundaiFlags.CANFD:
+      pass
+
     # To determine the limit for your car, find the maximum value that the stock LKAS will request.
     # If the max stock LKAS request is <384, add your car to this list.
     elif CP.carFingerprint in (CAR.GENESIS_G80, CAR.HYUNDAI_ELANTRA, CAR.HYUNDAI_ELANTRA_GT_I30, CAR.HYUNDAI_IONIQ,
@@ -255,6 +258,14 @@ class CAR(Platforms):
     CarSpecs(mass=1675, wheelbase=2.885, steerRatio=14.5),
     flags=HyundaiFlags.HYBRID,
   )
+  HYUNDAI_AZERA_HEV_7TH_GEN = HyundaiCanFDPlatformConfig(
+    [
+      HyundaiCarDocs("Hyundai Azera Hybrid (with HDA II & LFA2) 2025", "Highway Driving Assist II & Lane Follow Assist 2",
+                     car_parts=CarParts.common([CarHarness.hyundai_s])),
+    ],
+    CarSpecs(mass=1720, wheelbase=2.895, steerRatio=13.5),
+    flags=HyundaiFlags.CANFD_ANGLE_STEERING,
+  )
   HYUNDAI_ELANTRA = HyundaiPlatformConfig(
     [
       # TODO: 2017-18 could be Hyundai G
@@ -278,11 +289,24 @@ class CAR(Platforms):
     CarSpecs(mass=2800 * CV.LB_TO_KG, wheelbase=2.72, steerRatio=12.9, tireStiffnessFactor=0.65),
     flags=HyundaiFlags.CHECKSUM_CRC8,
   )
+  HYUNDAI_ELANTRA_2024 = HyundaiPlatformConfig(
+    [HyundaiCarDocs("Hyundai Elantra 2024-25", car_parts=CarParts.common([CarHarness.hyundai_k]))],
+    CarSpecs(mass=2797 * CV.LB_TO_KG, wheelbase=2.72, steerRatio=12.9, tireStiffnessFactor=0.65),
+    flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC,
+  )
   HYUNDAI_ELANTRA_HEV_2021 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Elantra Hybrid 2021-23", video="https://youtu.be/_EdYQtV52-c",
                     car_parts=CarParts.common([CarHarness.hyundai_k]))],
     CarSpecs(mass=3017 * CV.LB_TO_KG, wheelbase=2.72, steerRatio=12.9, tireStiffnessFactor=0.65),
     flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.HYBRID,
+  )
+  HYUNDAI_ELANTRA_HEV_2024 = HyundaiPlatformConfig(
+    [
+      HyundaiCarDocs("Hyundai Elantra Hybrid 2024-26", car_parts=CarParts.common([CarHarness.hyundai_k])),
+      HyundaiCarDocs("Hyundai i30 Hybrid 2024", car_parts=CarParts.common([CarHarness.hyundai_k])),
+    ],
+    HYUNDAI_ELANTRA_HEV_2021.specs,
+    flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC | HyundaiFlags.HYBRID,
   )
   HYUNDAI_GENESIS = HyundaiPlatformConfig(
     [
@@ -728,7 +752,7 @@ class CAR(Platforms):
   KIA_XCEED_PHEV = HyundaiPlatformConfig(
     [HyundaiCarDocs("Kia XCeed Plug-in Hybrid 2021", car_parts=CarParts.common([CarHarness.hyundai_b]))],
     CarSpecs(mass=1650, wheelbase=2.65, steerRatio=13.75, tireStiffnessFactor=0.5),
-    flags=HyundaiFlags.LEGACY | HyundaiFlags.HYBRID,
+    flags=HyundaiFlags.LEGACY | HyundaiFlags.HYBRID | HyundaiFlags.MANDO_RADAR,
   )
   KIA_EV6 = HyundaiCanFDPlatformConfig(
     [
@@ -736,7 +760,7 @@ class CAR(Platforms):
       HyundaiCarDocs("Kia EV6 (without HDA II) 2022-24", "Highway Driving Assist", car_parts=CarParts.common([CarHarness.hyundai_l])),
       HyundaiCarDocs("Kia EV6 (with HDA II) 2022-24", "Highway Driving Assist II", car_parts=CarParts.common([CarHarness.hyundai_p]))
     ],
-    CarSpecs(mass=2055, wheelbase=2.9, steerRatio=16, tireStiffnessFactor=0.65),
+    CarSpecs(mass=2055, wheelbase=2.9, steerRatio=14.25, tireStiffnessFactor=0.65),
     flags=HyundaiFlags.EV,
     radar_dbc=HYUNDAI_MRR30_RADAR_DBC,
   )
@@ -744,7 +768,7 @@ class CAR(Platforms):
     [
       HyundaiCarDocs("Kia EV6 (with HDA I) 2025", "Highway Driving Assist I", car_parts=CarParts.common([CarHarness.hyundai_p]))
     ],
-    CarSpecs(mass=2055, wheelbase=2.9, steerRatio=16, tireStiffnessFactor=0.65),
+    CarSpecs(mass=2055, wheelbase=2.9, steerRatio=14.26, tireStiffnessFactor=0.65),
     flags=HyundaiFlags.EV | HyundaiFlags.CANFD_ANGLE_STEERING,
     radar_dbc=HYUNDAI_MRR30_RADAR_DBC,
   )
@@ -911,6 +935,10 @@ CANCEL_BUTTON_ENABLE_CARS = frozenset({
   CAR.HYUNDAI_PALISADE_2023,
 })
 
+KIA_EV6_GT_LINE_LONG_TUNING_VDS_PREFIXES = frozenset({
+  "C4DLC",
+})
+
 
 # These classic HKG platforms publish the LKAS button on CLU13 over the alt bus.
 # Keep G90 excluded until its alt-bus path is route-proven without the recent
@@ -928,6 +956,11 @@ ALT_BUS_LDA_BUTTON_SWL_STAT_CARS = frozenset({
 
 def hyundai_cancel_button_enables_cruise(car_fingerprint) -> bool:
   return car_fingerprint in CANCEL_BUTTON_ENABLE_CARS
+
+
+def kia_ev6_gt_line_longitudinal_tuning(car_fingerprint, vin: str) -> bool:
+  return car_fingerprint == CAR.KIA_EV6 and isinstance(vin, str) and \
+    len(vin) == 17 and vin[3:8] in KIA_EV6_GT_LINE_LONG_TUNING_VDS_PREFIXES
 
 
 def get_platform_codes(fw_versions: list[bytes]) -> set[tuple[bytes, bytes | None]]:
@@ -1117,6 +1150,7 @@ CANFD_RADAR_SCC_CAR = CAR.with_flags(HyundaiFlags.RADAR_SCC)  # TODO: merge with
 # CAN-FD cars with ADAS ECUs that work with the communication-control path.
 CANFD_SECURITYACCESS_CAR = {CAR.HYUNDAI_IONIQ_5, CAR.HYUNDAI_IONIQ_6, CAR.HYUNDAI_KONA_EV_2ND_GEN}
 CANFD_UNSUPPORTED_LONGITUDINAL_CAR = CAR.with_flags(HyundaiFlags.CANFD_NO_RADAR_DISABLE) - CANFD_SECURITYACCESS_CAR  # TODO: merge with UNSUPPORTED_LONGITUDINAL_CAR
+CANFD_ANGLE_LONGITUDINAL_CAR = set()
 CANFD_RADAR_LIVE_LONGITUDINAL_CAR = {CAR.HYUNDAI_IONIQ_5, CAR.HYUNDAI_IONIQ_6, CAR.KIA_EV6, CAR.GENESIS_GV60_EV_1ST_GEN}
 RADAR_LIVE_LONGITUDINAL_CAR = CANFD_RADAR_LIVE_LONGITUDINAL_CAR | {
   CAR.HYUNDAI_IONIQ,
@@ -1126,6 +1160,7 @@ RADAR_LIVE_LONGITUDINAL_CAR = CANFD_RADAR_LIVE_LONGITUDINAL_CAR | {
   CAR.HYUNDAI_SANTA_FE_PHEV_2022,
   CAR.HYUNDAI_SONATA,
   CAR.HYUNDAI_SONATA_HYBRID,
+  CAR.KIA_XCEED_PHEV,
   CAR.GENESIS_G90,
 }
 
@@ -1142,5 +1177,7 @@ NON_SCC_CAR = CAR.with_flags(HyundaiFlags.NON_SCC)
 # TODO: another PR with (HyundaiFlags.LEGACY | HyundaiFlags.UNSUPPORTED_LONGITUDINAL | HyundaiFlags.CAMERA_SCC |
 #       HyundaiFlags.CANFD_RADAR_SCC | HyundaiFlags.CANFD_NO_RADAR_DISABLE | )
 UNSUPPORTED_LONGITUDINAL_CAR = CAR.with_flags(HyundaiFlags.LEGACY) | CAR.with_flags(HyundaiFlags.UNSUPPORTED_LONGITUDINAL)
+
+LEGACY_LONGITUDINAL_CAR = {CAR.KIA_XCEED_PHEV}
 
 DBC = CAR.create_dbc_map()

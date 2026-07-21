@@ -171,7 +171,7 @@ class CAR(Platforms):
       ToyotaCarDocs("Toyota Camry Hybrid 2018-20", video="https://www.youtube.com/watch?v=Q2DYY0AWKgk"),
     ],
     CarSpecs(mass=3400. * CV.LB_TO_KG, wheelbase=2.82448, steerRatio=13.7, tireStiffnessFactor=0.7933),
-    dbc_dict('toyota_nodsu_pt_generated', 'toyota_adas'),
+    dbc_dict('toyota_nodsu_pt_generated', 'toyota_radar_dsu_tssp'),
     flags=ToyotaFlags.NO_DSU,
   )
   TOYOTA_CAMRY_TSS2 = ToyotaTSS2PlatformConfig( # TSS 2.5
@@ -201,6 +201,11 @@ class CAR(Platforms):
   TOYOTA_COROLLA = PlatformConfig(
     [ToyotaCarDocs("Toyota Corolla 2017-19")],
     CarSpecs(mass=2860. * CV.LB_TO_KG, wheelbase=2.7, steerRatio=18.27, tireStiffnessFactor=0.444),
+    dbc_dict('toyota_new_mc_pt_generated', 'toyota_adas'),
+  )
+  TOYOTA_MATRIX_RETROFIT = PlatformConfig(
+    [ToyotaCommunityCarDocs("Toyota Matrix 2005 Retrofit", package="Custom retrofit")],
+    TOYOTA_COROLLA.specs,
     dbc_dict('toyota_new_mc_pt_generated', 'toyota_adas'),
   )
   # LSS2 Lexus UX Hybrid is same as a TSS2 Corolla Hybrid
@@ -550,7 +555,7 @@ FW_QUERY_CONFIG = FwQueryConfig(
   ],
   non_essential_ecus={
     # FIXME: On some models, abs can sometimes be missing
-    Ecu.abs: [CAR.TOYOTA_RAV4, CAR.TOYOTA_COROLLA, CAR.TOYOTA_HIGHLANDER, CAR.TOYOTA_SIENNA, CAR.LEXUS_IS, CAR.TOYOTA_ALPHARD_TSS2],
+    Ecu.abs: [CAR.TOYOTA_RAV4, CAR.TOYOTA_COROLLA, CAR.TOYOTA_MATRIX_RETROFIT, CAR.TOYOTA_HIGHLANDER, CAR.TOYOTA_SIENNA, CAR.LEXUS_IS, CAR.TOYOTA_ALPHARD_TSS2],
     # On some models, the engine can show on two different addresses
     Ecu.engine: [CAR.TOYOTA_HIGHLANDER, CAR.TOYOTA_CAMRY, CAR.TOYOTA_COROLLA_TSS2, CAR.TOYOTA_CHR, CAR.TOYOTA_CHR_TSS2, CAR.LEXUS_IS,
                  CAR.LEXUS_IS_TSS2, CAR.LEXUS_RC, CAR.LEXUS_NX, CAR.LEXUS_NX_TSS2, CAR.LEXUS_RX, CAR.LEXUS_RX_TSS2],
@@ -591,7 +596,8 @@ STEER_THRESHOLD = 100
 
 # These cars have non-standard EPS torque scale factors. All others are 73
 EPS_SCALE = defaultdict(lambda: 73,
-                        {CAR.TOYOTA_PRIUS: 66, CAR.TOYOTA_COROLLA: 88, CAR.LEXUS_IS: 77, CAR.LEXUS_RC: 77, CAR.LEXUS_CTH: 100, CAR.TOYOTA_PRIUS_V: 100})
+                        {CAR.TOYOTA_PRIUS: 66, CAR.TOYOTA_COROLLA: 88, CAR.TOYOTA_MATRIX_RETROFIT: 88,
+                         CAR.LEXUS_IS: 77, CAR.LEXUS_RC: 77, CAR.LEXUS_CTH: 100, CAR.TOYOTA_PRIUS_V: 100})
 
 # Toyota/Lexus Safety Sense 2.0 and 2.5
 TSS2_CAR = CAR.with_flags(ToyotaFlags.TSS2)

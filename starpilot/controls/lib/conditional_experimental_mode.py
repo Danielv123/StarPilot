@@ -55,8 +55,12 @@ class ConditionalExperimentalMode:
   SLOW_LEAD_CONTINUITY_MIN_EGO = 2.5
   SLOW_LEAD_CONTINUITY_HOLD_TIME = 1.25
   SLOW_LEAD_FORCE_CLEAR_TIME = 0.75
+  SLOW_LEAD_MODE_RELEASE_HOLD_TIME = 1.5
   SLOW_LEAD_MIN_CLOSING_SPEED = 0.75
   SLOW_LEAD_CLEAR_FASTER_FACTOR = 0.5
+  POST_STOP_LAUNCH_TRIGGER_SUPPRESS_TIME = 2.0
+  TURN_STOP_LIGHT_VETO_MAX_SPEED = 15 * CV.MPH_TO_MS
+  TURN_STOP_LIGHT_VETO_STEERING_ANGLE = 45.0
 
   # ===== END TUNING PARAMETERS =====
 
@@ -101,12 +105,24 @@ class ConditionalExperimentalMode:
     self.prev_experimental_mode = False  # For hysteresis
     self.mode_hold_until = 0.0
     self.mode_false_since = 0.0
+    self.slow_lead_mode_hold_until = 0.0
     self._prev_ce_status = None
-    self.close_stopped_lead_since = 0.0
+    self.prev_standstill = False
+    self.prev_standstill_stop_hold = False
+    self.post_stop_launch_trigger_suppress_until = 0.0
 
   def update(self, v_ego, sm, starpilot_toggles):
     now = time.monotonic()
     standstill = bool(sm["carState"].standstill)
+    current_standstill_stop_hold = False
+    released_standstill_stop_hold = self.prev_standstill and self.prev_standstill_stop_hold and not standstill
+
+    if released_standstill_stop_hold:
+      self.post_stop_launch_trigger_suppress_until = now + self.POST_STOP_LAUNCH_TRIGGER_SUPPRESS_TIME
+      self.mode_hold_until = 0.0
+      self.mode_false_since = 0.0
+      self.slow_lead_mode_hold_until = 0.0
+      self.prev_experimental_mode = False
 
     if not standstill:
       self.standstill_stop_reason = None
@@ -120,13 +136,28 @@ class ConditionalExperimentalMode:
       if triggered:
         self.mode_hold_until = now + self.CEM_TRANSITION_GUARD_TIME
         self.mode_false_since = 0.0
-      elif self.mode_false_since == 0.0:
+        if self.status_value == CEStatus["LEAD"]:
+          self.slow_lead_mode_hold_until = now + self.SLOW_LEAD_MODE_RELEASE_HOLD_TIME
+        else:
+          self.slow_lead_mode_hold_until = 0.0
+      elif self.prev_experimental_mode and self.mode_false_since == 0.0:
         self.mode_false_since = now
+      elif not self.prev_experimental_mode:
+        self.mode_false_since = 0.0
 
       hold_active = now < self.mode_hold_until
       transition_buffer_active = self.mode_false_since != 0.0 and (now - self.mode_false_since) < self.CEM_TRANSITION_BUFFER_TIME
+      slow_lead_hold_active = bool(
+        starpilot_toggles.conditional_lead and
+        now < self.slow_lead_mode_hold_until and
+        self.has_credible_slow_lead_context(v_ego)
+      )
+      if slow_lead_hold_active and not triggered:
+        self.status_value = CEStatus["LEAD"]
+      elif not slow_lead_hold_active:
+        self.slow_lead_mode_hold_until = 0.0
 
-      self.experimental_mode = triggered or hold_active or transition_buffer_active
+      self.experimental_mode = triggered or slow_lead_hold_active or hold_active or transition_buffer_active
       self.prev_experimental_mode = self.experimental_mode
       ce_write_value = self.status_value if self.experimental_mode else CEStatus["OFF"]
       if ce_write_value != self._prev_ce_status:
@@ -135,12 +166,14 @@ class ConditionalExperimentalMode:
     elif not is_manual_ce_status(self.status_value):
       self.mode_hold_until = 0.0
       self.mode_false_since = 0.0
+      self.slow_lead_mode_hold_until = 0.0
 
       # Keep the stop-light path live at standstill so EXP stays pinned for a red
       # light / stop sign. Stop signs latch until pedal, while stop lights can
       # immediately release to CHILL when the model clears the stop.
       self.stop_sign_and_light(v_ego, sm, starpilot_toggles.conditional_model_stop_time)
       standstill_stop_hold = self.get_standstill_stop_hold(sm)
+      current_standstill_stop_hold = standstill_stop_hold
 
       self.experimental_mode = standstill_stop_hold
       self.prev_experimental_mode = self.experimental_mode
@@ -152,24 +185,30 @@ class ConditionalExperimentalMode:
     else:
       self.mode_hold_until = 0.0
       self.mode_false_since = 0.0
+      self.slow_lead_mode_hold_until = 0.0
       self._prev_ce_status = None
       self.experimental_mode = self.status_value == CEStatus["USER_OVERRIDDEN"]
       self.prev_experimental_mode = self.experimental_mode
       self.stop_light_detected &= not is_manual_ce_status(self.status_value)
       self.stop_light_filter.x = 0
 
-  # At standstill behind a close, stopped lead, prefer Chill over CEM.
-  # Why: CEM is slow to release when the lead pulls away (waits on stop-light
-  # filter + STOP_LIGHT_DETECTED_HOLD_TIME). Chill reacts to lead departure faster.
-  STANDSTILL_LEAD_OVERRIDE_MAX_DISTANCE = 15.0  # meters
-  STANDSTILL_LEAD_OVERRIDE_MAX_SPEED = 1.0      # m/s
-  # Persistence required before handing off CEM->Chill. Cross-traffic (cars passing
-  # perpendicular in front) briefly registers as a close, stopped lead and would
-  # otherwise flap CEM out of EXP. Real queue-mates persist much longer than this.
-  STANDSTILL_LEAD_OVERRIDE_PERSIST_TIME = 0.5  # seconds
+    self.prev_standstill = standstill
+    self.prev_standstill_stop_hold = current_standstill_stop_hold
+
+  def has_credible_slow_lead_context(self, v_ego):
+    lead = self.starpilot_planner.lead_one
+    if lead is None or not bool(getattr(lead, "status", False)):
+      return False
+
+    lead_radar = bool(getattr(lead, "radar", False))
+    lead_prob = float(getattr(lead, "modelProb", 1.0 if lead_radar else 0.0))
+    if not lead_radar and lead_prob < self.SLOW_LEAD_CONTINUITY_MIN_MODEL_PROB:
+      return False
+
+    lead_distance = float(getattr(lead, "dRel", float("inf")))
+    return lead_distance < max(40.0, float(v_ego) * self.SLOW_LEAD_CONTINUITY_MAX_DISTANCE_TIME)
 
   def get_standstill_stop_hold(self, sm):
-    now = time.monotonic()
     dash_stop_sign = (
       bool(getattr(self.starpilot_planner.starpilot_vcruise, "stop_sign_confirmed", False)) or
       bool(getattr(sm["starpilotCarState"], "dashboardStopSign", 0) > 0)
@@ -180,7 +219,6 @@ class ConditionalExperimentalMode:
 
     if pedal_override or not bool(sm["carState"].standstill):
       self.standstill_stop_reason = None
-      self.close_stopped_lead_since = 0.0
       return False
 
     if dash_stop_sign:
@@ -192,29 +230,14 @@ class ConditionalExperimentalMode:
       self.standstill_stop_reason = None
 
     if self.standstill_stop_reason == "sign":
-      self.close_stopped_lead_since = 0.0
       return True
-
-    lead = getattr(self.starpilot_planner, "lead_one", None)
-    close_stopped_lead = bool(
-      lead is not None and
-      getattr(lead, "status", False) and
-      float(getattr(lead, "dRel", float("inf"))) < self.STANDSTILL_LEAD_OVERRIDE_MAX_DISTANCE and
-      float(getattr(lead, "vLead", float("inf"))) < self.STANDSTILL_LEAD_OVERRIDE_MAX_SPEED
-    )
-    if close_stopped_lead:
-      if self.close_stopped_lead_since == 0.0:
-        self.close_stopped_lead_since = now
-      if (now - self.close_stopped_lead_since) >= self.STANDSTILL_LEAD_OVERRIDE_PERSIST_TIME:
-        return False
-    else:
-      self.close_stopped_lead_since = 0.0
 
     return bool(self.stop_light_detected or force_stop_active or model_stopped)
 
   def check_conditions(self, v_ego, sm, starpilot_toggles):
-    below_speed = starpilot_toggles.conditional_limit > v_ego >= 1 and not self.starpilot_planner.starpilot_following.following_lead
-    below_speed_with_lead = starpilot_toggles.conditional_limit_lead > v_ego >= 1 and self.starpilot_planner.starpilot_following.following_lead
+    launch_trigger_suppressed = time.monotonic() < self.post_stop_launch_trigger_suppress_until
+    below_speed = not launch_trigger_suppressed and starpilot_toggles.conditional_limit > v_ego >= 1 and not self.starpilot_planner.starpilot_following.following_lead
+    below_speed_with_lead = not launch_trigger_suppressed and starpilot_toggles.conditional_limit_lead > v_ego >= 1 and self.starpilot_planner.starpilot_following.following_lead
     if below_speed or below_speed_with_lead:
       self.status_value = CEStatus["SPEED"]
       return True
@@ -229,7 +252,7 @@ class ConditionalExperimentalMode:
       self.status_value = CEStatus["CURVATURE"]
       return True
 
-    if starpilot_toggles.conditional_lead and self.slow_lead_detected and v_ego <= 35.31:
+    if not launch_trigger_suppressed and starpilot_toggles.conditional_lead and self.slow_lead_detected and v_ego <= 35.31:
       self.status_value = CEStatus["LEAD"]
       return True
 
@@ -327,6 +350,28 @@ class ConditionalExperimentalMode:
     self.slow_lead_continuity_until = 0.0
     self.prev_tracking_lead = tracking_lead
 
+  def reset_stop_light_state(self):
+    self.stop_light_filter.x = 0
+    self.stop_light_detected = False
+    self.stop_light_model_detected = False
+    self.stop_light_detected_hold_until = 0.0
+    self.lead_clear_filter.x = 0
+    self.stop_approach_hold_until = 0.0
+
+  def in_committed_turn_scene(self, v_ego, sm):
+    car_state = sm["carState"]
+    if bool(getattr(car_state, "standstill", False)) or v_ego > self.TURN_STOP_LIGHT_VETO_MAX_SPEED:
+      return False
+
+    if not (bool(getattr(car_state, "leftBlinker", False)) or bool(getattr(car_state, "rightBlinker", False))):
+      return False
+
+    steering_angle = abs(float(getattr(car_state, "steeringAngleDeg", 0.0)))
+    return bool(
+      steering_angle >= self.TURN_STOP_LIGHT_VETO_STEERING_ANGLE or
+      getattr(self.starpilot_planner, "driving_in_curve", False)
+    )
+
   def stop_sign_and_light(self, v_ego, sm, model_time):
     now = time.monotonic()
 
@@ -337,6 +382,10 @@ class ConditionalExperimentalMode:
     if getattr(self.starpilot_planner.starpilot_vcruise, 'stop_sign_confirmed', False):
       self.stop_light_filter.x = 1.0
       self.stop_light_detected = True
+      return
+
+    if self.in_committed_turn_scene(v_ego, sm):
+      self.reset_stop_light_state()
       return
 
     if not sm["starpilotCarState"].trafficModeEnabled:
@@ -368,11 +417,7 @@ class ConditionalExperimentalMode:
 
       # Disable stoplight detection at very high speeds to prevent false positives
       if speed_mph > 75:  # Disable above 75 mph
-        self.stop_light_filter.x = 0
-        self.stop_light_detected = False
-        self.stop_light_model_detected = False
-        self.stop_light_detected_hold_until = 0.0
-        self.lead_clear_filter.x = 0
+        self.reset_stop_light_state()
         return
 
       # Adjust model time with interp boost and gradual cap
@@ -442,9 +487,4 @@ class ConditionalExperimentalMode:
         (hold_context_ok and now < self.stop_light_detected_hold_until)
       )
     else:
-      self.stop_light_filter.x = 0
-      self.stop_light_detected = False
-      self.stop_light_model_detected = False
-      self.stop_light_detected_hold_until = 0.0
-      self.lead_clear_filter.x = 0
-      self.stop_approach_hold_until = 0.0
+      self.reset_stop_light_state()

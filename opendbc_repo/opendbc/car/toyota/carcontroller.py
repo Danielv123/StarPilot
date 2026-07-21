@@ -26,6 +26,7 @@ ACCEL_WINDDOWN_LIMIT = -4.0 * DT_CTRL * 3  # m/s^2 / frame
 ACCEL_PID_UNWIND = 0.03 * DT_CTRL * 3  # m/s^2 / frame
 PRIUS_INTEGRAL_MISMATCH_UNWIND = 8.0
 PRIUS_POSITIVE_FEEDFORWARD_SCALE = 0.7
+PRIUS_CRUISE_FEEDFORWARD_SCALE = 1.0
 
 MAX_PITCH_COMPENSATION = 1.5  # m/s^2
 TOYOTA_COAST_BRAKE_MIN_SPEED = 15.0  # m/s
@@ -33,6 +34,7 @@ TOYOTA_COAST_BRAKE_ENABLE_ACCEL = -0.10  # m/s^2
 TOYOTA_COAST_BRAKE_DISABLE_ACCEL = -0.06  # m/s^2
 TOYOTA_NO_LEAD_COAST_BRAKE_ACCEL = -0.30  # m/s^2
 TOYOTA_INTERCEPTOR_COMFORT_TARGET_ACCEL = 2.0  # m/s^2
+TOYOTA_NO_LEAD_CRUISE_SIGN_FLIP_MIN_SET_SPEED_ERROR = 0.35  # m/s
 
 # LKA limits
 # EPS faults if you apply torque while the steering rate is above 100 deg/s for too long
@@ -50,12 +52,18 @@ LOCK_CMD = b"\x40\x05\x30\x11\x00\x80\x00\x00"
 UNLOCK_CMD = b"\x40\x05\x30\x11\x00\x40\x00\x00"
 
 
+def is_ths_hybrid(CP) -> bool:
+  return CP.carFingerprint == CAR.TOYOTA_PRIUS or (
+    CP.carFingerprint == CAR.TOYOTA_CAMRY and bool(CP.flags & ToyotaFlags.HYBRID.value)
+  )
+
+
 def get_long_tune(CP, params):
   kiBP = [2., 5.]
   kiV = [0.5, 0.25]
   k_f = 1.0
 
-  if CP.carFingerprint == CAR.TOYOTA_PRIUS:
+  if is_ths_hybrid(CP):
     k_f = 0.8
   elif CP.carFingerprint not in TSS2_CAR:
     kiBP = [0., 5., 35.]
@@ -64,6 +72,11 @@ def get_long_tune(CP, params):
   return PIDController(0.0, (kiBP, kiV), k_f=k_f,
                        pos_limit=params.ACCEL_MAX, neg_limit=params.ACCEL_MIN,
                        rate=1 / (DT_CTRL * 3))
+
+
+def get_prius_positive_feedforward_scale(v_ego: float) -> float:
+  return float(np.interp(v_ego, [0.0, 8.0, 20.0],
+                         [PRIUS_POSITIVE_FEEDFORWARD_SCALE, PRIUS_POSITIVE_FEEDFORWARD_SCALE, PRIUS_CRUISE_FEEDFORWARD_SCALE]))
 
 
 def update_permit_braking(current: bool, net_acceleration_request_min: float, stopping: bool,
@@ -162,6 +175,19 @@ def limit_prius_stopping_accel(pcm_accel_cmd: float, target_accel: float, stoppi
   return max(pcm_accel_cmd, max(stop_floor, planner_floor))
 
 
+def limit_no_lead_cruise_sign_flip(pcm_accel_cmd: float, target_accel: float, stopping: bool, v_ego: float,
+                                   set_speed: float, lead_visible: bool) -> float:
+  if stopping or lead_visible or pcm_accel_cmd >= 0.0 or v_ego < TOYOTA_COAST_BRAKE_MIN_SPEED:
+    return pcm_accel_cmd
+  if target_accel < -0.02 or set_speed <= 0.0:
+    return pcm_accel_cmd
+
+  if float(set_speed) - float(v_ego) >= TOYOTA_NO_LEAD_CRUISE_SIGN_FLIP_MIN_SET_SPEED_ERROR:
+    return max(pcm_accel_cmd, 0.0)
+
+  return pcm_accel_cmd
+
+
 class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP):
     super().__init__(dbc_names, CP)
@@ -209,7 +235,7 @@ class CarController(CarControllerBase):
     max_interceptor_gas = 0.5
     if self.CP.carFingerprint == CAR.TOYOTA_RAV4:
       pedal_scale = float(np.interp(CS.out.vEgo, [0.0, MIN_ACC_SPEED, MIN_ACC_SPEED + PEDAL_TRANSITION], [0.15, 0.3, 0.0]))
-    elif self.CP.carFingerprint == CAR.TOYOTA_COROLLA:
+    elif self.CP.carFingerprint in (CAR.TOYOTA_COROLLA, CAR.TOYOTA_MATRIX_RETROFIT):
       pedal_scale = float(np.interp(CS.out.vEgo, [0.0, MIN_ACC_SPEED, MIN_ACC_SPEED + PEDAL_TRANSITION], [0.3, 0.4, 0.0]))
     else:
       pedal_scale = float(np.interp(CS.out.vEgo, [0.0, MIN_ACC_SPEED, MIN_ACC_SPEED + PEDAL_TRANSITION], [0.4, 0.5, 0.0]))
@@ -420,7 +446,7 @@ class CarController(CarControllerBase):
           else:
             # constantly slowly unwind integral to recover from large temporary errors
             unwind_rate = ACCEL_PID_UNWIND
-            if self.CP.carFingerprint == CAR.TOYOTA_PRIUS and pcm_accel_cmd * self.long_pid.i < 0.0:
+            if is_ths_hybrid(self.CP) and pcm_accel_cmd * self.long_pid.i < 0.0:
               unwind_rate *= PRIUS_INTEGRAL_MISMATCH_UNWIND
             self.long_pid.i -= unwind_rate * float(np.sign(self.long_pid.i))
 
@@ -435,9 +461,8 @@ class CarController(CarControllerBase):
 
             feedforward = pcm_accel_cmd
             if self.CP.carFingerprint == CAR.TOYOTA_PRIUS:
-              # Keep Prius positive handoffs softer than the stock tune, while restoring some launch authority.
               if feedforward > 0.0:
-                feedforward *= PRIUS_POSITIVE_FEEDFORWARD_SCALE
+                feedforward *= get_prius_positive_feedforward_scale(CS.out.vEgo)
 
             pcm_accel_cmd = self.long_pid.update(error_future,
                                                  speed=CS.out.vEgo,
@@ -459,14 +484,22 @@ class CarController(CarControllerBase):
         if self.CP.enableGasInterceptorDEPRECATED:
           pcm_accel_cmd = limit_interceptor_pcm_accel(pcm_accel_cmd, actuators.accel, stopping, CS.out.vEgo)
           pcm_accel_cmd = limit_interceptor_stopping_accel(pcm_accel_cmd, actuators.accel, stopping, CS.out.vEgo, bool(hud_control.leadVisible))
-        elif self.CP.carFingerprint == CAR.TOYOTA_PRIUS:
-          pcm_accel_cmd = limit_prius_stopping_accel(pcm_accel_cmd, actuators.accel, stopping, CS.out.vEgo, lead)
+        else:
+          pcm_accel_cmd = limit_no_lead_cruise_sign_flip(pcm_accel_cmd, actuators.accel, stopping, CS.out.vEgo,
+                                                         CS.out.cruiseState.speed, bool(hud_control.leadVisible))
+          if self.CP.carFingerprint == CAR.TOYOTA_PRIUS:
+            pcm_accel_cmd = limit_prius_stopping_accel(pcm_accel_cmd, actuators.accel, stopping, CS.out.vEgo, lead)
 
         pcm_accel_cmd = float(np.clip(pcm_accel_cmd, self.params.ACCEL_MIN, self.params.ACCEL_MAX))
 
         main_accel_cmd = 0. if self.CP.flags & ToyotaFlags.SECOC.value else pcm_accel_cmd
+        # Toyota's physical distance-button hold can collide with StarPilot's wheel-button
+        # actions and trip a temporary EPS fault. Suppress native long-press handling while
+        # the physical gap button is held so ACC only sees the hold as a plain button press.
+        allow_long_press = 0 if bool(getattr(CS, "distance_button", False)) else None
         can_sends.append(toyotacan.create_accel_command(self.packer, main_accel_cmd, pcm_cancel_cmd, self.permit_braking, self.standstill_req, lead,
-                                                        CS.acc_type, fcw_alert, self.distance_button, starpilot_toggles.reverse_cruise_increase))
+                                                        CS.acc_type, fcw_alert, self.distance_button, starpilot_toggles.reverse_cruise_increase,
+                                                        allow_long_press))
         if self.CP.flags & ToyotaFlags.SECOC.value:
           acc_cmd_2 = toyotacan.create_accel_command_2(self.packer, pcm_accel_cmd)
           acc_cmd_2 = add_mac(self.secoc_key,
@@ -485,7 +518,9 @@ class CarController(CarControllerBase):
         if self.CP.carFingerprint in UNSUPPORTED_DSU_CAR:
           can_sends.append(toyotacan.create_acc_cancel_command(self.packer))
         else:
-          can_sends.append(toyotacan.create_accel_command(self.packer, 0, pcm_cancel_cmd, True, False, lead, CS.acc_type, False, self.distance_button, starpilot_toggles.reverse_cruise_increase))
+          allow_long_press = 0 if bool(getattr(CS, "distance_button", False)) else None
+          can_sends.append(toyotacan.create_accel_command(self.packer, 0, pcm_cancel_cmd, True, False, lead, CS.acc_type, False,
+                                                          self.distance_button, starpilot_toggles.reverse_cruise_increase, allow_long_press))
 
     # *** hud ui ***
     if self.CP.carFingerprint != CAR.TOYOTA_PRIUS_V:

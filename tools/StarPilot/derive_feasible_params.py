@@ -5,7 +5,7 @@ derive_feasible_params.py
 Dynamically parses the OpenPilot/StarPilot codebase to cross-reference logically
 registered Param keys with UI string literals. This ensures that no hidden or
 dynamically-instantiated UI toggles are missed, outputting a highly accurate "Golden List"
-of parameters that can be safely modified by The Pond or other configuration interfaces.
+of parameters that can be safely modified by The Galaxy or other configuration interfaces.
 """
 
 import os
@@ -32,6 +32,7 @@ KNOWN_READ_ONLY = {
     "ClusterOffset", "Compass", "DeveloperSidebarMetric1", "DeveloperSidebarMetric2",
     "DeveloperSidebarMetric3", "DeveloperSidebarMetric4", "DeveloperSidebarMetric5",
     "DeveloperSidebarMetric6", "DeveloperSidebarMetric7", "DongleId",
+    "FLMActiveOverrides", "FLMActiveProfileId", "FLMTrialApplied", "FLMTrialBaseline",
     "StarPilotCarParamsPersistent", "StarPilotDrives", "StarPilotKilometers",
     "StarPilotMinutes", "GitBranch", "GitCommit", "GitCommitDate", "GitDiff",
     "GitRemote", "GithubSshKeys", "GithubUsername", "HardwareSerial", "IMEI",

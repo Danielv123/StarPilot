@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from cereal import log
 
-from openpilot.common.params import Params
+from openpilot.common.params import Params, UnknownKeyName
 
 SAFE_MODE_PARAM = "SafeMode"
 SAFE_MODE_BACKUP_PARAM = "SafeModeBackup"
@@ -26,6 +26,7 @@ SAFE_MODE_MANAGED_KEYS = (
   "AdvancedLateralTune",
   "ForceAutoTune",
   "ForceAutoTuneOff",
+  "UseAutoSteerDelay",
   "ForceTorqueController",
   "SteerDelay",
   "SteerFriction",
@@ -37,6 +38,7 @@ SAFE_MODE_MANAGED_KEYS = (
   "LaneDetectionWidth",
   "MinimumLaneChangeSpeed",
   "NudgelessLaneChange",
+  "NudgelessLaneChangeOnlyWhenEngaged",
   "OneLaneChange",
   "NNFF",
   "NNFFLite",
@@ -184,7 +186,9 @@ SAFE_MODE_MANAGED_KEYS = (
   "SubaruSNG",
   "SubaruSNGManualParkingBrake",
   "VoltSNG",
+  "JeepBrakeHold",
   "GMAutoHold",
+  "VoltOnePedalMode",
   "GMPedalLongitudinal",
   "GMDashSpoofOffsets",
   "LongPitch",
@@ -193,6 +197,7 @@ SAFE_MODE_MANAGED_KEYS = (
 SAFE_MODE_FIXED_VALUES = {
   "ExperimentalMode": False,
   "LongitudinalPersonality": int(log.LongitudinalPersonality.relaxed),
+  "UseAutoSteerDelay": True,
 }
 
 SAFE_MODE_STOCK_PARAM_MAP = {
@@ -244,18 +249,21 @@ def _safe_value(params: Params, key: str):
 
 
 def _apply_value(params_raw: Params, key: str, value) -> bool:
-  current = params_raw.get(key)
-  if value is None:
-    if current is None:
+  try:
+    current = params_raw.get(key)
+    if value is None:
+      if current is None:
+        return False
+      params_raw.remove(key)
+      return True
+
+    if current == value:
       return False
-    params_raw.remove(key)
+
+    params_raw.put(key, value)
     return True
-
-  if current == value:
+  except UnknownKeyName:
     return False
-
-  params_raw.put(key, value)
-  return True
 
 
 def _mark_toggle_update(params_memory: Params | None) -> None:

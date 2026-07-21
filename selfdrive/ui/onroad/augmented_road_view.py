@@ -1,20 +1,19 @@
 import time
 import numpy as np
 import pyray as rl
-from cereal import log, messaging
+from cereal import car, log, messaging
+from opendbc.car import structs
 from msgq.visionipc import VisionStreamType
-from openpilot.common.constants import CV
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.lib.starpilot_visuals import get_border_width
-from openpilot.selfdrive.ui.onroad.alert_renderer import AlertRenderer, ALERT_COLORS, AlertStatus
+from openpilot.selfdrive.ui.onroad.alert_renderer import AlertRenderer
 from openpilot.selfdrive.ui.onroad.driver_state import DriverStateRenderer
 from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.selfdrive.ui.lib.starpilot_status import get_screen_edge_color
-from openpilot.system.ui.lib.application import gui_app, FontWeight
-from openpilot.system.ui.lib.text_measure import measure_text_cached
+from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
 
@@ -22,7 +21,15 @@ OpState = log.SelfdriveState.OpenpilotState
 CALIBRATED = log.LiveCalibrationData.Status.calibrated
 ROAD_CAM = VisionStreamType.VISION_STREAM_ROAD
 WIDE_CAM = VisionStreamType.VISION_STREAM_WIDE_ROAD
+DRIVER_CAM = VisionStreamType.VISION_STREAM_DRIVER
+GEAR_SHIFTER_REVERSE = structs.CarState.GearShifter.reverse
 DEFAULT_DEVICE_CAMERA = DEVICE_CAMERAS["tici", "ar0231"]
+
+CAMERA_VIEW_AUTO = 0
+CAMERA_VIEW_DRIVER = 1
+CAMERA_VIEW_STANDARD = 2
+CAMERA_VIEW_WIDE = 3
+CAMERA_VIEW_NONE = 4
 
 BORDER_COLORS = {
   UIStatus.DISENGAGED: rl.Color(0x12, 0x28, 0x39, 0xFF),  # Blue for disengaged state
@@ -33,104 +40,7 @@ BORDER_COLORS = {
 WIDE_CAM_MAX_SPEED = 10.0  # m/s (22 mph)
 ROAD_CAM_MIN_SPEED = 15.0  # m/s (34 mph)
 INF_POINT = np.array([1000.0, 0.0, 0.0])
-
-
-class MinSteerSpeedBanner:
-  """One-shot-per-drive banner that stays visible for the first below-min-steer interval."""
-
-  def __init__(self):
-    self._shown_this_drive = False
-    self._showing_interval = False
-    self._has_been_above_min = False
-    self._was_under_min = False
-    self._last_started_frame = -1
-    self._font = gui_app.font(FontWeight.BOLD)
-
-  def _reset(self):
-    self._shown_this_drive = False
-    self._showing_interval = False
-    self._has_been_above_min = False
-    self._was_under_min = False
-
-  def _get_message(self, min_steer_speed: float) -> str:
-    speed_units = CV.MS_TO_KPH if ui_state.is_metric else CV.MS_TO_MPH
-    speed = int(round(min_steer_speed * speed_units))
-    unit = "km/h" if ui_state.is_metric else "mph"
-    return f"Steer Unavailable Under {speed} {unit}"
-
-  def _update_state(self):
-    if not ui_state.started:
-      self._last_started_frame = -1
-      self._reset()
-      return
-
-    if ui_state.started_frame != self._last_started_frame:
-      self._last_started_frame = ui_state.started_frame
-      self._reset()
-
-    sm = ui_state.sm
-    if sm.recv_frame["carParams"] < ui_state.started_frame or sm.recv_frame["carState"] < ui_state.started_frame:
-      return
-
-    min_steer_speed = float(sm["carParams"].minSteerSpeed)
-    if min_steer_speed <= 0:
-      self._showing_interval = False
-      self._was_under_min = False
-      return
-
-    under_min = float(sm["carState"].vEgo) < min_steer_speed
-    if not under_min:
-      self._has_been_above_min = True
-
-    crossed_below = under_min and not self._was_under_min
-    if (not self._shown_this_drive) and crossed_below and self._has_been_above_min:
-      self._showing_interval = True
-      self._shown_this_drive = True
-
-    if self._showing_interval and not under_min:
-      self._showing_interval = False
-
-    self._was_under_min = under_min
-
-  def render(self, rect: rl.Rectangle):
-    self._update_state()
-
-    if not self._showing_interval:
-      return
-
-    min_steer_speed = float(ui_state.sm["carParams"].minSteerSpeed)
-    if min_steer_speed <= 0:
-      return
-
-    color = ALERT_COLORS[AlertStatus.userPrompt]
-    color = rl.Color(color.r, color.g, color.b, int(255 * 0.93))
-    translucent = rl.Color(color.r, color.g, color.b, 0)
-    dropdown_height = min(200, int(rect.height * 0.38))
-    solid_height = max(34, int(dropdown_height * 0.22))
-
-    rl.draw_rectangle(int(rect.x), int(rect.y), int(rect.width), solid_height, color)
-    rl.draw_rectangle_gradient_v(
-      int(rect.x),
-      int(rect.y + solid_height),
-      int(rect.width),
-      int(dropdown_height - solid_height),
-      color,
-      translucent,
-    )
-
-    text = self._get_message(min_steer_speed)
-    font_size = 52
-    max_text_width = rect.width - 100
-    text_size = measure_text_cached(self._font, text, font_size)
-    while font_size > 36 and text_size.x > max_text_width:
-      font_size -= 2
-      text_size = measure_text_cached(self._font, text, font_size)
-
-    text_pos = rl.Vector2(
-      rect.x + (rect.width - text_size.x) / 2,
-      rect.y + max(12, (dropdown_height * 0.34) - (text_size.y / 2)),
-    )
-    rl.draw_text_ex(self._font, text, text_pos, font_size, 0, rl.Color(255, 255, 255, 242))
+REVERSE_DRIVER_CAMERA_DELAY_FRAMES = max(1, int(round(gui_app.target_fps * 0.5)))
 
 
 class AugmentedRoadView(CameraView):
@@ -145,12 +55,17 @@ class AugmentedRoadView(CameraView):
     self._matrix_cache_key = (0, 0.0, 0.0, stream_type)
     self._cached_matrix: np.ndarray | None = None
     self._content_rect = rl.Rectangle()
+    self._reverse_driver_camera_frames = 0
+    self._reverse_driver_camera_active = False
+    self._camera_view_none = False
+    self._driver_stream_active = False
+    self._draw_road_overlays = True
+    self._draw_hud_controls = True
 
     self.model_renderer = ModelRenderer()
     self._hud_renderer = HudRenderer()
     self.alert_renderer = AlertRenderer()
     self.driver_state_renderer = DriverStateRenderer()
-    self._min_steer_speed_banner = MinSteerSpeedBanner()
 
     # debug
     self._pm = messaging.PubMaster(['uiDebug'])
@@ -161,7 +76,13 @@ class AugmentedRoadView(CameraView):
     if not ui_state.started:
       return
 
-    self._switch_stream_if_needed(ui_state.sm)
+    camera_view = self._camera_view()
+    self._camera_view_none = camera_view == CAMERA_VIEW_NONE
+    self._switch_stream_if_needed(ui_state.sm, camera_view)
+    in_reverse = self._is_in_reverse()
+    self._driver_stream_active = self.stream_type == DRIVER_CAM
+    self._draw_road_overlays = not in_reverse and not self._driver_stream_active and not self._camera_view_none
+    self._draw_hud_controls = self._camera_view_none or (not in_reverse and not self._driver_stream_active)
 
     # Update calibration before rendering
     self._update_calibration()
@@ -186,15 +107,18 @@ class AugmentedRoadView(CameraView):
     )
 
     # Render the base camera view
-    super()._render(self._content_rect)
+    if self._camera_view_none:
+      rl.draw_rectangle_rec(self._content_rect, rl.BLACK)
+    else:
+      super()._render(self._content_rect)
 
     # Draw all UI overlays
-    current_alert = self.alert_renderer.get_alert(ui_state.sm)
-    self.model_renderer.render(self._content_rect)
-    self._hud_renderer.render(self._content_rect)
+    if self._draw_road_overlays:
+      self.model_renderer.render(self._content_rect)
+    if self._draw_hud_controls:
+      self._hud_renderer.render(self._content_rect)
     self.alert_renderer.render(self._content_rect)
     self.driver_state_renderer.render(self._content_rect)
-    self._min_steer_speed_banner.render(self._content_rect)
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
@@ -230,16 +154,69 @@ class AugmentedRoadView(CameraView):
                                rect.width - 2 * border_width, rect.height - 2 * border_width)
     rl.draw_rectangle_rounded_lines_ex(border_rect, border_roundness, 10, border_width, border_color)
 
-  def _switch_stream_if_needed(self, sm):
-    if sm['selfdriveState'].experimentalMode and WIDE_CAM in self.available_streams:
+  @staticmethod
+  def _is_in_reverse() -> bool:
+    if ui_state.sm.recv_frame["carState"] < ui_state.started_frame:
+      return False
+
+    try:
+      gear = ui_state.sm["carState"].gearShifter
+    except Exception:
+      return False
+
+    if gear == GEAR_SHIFTER_REVERSE:
+      return True
+
+    reverse_enum = getattr(car.CarState.GearShifter, "reverse", None)
+    if reverse_enum is not None and gear == reverse_enum:
+      return True
+
+    return str(gear).split(".")[-1].lower() == "reverse"
+
+  def is_in_reverse(self) -> bool:
+    return self._is_in_reverse()
+
+  def _update_reverse_driver_camera_state(self) -> bool:
+    should_force_driver = ui_state.started and ui_state.params.get_bool("DriverCamera") and self._is_in_reverse()
+    if not should_force_driver:
+      self._reverse_driver_camera_frames = 0
+      self._reverse_driver_camera_active = False
+      return False
+
+    self._reverse_driver_camera_frames = min(self._reverse_driver_camera_frames + 1, REVERSE_DRIVER_CAMERA_DELAY_FRAMES)
+    self._reverse_driver_camera_active = self._reverse_driver_camera_frames >= REVERSE_DRIVER_CAMERA_DELAY_FRAMES
+    return self._reverse_driver_camera_active
+
+  @staticmethod
+  def _camera_view() -> int:
+    camera_view = ui_state.params.get_int("CameraView", return_default=True, default=CAMERA_VIEW_WIDE)
+    if camera_view not in (CAMERA_VIEW_AUTO, CAMERA_VIEW_DRIVER, CAMERA_VIEW_STANDARD, CAMERA_VIEW_WIDE, CAMERA_VIEW_NONE):
+      return CAMERA_VIEW_WIDE
+    return camera_view
+
+  def _switch_stream_if_needed(self, sm, camera_view: int):
+    if camera_view == CAMERA_VIEW_NONE:
+      self._reverse_driver_camera_frames = 0
+      self._reverse_driver_camera_active = False
+      return
+
+    if self._update_reverse_driver_camera_state():
+      target = DRIVER_CAM
+    elif camera_view == CAMERA_VIEW_DRIVER:
+      target = DRIVER_CAM
+    elif camera_view == CAMERA_VIEW_STANDARD:
+      target = ROAD_CAM
+    elif camera_view == CAMERA_VIEW_WIDE:
+      target = WIDE_CAM if WIDE_CAM in self.available_streams else ROAD_CAM
+    elif sm['selfdriveState'].experimentalMode and WIDE_CAM in self.available_streams:
       v_ego = sm['carState'].vEgo
       if v_ego < WIDE_CAM_MAX_SPEED:
         target = WIDE_CAM
       elif v_ego > ROAD_CAM_MIN_SPEED:
         target = ROAD_CAM
       else:
-        # Hysteresis zone - keep current stream
-        target = self.stream_type
+        # Hysteresis zone - keep current road camera selection.
+        target = WIDE_CAM if self.stream_type == WIDE_CAM else ROAD_CAM
     else:
       target = ROAD_CAM
 
@@ -270,6 +247,9 @@ class AugmentedRoadView(CameraView):
       self.view_from_wide_calib = view_frame_from_device_frame @ wide_from_device @ device_from_calib
 
   def _calc_frame_matrix(self, rect: rl.Rectangle) -> np.ndarray:
+    if self.stream_type == DRIVER_CAM:
+      return CameraView._calc_frame_matrix(self, rect)
+
     # Check if we can use cached matrix
     cache_key = (
       ui_state.sm.recv_frame['liveCalibration'],

@@ -31,7 +31,7 @@ void DriverMonitorRenderer::updateState(const UIState &s) {
   if (!is_visible) return;
 
   auto dm_state = sm["driverMonitoringState"].getDriverMonitoringState();
-  is_active = dm_state.getIsActiveMode();
+  is_active = dm_state.getActivePolicy() == cereal::DriverMonitoringState::MonitoringPolicy::VISION;
   is_rhd = dm_state.getIsRHD();
   dm_fade_state = std::clamp(dm_fade_state + 0.2f * (0.5f - is_active), 0.0f, 1.0f);
 
@@ -70,11 +70,12 @@ void DriverMonitorRenderer::draw(QPainter &painter, const QRect &surface_rect) {
   float x = is_rhd ? surface_rect.width() - offset : offset;
   float y = surface_rect.height() - offset;
 
-  if (onroad_distance_btn_enabled) {
+  if (onroad_controls_width > 0) {
+    const int controls_offset = onroad_controls_width + (2 * UI_BORDER_SIZE);
     if (is_rhd) {
-      x -= UI_BORDER_SIZE + (btn_size + UI_BORDER_SIZE) + UI_BORDER_SIZE;
+      x -= controls_offset;
     } else {
-      x += UI_BORDER_SIZE + (btn_size + UI_BORDER_SIZE) + UI_BORDER_SIZE;
+      x += controls_offset;
     }
   }
 

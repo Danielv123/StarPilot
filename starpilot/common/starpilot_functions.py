@@ -58,6 +58,39 @@ def seed_desktop_theme_assets():
   theme_manager.update_wheel_image(starpilot_toggles.wheel_image, boot_run=True)
 
 
+def ensure_tailscale_service():
+  tailscale_dir = Path("/data/tailscale")
+  persistent_unit = tailscale_dir / "tailscaled.service"
+  runtime_unit = Path("/run/systemd/system/tailscaled.service")
+
+  required_files = (tailscale_dir / "tailscale", tailscale_dir / "tailscaled", persistent_unit)
+  if not all(path.is_file() for path in required_files):
+    return
+
+  if run_cmd(
+    ["sudo", "install", "-m", "644", str(persistent_unit), str(runtime_unit)],
+    "Restored Tailscale runtime service.",
+    "Failed to restore Tailscale runtime service.",
+    report=False,
+  ) is None:
+    return
+
+  if run_cmd(
+    ["sudo", "systemctl", "daemon-reload"],
+    "Reloaded systemd after restoring Tailscale.",
+    "Failed to reload systemd after restoring Tailscale.",
+    report=False,
+  ) is None:
+    return
+
+  run_cmd(
+    ["sudo", "systemctl", "start", "tailscaled"],
+    "Started persistent Tailscale service.",
+    "Failed to start persistent Tailscale service.",
+    report=False,
+  )
+
+
 def starpilot_boot_functions(build_metadata, params):
   params_memory = Params(memory=True)
 
@@ -74,6 +107,10 @@ def starpilot_boot_functions(build_metadata, params):
   ThemeManager(params, params_memory, boot_run=True).update_active_theme(time_validated=system_time_valid(), starpilot_toggles=get_starpilot_toggles(), boot_run=True)
 
   sync_konik_dongle_id(params)
+
+  # Restore the volatile /run unit synchronously. A detached boot thread can race
+  # manager process startup and disappear before systemd has accepted the unit.
+  ensure_tailscale_service()
 
   def boot_thread():
     while not system_time_valid():

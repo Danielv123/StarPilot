@@ -6170,7 +6170,7 @@ def setup(app):
     tailscale_binary = f"{base}/tailscale"
     tailscaled_binary = f"{base}/tailscaled"
 
-    systemd_unit = "/etc/systemd/system/tailscaled.service"
+    systemd_unit = "/run/systemd/system/tailscaled.service"
 
     if os.path.exists(tailscale_binary) and os.path.exists(tailscaled_binary) and os.path.exists(systemd_unit):
       return jsonify({"installed": True})
@@ -6212,7 +6212,8 @@ def setup(app):
 
     systemd_unit = f"""[Unit]
     Description=Tailscale node agent
-    After=network.target
+    Wants=network-online.target
+    After=network-online.target
 
     [Service]
     ExecStart={base}/tailscaled \\
@@ -6221,7 +6222,7 @@ def setup(app):
       --state={state}/tailscaled.state \\
       --socket={socket} \\
       --statedir={state}
-    Restart=on-failure
+    Restart=always
     RestartSec=5
 
     [Install]
@@ -6231,10 +6232,8 @@ def setup(app):
     with open(unit_tmp, "w") as f:
       f.write(systemd_unit)
 
-    run_cmd(["sudo", "mount", "-o", "remount,rw", "/"], "Remounted / as read-write.", "Failed to remount / as read-write.")
-    run_cmd(["sudo", "install", "-m", "644", unit_tmp, "/etc/systemd/system/tailscaled.service"], "Installed systemd unit.", "Failed to install systemd unit.")
+    run_cmd(["sudo", "install", "-m", "644", unit_tmp, "/run/systemd/system/tailscaled.service"], "Installed runtime systemd unit.", "Failed to install runtime systemd unit.")
     run_cmd(["sudo", "systemctl", "daemon-reload"], "Reloaded systemd daemon.", "Failed to reload systemd daemon.")
-    run_cmd(["sudo", "systemctl", "enable", "/etc/systemd/system/tailscaled.service"], "Enabled tailscaled service.", "Failed to enable tailscaled service.")
     run_cmd(["sudo", "systemctl", "restart", "tailscaled"], "Started tailscaled service.", "Failed to start tailscaled service.")
 
     proc = subprocess.Popen(
@@ -6263,15 +6262,20 @@ def setup(app):
   def tailscale_uninstall():
     base = "/data/tailscale"
     state = f"{base}/state"
-    unit_path = "/etc/systemd/system/tailscaled.service"
+    unit_paths = [
+      "/run/systemd/system/tailscaled.service",
+      "/etc/systemd/system/tailscaled.service",
+    ]
     local_unit = f"{base}/tailscaled.service"
 
-    run_cmd(["sudo", "mount", "-o", "remount,rw", "/"], "Remounted / as read-write.", "Failed to remount /.")
     run_cmd(["sudo", "systemctl", "stop", "tailscaled"], "Stopped tailscaled.", "Failed to stop tailscaled.")
-    run_cmd(["sudo", "systemctl", "disable", "tailscaled"], "Disabled tailscaled.", "Failed to disable tailscaled.")
 
-    if os.path.exists(unit_path):
-      run_cmd(["sudo", "rm", unit_path], "Removed systemd unit file.", "Failed to remove systemd unit file.")
+    unit_removed = False
+    for unit_path in unit_paths:
+      if os.path.exists(unit_path):
+        unit_removed |= run_cmd(["sudo", "rm", unit_path], "Removed systemd unit file.", "Failed to remove systemd unit file.") is not None
+
+    if unit_removed:
       run_cmd(["sudo", "systemctl", "daemon-reload"], "Reloaded systemd daemon.", "Failed to reload systemd.")
 
     delete_file(local_unit)

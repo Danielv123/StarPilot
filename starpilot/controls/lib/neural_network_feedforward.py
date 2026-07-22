@@ -13,11 +13,16 @@ from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.common.pid import PIDController
+from opendbc.car.hyundai.values import CAR as HYUNDAI_CAR
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.modeld.constants import ModelConstants
 
 from openpilot.starpilot.common.starpilot_variables import NNFF_MODELS_PATH, get_nnff_model_files, get_nnff_substitutes
+from openpilot.starpilot.controls.lib.nnff_path_preview import (
+  IONIQ_5_UNWIND_PREVIEW_TIME,
+  get_ioniq_5_early_unwind_lateral_accel,
+)
 
 # At higher speeds (25+mph) we can assume:
 # Lateral acceleration achieved by a specific car correlates to
@@ -171,6 +176,7 @@ class LatControlNNFF(LatControl):
     super().__init__(CP, CI, dt)
     self.lat_torque_nn_model = get_nn_model(CP.carFingerprint, str(next((fw.fwVersion for fw in CP.carFw if fw.ecu == "eps"), "")).replace("\\", ""))
     self.nnff_loaded = self.lat_torque_nn_model is not None
+    self.ioniq_5_early_unwind = CP.carFingerprint == HYUNDAI_CAR.HYUNDAI_IONIQ_5
 
     self.torque_params = CP.lateralTuning.torque.as_builder()
     self.pid = PIDController(1.0, 0.3, 0.0, pos_limit=self.steer_max, neg_limit=-self.steer_max, rate=1/self.dt)
@@ -234,6 +240,12 @@ class LatControlNNFF(LatControl):
       roll_compensation = params.roll * ACCELERATION_DUE_TO_GRAVITY
       curvature_deadzone = abs(VM.calc_curvature(math.radians(self.steering_angle_deadzone_deg), CS.vEgo, 0.0))
       desired_lateral_accel = desired_curvature * CS.vEgo ** 2
+      model_good = model_data is not None and len(model_data.orientation.x) >= CONTROL_N
+      control_lateral_accel = desired_lateral_accel
+      if self.ioniq_5_early_unwind and model_good and len(model_data.acceleration.y) == len(ModelConstants.T_IDXS):
+        preview_lateral_accel = np.interp(lat_delay + IONIQ_5_UNWIND_PREVIEW_TIME,
+                                          ModelConstants.T_IDXS, model_data.acceleration.y)
+        control_lateral_accel = get_ioniq_5_early_unwind_lateral_accel(desired_lateral_accel, preview_lateral_accel)
 
       # desired rate is the desired rate of change in the setpoint, not the absolute desired curvature
       # desired_lateral_jerk = desired_curvature_rate * CS.vEgo ** 2
@@ -241,14 +253,13 @@ class LatControlNNFF(LatControl):
       lateral_accel_deadzone = curvature_deadzone * CS.vEgo ** 2
 
       low_speed_factor = np.interp(CS.vEgo, LOW_SPEED_X, LOW_SPEED_Y)**2
-      setpoint = desired_lateral_accel + low_speed_factor * desired_curvature
+      control_curvature = control_lateral_accel / max(CS.vEgo ** 2, 0.01)
+      setpoint = control_lateral_accel + low_speed_factor * control_curvature
       measurement = actual_lateral_accel + low_speed_factor * actual_curvature
-      gravity_adjusted_lateral_accel = desired_lateral_accel - roll_compensation
+      gravity_adjusted_lateral_accel = control_lateral_accel - roll_compensation
       if self.nnff_loaded and starpilot_toggles.nnff or starpilot_toggles.nnff_lite:
         actual_curvature_rate = -VM.calc_curvature(math.radians(CS.steeringRateDeg), CS.vEgo, 0.0)
         actual_lateral_jerk = actual_curvature_rate * CS.vEgo ** 2
-
-        model_good = model_data is not None and len(model_data.orientation.x) >= CONTROL_N
 
         if model_good:
           # prepare "look-ahead" desired lateral jerk
@@ -280,7 +291,7 @@ class LatControlNNFF(LatControl):
             roll = roll_pitch_adjust(roll, pitch)
 
           self.roll_deque.append(roll)
-          self.lateral_accel_desired_deque.append(desired_lateral_accel)
+          self.lateral_accel_desired_deque.append(control_lateral_accel)
 
           # prepare past and future values
           # adjust future times to account for longitudinal acceleration
@@ -303,7 +314,7 @@ class LatControlNNFF(LatControl):
 
           pid_log.error = torque_from_setpoint - torque_from_measurement
 
-          error_blend = np.interp(abs(desired_lateral_accel), [1.0, 2.0], [0.0, 1.0])
+          error_blend = np.interp(abs(control_lateral_accel), [1.0, 2.0], [0.0, 1.0])
           if error_blend > 0.0:  # blend in stronger error response when in high lat accel
             torque_from_error = self.lat_torque_nn_model.evaluate([CS.vEgo, setpoint - measurement, lateral_jerk_setpoint - lateral_jerk_measurement, 0.0])
             if sign(pid_log.error) == sign(torque_from_error) and abs(pid_log.error) < abs(torque_from_error):
@@ -312,7 +323,7 @@ class LatControlNNFF(LatControl):
           # compute feedforward (same as nn setpoint output)
           error = setpoint - measurement
           friction_input = self.lat_accel_friction_factor * error + self.lat_jerk_friction_factor * lookahead_lateral_jerk
-          nn_input = [CS.vEgo, desired_lateral_accel, friction_input, roll] + past_lateral_accels_desired + future_lateral_accels + nnff_common
+          nn_input = [CS.vEgo, control_lateral_accel, friction_input, roll] + past_lateral_accels_desired + future_lateral_accels + nnff_common
           ff = self.lat_torque_nn_model.evaluate(nn_input)
 
           # apply friction override for cars with low NN friction response
@@ -324,7 +335,7 @@ class LatControlNNFF(LatControl):
 
           pid_log.error = float(torque_from_setpoint - torque_from_measurement)
 
-          error = desired_lateral_accel - actual_lateral_accel
+          error = control_lateral_accel - actual_lateral_accel
           friction_input = self.lat_accel_friction_factor * error + self.lat_jerk_friction_factor * lookahead_lateral_jerk
           ff = self.torque_from_lateral_accel(gravity_adjusted_lateral_accel, self.torque_params)
       else:
@@ -348,7 +359,7 @@ class LatControlNNFF(LatControl):
       pid_log.f = float(self.pid.f)
       pid_log.output = float(-output_torque)
       pid_log.actualLateralAccel = float(actual_lateral_accel)
-      pid_log.desiredLateralAccel = float(desired_lateral_accel)
+      pid_log.desiredLateralAccel = float(control_lateral_accel)
       pid_log.saturated = bool(self._check_saturation(self.steer_max - abs(output_torque) < 1e-3, CS, steer_limited_by_safety, curvature_limited))
 
     # TODO left is positive in this convention

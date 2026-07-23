@@ -676,7 +676,7 @@ def export_policy(policy: FluxPolicy, mean: np.ndarray, std: np.ndarray,
     layers.append({
       f"dense_{index}_W": layer.weight.detach().cpu().numpy().tolist(),
       f"dense_{index}_b": layer.bias.detach().cpu().numpy()[:, None].tolist(),
-      "activation": "identity" if index == len(policy.layers) else "Ïƒ",
+      "activation": "identity" if index == len(policy.layers) else "sigmoid",
     })
   return {
     "input_std": std[:, None].tolist(),

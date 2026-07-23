@@ -161,7 +161,7 @@ def export_flux(model: MLPRegressor, mean: np.ndarray, std: np.ndarray, validati
     layers.append({
       f"dense_{index}_W": weights.T.tolist(),
       f"dense_{index}_b": bias[:, None].tolist(),
-      "activation": "identity" if index == len(model.coefs_) else "Ïƒ",
+      "activation": "identity" if index == len(model.coefs_) else "sigmoid",
     })
   return {
     "input_std": std[:, None].tolist(),

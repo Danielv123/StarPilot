@@ -35,8 +35,11 @@ from openpilot.starpilot.controls.lib.nnff_path_preview import (
 # friction in the steering wheel that needs to be overcome to
 # move it at all, this is compensated for too.
 
-# dict used to rename activation functions whose names aren't valid python identifiers
-ACTIVATION_FUNCTION_NAMES = {"σ": "sigmoid"}
+# Names emitted by Flux and by older Windows-based model exporters.
+ACTIVATION_FUNCTION_NAMES = {
+  "\u03c3": "sigmoid",
+  "\u00cf\u0192": "sigmoid",
+}
 
 LOW_SPEED_X = [0, 10, 20, 30]
 LOW_SPEED_Y = [12, 3, 1, 0]

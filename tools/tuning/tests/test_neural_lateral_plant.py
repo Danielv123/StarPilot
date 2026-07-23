@@ -36,18 +36,68 @@ def synthetic_trajectory(rows: int = 500) -> plant_data.Trajectory:
 
 
 def test_baseline_parameter_count_matches_previous_surrogate() -> None:
-  config = neural_plant.DEFAULT_CANDIDATES[0]
+  config = neural_plant.INITIAL_CANDIDATES[0]
   assert neural_plant.parameter_count(neural_plant.build_model(config)) == 37_444
 
 
 def test_dense_candidates_expand_window_and_capacity() -> None:
-  baseline = neural_plant.DEFAULT_CANDIDATES[0]
-  dense = next(candidate for candidate in neural_plant.DEFAULT_CANDIDATES if candidate.name == "dense_2s_large_mlp")
+  baseline = neural_plant.INITIAL_CANDIDATES[0]
+  dense = next(candidate for candidate in neural_plant.INITIAL_CANDIDATES if candidate.name == "dense_2s_large_mlp")
   assert dense.sample_period_s < baseline.sample_period_s
   assert dense.history_s > baseline.history_s
   assert neural_plant.parameter_count(neural_plant.build_model(dense)) > neural_plant.parameter_count(
     neural_plant.build_model(baseline)
   )
+
+
+def test_temporal_sweep_varies_interval_and_history_at_fixed_capacity() -> None:
+  settings = {
+    (candidate.sample_step, round(candidate.history_s, 1))
+    for candidate in neural_plant.TEMPORAL_CANDIDATES
+  }
+  assert settings == {
+    (sample_step, history_seconds)
+    for sample_step in (1, 2, 5)
+    for history_seconds in (0.5, 1.0, 1.5, 2.0, 3.0)
+  }
+  parameter_counts = {
+    neural_plant.parameter_count(neural_plant.build_model(candidate))
+    for candidate in neural_plant.TEMPORAL_CANDIDATES
+  }
+  assert len(parameter_counts) == 1
+
+
+def test_architecture_sweep_includes_controls_and_sequence_families() -> None:
+  families = {candidate.family for candidate in neural_plant.ARCHITECTURE_CANDIDATES}
+  assert families == {"mlp", "gru", "tcn", "transformer"}
+  assert any(candidate.sample_step == 2 for candidate in neural_plant.ARCHITECTURE_CANDIDATES)
+  assert all(candidate.history_s == 3.0 for candidate in neural_plant.ARCHITECTURE_CANDIDATES if candidate.sample_step == 1)
+
+
+def test_sequence_architectures_use_memory_safe_evaluation_batches() -> None:
+  transformer = next(
+    candidate for candidate in neural_plant.ARCHITECTURE_CANDIDATES
+    if candidate.family == "transformer"
+  )
+  gru = next(candidate for candidate in neural_plant.ARCHITECTURE_CANDIDATES if candidate.family == "gru")
+  assert neural_plant.evaluation_batch_size(transformer) < neural_plant.evaluation_batch_size(gru)
+
+
+@pytest.mark.parametrize("family", ("tcn", "transformer"))
+def test_sequence_architectures_return_state_delta(family: str) -> None:
+  config = neural_plant.ModelConfig(
+    "fixture",
+    family,
+    sample_step=2,
+    history_steps=20,
+    hidden_sizes=(32,),
+    temporal_layers=2,
+    attention_heads=4,
+    feedforward_size=64,
+  )
+  model = neural_plant.build_model(config)
+  inputs = torch.zeros((3, config.input_size))
+  assert model(inputs).shape == (3, len(plant_data.STATE_FEATURES))
 
 
 def test_build_windows_preserves_current_first_history() -> None:

@@ -97,12 +97,14 @@ plant with gradients. It searches both the temporal representation and network
 capacity instead of fixing the original `0.6 s @ 20 Hz`,
 `96 -> 128 -> 128 -> 64 -> 4` surrogate.
 
-The built-in search compares:
+The search is split into controlled profiles:
 
-- `0.6`, `1.0`, `1.5`, and `2.0` second windows;
-- 20 Hz and 50 Hz retained histories;
-- MLPs from the original 37,444 parameters through larger dense models;
-- two-layer GRU temporal models.
+- `initial` compares the original MLP with denser MLP and GRU candidates;
+- `temporal` holds a one-layer, 40,228-parameter GRU fixed while sweeping
+  `10`, `20`, and `50 ms` sample intervals and `0.5`, `1.0`, `1.5`, `2.0`,
+  and `3.0` second histories;
+- `architecture` compares MLP, GRU, dilated TCN, and Transformer candidates,
+  including the previously selected 50 Hz GRU as a control.
 
 Routes `00000109` and `0000010b` are untouched final holdouts by default.
 Candidate selection uses other complete routes only. Training uses recursive
@@ -113,9 +115,14 @@ Run the search on a CUDA machine:
 ```bash
 uv run --no-project --with torch --with joblib --with scikit-learn --with pycapnp==2.1.0 --with zstandard \
   python -u tools/tuning/train_neural_lateral_plant.py search \
+  --search-profile temporal \
   --current-root /path/to/realdata \
   --output-dir artifacts/tuning/neural_lateral_plant_search
 ```
+
+Run `temporal` first, then adjust or run the `architecture` profile at the
+best temporal setting. A JSON candidate list can be supplied with
+`--candidate-file` for additional controlled experiments.
 
 Then train a three-member ensemble with the selected configuration. For
 example, for a two-layer, 256-wide GRU using a dense two-second history:
@@ -157,6 +164,58 @@ architecture, while routes `00000109` and `0000010b` remained untouched.
 No older-data pretraining was performed because the available Pond archive
 contained camera video rather than telemetry.
 
+The fixed-capacity temporal sweep selected a `10 ms` sample interval with
+`3.0 s` of history. The score is the weighted normalized error across the
+complete two-second autoregressive rollout; lower is better.
+
+| Sample interval | Best history | Best validation score |
+|---:|---:|---:|
+| 10 ms (100 Hz) | 3.0 s | **0.293978** |
+| 20 ms (50 Hz) | 2.0 s | 0.307082 |
+| 50 ms (20 Hz) | 3.0 s | 0.338630 |
+
+At 100 Hz, the five tested histories scored between `0.293978` and
+`0.298511`, so interval mattered more than the exact history length. Three
+seconds was the measured winner, but the small margin over 1.5 seconds
+(`0.294851`) should not be treated as a universal optimum outside this data
+and rollout objective.
+
+The architecture screen used the 100 Hz, 3.0-second history, except for the
+previous 50 Hz GRU control. It used a shorter recursive training horizon and
+1,000 validation windows to rank candidates before the expensive finalist
+pass.
+
+| Architecture | Parameters | Screen score |
+|---|---:|---:|
+| 7-block, 192-channel TCN | 1,590,916 | **0.347909** |
+| 3-layer, 384-wide GRU | 2,377,348 | 0.363150 |
+| 7-block, 128-channel TCN | 708,356 | 0.373436 |
+| 4-layer, 192-wide Transformer | 1,876,996 | 0.392425 |
+| 3-layer MLP | 1,624,324 | 0.394568 |
+| 4-layer, 128-wide Transformer | 849,924 | 0.409778 |
+| 2-layer, 192-wide GRU | 376,516 | 0.412320 |
+| Previous 50 Hz GRU control | 376,516 | 0.424192 |
+| 2-layer, 64-wide Transformer | 124,292 | 0.439513 |
+
+The Transformers were valid trainable candidates, but none reached the TCN
+or large-GRU screen scores. This sequence-prediction problem and dataset did
+not reward attention enough to offset its weaker sample efficiency.
+
+The two screen winners then received the same 0.5-second recursive training
+loss and 20,000-window evaluation used for final selection:
+
+| Finalist | Parameters | Validation score |
+|---|---:|---:|
+| 7-block, 192-channel TCN | 1,590,916 | **0.303054** |
+| 3-layer, 384-wide GRU | 2,377,348 | 0.314029 |
+
+Neither larger finalist beat the `0.299563` score from the earlier 50 Hz GRU
+search, while the fixed-capacity 100 Hz temporal winner scored `0.293978`.
+The temporal winner was therefore the only new candidate promoted to
+three-seed ensemble training.
+
+#### Initial architecture search
+
 | Candidate | History | Parameters | Validation score |
 |---|---:|---:|---:|
 | 1.5 s GRU, 50 Hz | 1.5 s | 376,516 | **0.299563** |
@@ -166,18 +225,22 @@ contained camera video rather than telemetry.
 | 2.0 s GRU, 50 Hz | 2.0 s | 665,860 | 0.305229 |
 | Original-shape MLP, 20 Hz | 0.6 s | 37,444 | 0.352507 |
 
-The selected 1.5-second GRU improved the weighted normalized two-second
-rollout score by 15.0% over the original surrogate shape. The larger 2-second
-models did not improve validation, so model size was not increased blindly.
+That search initially selected the 1.5-second GRU. The expanded search
+superseded it with the 100 Hz, 3.0-second, one-layer GRU. The final
+three-seed ensemble has 40,228 parameters per member and 120,684 parameters
+in total. It scored `0.279085` across 68,950 validation windows. On the
+previously untouched `00000109` and `0000010b` routes, it scored `0.339295`
+across 38,736 windows.
 
-The final three-seed ensemble has 376,516 parameters per member and 1,129,548
-parameters in total. It scored `0.293589` across 36,420 validation windows.
-On the previously untouched `00000109` and `0000010b` routes, it scored
-`0.351401` across 20,792 windows.
+The superseded 50 Hz ensemble scored `0.293589` on validation and `0.351401`
+on the same untouched routes. The denser temporal ensemble therefore
+improved the normalized score by 4.9% on validation and 3.4% on the holdout,
+despite using fewer weights. The 3.0-second recurrent computation remains
+substantially richer than the old 1.5-second input even though parameter
+count alone is lower.
 
 For a route-matched reference, a separately trained three-seed ensemble using
 the original 37,444-parameter shape scored `0.334715` on validation and
-`0.376804` on the holdout. The selected model therefore improved the
-normalized score by 12.3% on validation and 6.7% on the holdout. Window counts
-differ because the selected model retains 50 Hz samples while the reference
-retains 20 Hz samples.
+`0.376804` on the holdout. The final temporal ensemble improved those scores
+by 16.6% and 10.0%, respectively. Window counts differ because the final
+model retains 100 Hz samples while the reference retains 20 Hz samples.

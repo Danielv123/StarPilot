@@ -42,6 +42,7 @@ FORMAT_VERSION = 1
 STATE_INDEXES = tuple(plant_data.BASE_FEATURES.index(name) for name in plant_data.STATE_FEATURES)
 DEFAULT_HOLDOUTS = ("00000109", "0000010b")
 EVALUATION_BATCH_SIZE = 4096
+SEQUENCE_EVALUATION_BATCH_SIZE = 512
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,10 @@ class ModelConfig:
   history_steps: int
   hidden_sizes: tuple[int, ...]
   gru_layers: int = 1
+  temporal_layers: int = 2
+  attention_heads: int = 4
+  feedforward_size: int = 256
+  dropout: float = 0.10
 
   @property
   def sample_period_s(self) -> float:
@@ -66,13 +71,74 @@ class ModelConfig:
     return self.history_steps * len(plant_data.BASE_FEATURES)
 
 
-DEFAULT_CANDIDATES = (
+INITIAL_CANDIDATES = (
   ModelConfig("baseline_mlp", "mlp", 5, 12, (128, 128, 64)),
   ModelConfig("dense_1s_mlp", "mlp", 2, 50, (256, 256, 128)),
   ModelConfig("dense_1p5s_mlp", "mlp", 2, 75, (512, 256, 128)),
   ModelConfig("dense_2s_large_mlp", "mlp", 2, 100, (512, 512, 256, 128)),
   ModelConfig("dense_1p5s_gru", "gru", 2, 75, (192,), gru_layers=2),
   ModelConfig("dense_2s_gru", "gru", 2, 100, (256,), gru_layers=2),
+)
+
+
+def temporal_candidates() -> tuple[ModelConfig, ...]:
+  candidates: list[ModelConfig] = []
+  for sample_step in (1, 2, 5):
+    for history_seconds in (0.5, 1.0, 1.5, 2.0, 3.0):
+      history_steps = round(history_seconds / (sample_step * 0.01))
+      name = f"temporal_{sample_step * 10}ms_{str(history_seconds).replace('.', 'p')}s_gru"
+      candidates.append(ModelConfig(
+        name,
+        "gru",
+        sample_step,
+        history_steps,
+        (96,),
+        gru_layers=1,
+        dropout=0.0,
+      ))
+  return tuple(candidates)
+
+
+TEMPORAL_CANDIDATES = temporal_candidates()
+
+
+ARCHITECTURE_CANDIDATES = (
+  ModelConfig("architecture_previous_gru_50hz_1p5s", "gru", 2, 75, (192,), gru_layers=2),
+  ModelConfig("architecture_gru_100hz_3s", "gru", 1, 300, (192,), gru_layers=2),
+  ModelConfig("architecture_large_gru_100hz_3s", "gru", 1, 300, (384,), gru_layers=3),
+  ModelConfig("architecture_tcn_100hz_3s", "tcn", 1, 300, (128,), temporal_layers=7),
+  ModelConfig("architecture_large_tcn_100hz_3s", "tcn", 1, 300, (192,), temporal_layers=7),
+  ModelConfig(
+    "architecture_small_transformer_100hz_3s",
+    "transformer",
+    1,
+    300,
+    (64,),
+    temporal_layers=2,
+    attention_heads=4,
+    feedforward_size=256,
+  ),
+  ModelConfig(
+    "architecture_transformer_100hz_3s",
+    "transformer",
+    1,
+    300,
+    (128,),
+    temporal_layers=4,
+    attention_heads=8,
+    feedforward_size=512,
+  ),
+  ModelConfig(
+    "architecture_large_transformer_100hz_3s",
+    "transformer",
+    1,
+    300,
+    (192,),
+    temporal_layers=4,
+    attention_heads=8,
+    feedforward_size=768,
+  ),
+  ModelConfig("architecture_mlp_100hz_3s", "mlp", 1, 300, (512, 512, 256)),
 )
 
 
@@ -113,7 +179,7 @@ class GRUPlant(nn.Module):
       hidden_size,
       num_layers=config.gru_layers,
       batch_first=True,
-      dropout=0.10 if config.gru_layers > 1 else 0.0,
+      dropout=config.dropout if config.gru_layers > 1 else 0.0,
     )
     self.head = nn.Sequential(
       nn.Linear(hidden_size, hidden_size),
@@ -127,16 +193,104 @@ class GRUPlant(nn.Module):
     return self.head(encoded[:, -1])
 
 
+class TemporalConvBlock(nn.Module):
+  def __init__(self, channels: int, dilation: int, dropout: float):
+    super().__init__()
+    self.network = nn.Sequential(
+      nn.Conv1d(channels, channels, kernel_size=3, padding=dilation, dilation=dilation),
+      nn.GELU(),
+      nn.Dropout(dropout),
+      nn.Conv1d(channels, channels, kernel_size=3, padding=dilation, dilation=dilation),
+      nn.GELU(),
+      nn.Dropout(dropout),
+    )
+
+  def forward(self, values: torch.Tensor) -> torch.Tensor:
+    return values + self.network(values)
+
+
+class TCNPlant(nn.Module):
+  def __init__(self, config: ModelConfig, output_size: int):
+    super().__init__()
+    channels = config.hidden_sizes[0]
+    self.history_steps = config.history_steps
+    self.feature_count = len(plant_data.BASE_FEATURES)
+    self.input_projection = nn.Conv1d(self.feature_count, channels, kernel_size=1)
+    self.blocks = nn.Sequential(*[
+      TemporalConvBlock(channels, 2 ** layer, config.dropout)
+      for layer in range(config.temporal_layers)
+    ])
+    self.output_norm = nn.LayerNorm(channels)
+    self.head = nn.Sequential(
+      nn.Linear(channels, channels),
+      nn.SiLU(),
+      nn.Linear(channels, output_size),
+    )
+
+  def forward(self, values: torch.Tensor) -> torch.Tensor:
+    sequence = values.reshape((-1, self.history_steps, self.feature_count)).flip(1)
+    encoded = self.blocks(self.input_projection(sequence.transpose(1, 2)))
+    return self.head(self.output_norm(encoded[:, :, -1]))
+
+
+class TransformerPlant(nn.Module):
+  def __init__(self, config: ModelConfig, output_size: int):
+    super().__init__()
+    model_width = config.hidden_sizes[0]
+    if model_width % config.attention_heads:
+      raise ValueError("Transformer width must be divisible by attention heads.")
+    self.history_steps = config.history_steps
+    self.feature_count = len(plant_data.BASE_FEATURES)
+    self.input_projection = nn.Linear(self.feature_count, model_width)
+    self.position_embedding = nn.Parameter(torch.empty(1, config.history_steps, model_width))
+    nn.init.normal_(self.position_embedding, mean=0.0, std=0.02)
+    encoder_layer = nn.TransformerEncoderLayer(
+      d_model=model_width,
+      nhead=config.attention_heads,
+      dim_feedforward=config.feedforward_size,
+      dropout=config.dropout,
+      activation="gelu",
+      batch_first=True,
+      norm_first=True,
+    )
+    self.encoder = nn.TransformerEncoder(
+      encoder_layer,
+      num_layers=config.temporal_layers,
+      enable_nested_tensor=False,
+    )
+    self.output_norm = nn.LayerNorm(model_width)
+    self.head = nn.Sequential(
+      nn.Linear(model_width, model_width),
+      nn.SiLU(),
+      nn.Linear(model_width, output_size),
+    )
+
+  def forward(self, values: torch.Tensor) -> torch.Tensor:
+    sequence = values.reshape((-1, self.history_steps, self.feature_count)).flip(1)
+    encoded = self.encoder(self.input_projection(sequence) + self.position_embedding)
+    return self.head(self.output_norm(encoded[:, -1]))
+
+
 def build_model(config: ModelConfig) -> nn.Module:
   if config.family == "mlp":
     return MLPPlant(config, len(plant_data.STATE_FEATURES))
   if config.family == "gru":
     return GRUPlant(config, len(plant_data.STATE_FEATURES))
+  if config.family == "tcn":
+    return TCNPlant(config, len(plant_data.STATE_FEATURES))
+  if config.family == "transformer":
+    return TransformerPlant(config, len(plant_data.STATE_FEATURES))
   raise ValueError(f"Unsupported model family: {config.family}")
 
 
 def parameter_count(model: nn.Module) -> int:
   return sum(parameter.numel() for parameter in model.parameters())
+
+
+def evaluation_batch_size(config: ModelConfig) -> int:
+  if config.family in ("tcn", "transformer") or config.history_steps >= 150:
+    return SEQUENCE_EVALUATION_BATCH_SIZE
+  return EVALUATION_BATCH_SIZE
 
 
 def load_ensemble_artifact(path: Path, device: torch.device | str = "cpu") -> tuple[
@@ -431,10 +585,7 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
 
   validation_limit = min(len(validation_windows), 5000)
   validation_indexes = np.arange(validation_limit)
-  val_history = torch.as_tensor(validation_windows.history[validation_indexes], device=device)
-  val_future = torch.as_tensor(validation_windows.future_base[validation_indexes], device=device)
-  val_targets = torch.as_tensor(validation_windows.target_states[validation_indexes], device=device)
-  validation_steps = min(rollout_train_steps, val_targets.shape[1])
+  validation_steps = min(rollout_train_steps, validation_windows.target_states.shape[1])
 
   for epoch in range(1, epochs + 1):
     model.train()
@@ -463,13 +614,23 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
 
     model.eval()
     with torch.no_grad():
-      validation_prediction = rollout(
-        model, val_history, val_future, stats_t, validation_steps,
-      )
-      validation_error = (
-        validation_prediction - val_targets[:, :validation_steps]
-      ) / stats_t["state_std"]
-      validation_loss = float(torch.mean(validation_error ** 2).cpu())
+      validation_squared_error = 0.0
+      validation_values = 0
+      validation_batch = evaluation_batch_size(config)
+      for start in range(0, validation_limit, validation_batch):
+        indexes = validation_indexes[start:start + validation_batch]
+        val_history = torch.as_tensor(validation_windows.history[indexes], device=device)
+        val_future = torch.as_tensor(validation_windows.future_base[indexes], device=device)
+        val_targets = torch.as_tensor(validation_windows.target_states[indexes], device=device)
+        validation_prediction = rollout(
+          model, val_history, val_future, stats_t, validation_steps,
+        )
+        validation_error = (
+          validation_prediction - val_targets[:, :validation_steps]
+        ) / stats_t["state_std"]
+        validation_squared_error += float(torch.sum(validation_error ** 2).cpu())
+        validation_values += validation_error.numel()
+      validation_loss = validation_squared_error / validation_values
     train_loss = float(np.mean(losses))
     history_report.append({"epoch": epoch, "train_loss": train_loss, "validation_loss": validation_loss})
     print(
@@ -509,16 +670,17 @@ def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.n
   targets = windows.target_states[indexes]
   stats_t = tensor_stats(stats, device)
   predictions: list[np.ndarray] = []
+  batch_size = evaluation_batch_size(config)
   with torch.no_grad():
-    for start in range(0, len(indexes), EVALUATION_BATCH_SIZE):
-      batch_indexes = indexes[start:start + EVALUATION_BATCH_SIZE]
+    for start in range(0, len(indexes), batch_size):
+      batch_indexes = indexes[start:start + batch_size]
       history = torch.as_tensor(windows.history[batch_indexes], device=device)
       future = torch.as_tensor(windows.future_base[batch_indexes], device=device)
       predictions.append(
         rollout(model, history, future, stats_t, targets.shape[1]).cpu().numpy(),
       )
       print(
-        f"{config.name} evaluation={min(start + EVALUATION_BATCH_SIZE, len(indexes))}/{len(indexes)}",
+        f"{config.name} evaluation={min(start + batch_size, len(indexes))}/{len(indexes)}",
         flush=True,
       )
   prediction = np.concatenate(predictions)
@@ -564,9 +726,10 @@ def evaluate_ensemble(models: list[nn.Module], windows: WindowBatch,
   stats_t = tensor_stats(stats, device)
   prediction_batches: list[np.ndarray] = []
   disagreement_batches: list[np.ndarray] = []
+  batch_size = evaluation_batch_size(config)
   with torch.no_grad():
-    for start in range(0, len(indexes), EVALUATION_BATCH_SIZE):
-      batch_indexes = indexes[start:start + EVALUATION_BATCH_SIZE]
+    for start in range(0, len(indexes), batch_size):
+      batch_indexes = indexes[start:start + batch_size]
       history = torch.as_tensor(windows.history[batch_indexes], device=device)
       future = torch.as_tensor(windows.future_base[batch_indexes], device=device)
       prediction, disagreement = ensemble_rollout(
@@ -576,7 +739,7 @@ def evaluate_ensemble(models: list[nn.Module], windows: WindowBatch,
       disagreement_batches.append(disagreement.cpu().numpy())
       print(
         f"{config.name} ensemble_evaluation=" +
-        f"{min(start + EVALUATION_BATCH_SIZE, len(indexes))}/{len(indexes)}",
+        f"{min(start + batch_size, len(indexes))}/{len(indexes)}",
         flush=True,
       )
   prediction = np.concatenate(prediction_batches)
@@ -622,7 +785,38 @@ def config_from_args(args: argparse.Namespace) -> ModelConfig:
     history_steps=args.history_steps,
     hidden_sizes=args.hidden_sizes,
     gru_layers=args.gru_layers,
+    temporal_layers=args.temporal_layers,
+    attention_heads=args.attention_heads,
+    feedforward_size=args.feedforward_size,
+    dropout=args.dropout,
   )
+
+
+def config_from_mapping(values: dict[str, Any]) -> ModelConfig:
+  normalized = dict(values)
+  normalized["hidden_sizes"] = tuple(normalized["hidden_sizes"])
+  return ModelConfig(**normalized)
+
+
+def search_candidates(args: argparse.Namespace) -> tuple[ModelConfig, ...]:
+  if args.candidate_file is not None:
+    payload = json.loads(args.candidate_file.read_text(encoding="utf-8"))
+    rows = payload["candidates"] if isinstance(payload, dict) else payload
+    candidates = tuple(config_from_mapping(row) for row in rows)
+  elif args.search_profile == "initial":
+    candidates = INITIAL_CANDIDATES
+  elif args.search_profile == "temporal":
+    candidates = TEMPORAL_CANDIDATES
+  elif args.search_profile == "architecture":
+    candidates = ARCHITECTURE_CANDIDATES
+  else:
+    raise ValueError(f"Unsupported search profile: {args.search_profile}")
+  if len(candidates) < 2:
+    raise ValueError("Architecture search requires at least two candidates.")
+  names = [candidate.name for candidate in candidates]
+  if len(names) != len(set(names)):
+    raise ValueError("Architecture search candidate names must be unique.")
+  return candidates
 
 
 def candidate_report(config: ModelConfig, model: nn.Module, fit: dict[str, Any],
@@ -675,13 +869,14 @@ def route_holdouts(args: argparse.Namespace) -> tuple[str, ...]:
 
 def run_search(args: argparse.Namespace) -> None:
   trajectories, inventory = load_current(args)
+  candidates = search_candidates(args)
   candidate_routes = [
     eligible_routes(
       trajectories,
       candidate,
       max(1, round(args.rollout_seconds / candidate.sample_period_s)),
     )
-    for candidate in DEFAULT_CANDIDATES
+    for candidate in candidates
   ]
   common_routes = set.intersection(*candidate_routes)
   split_trajectories = [
@@ -693,7 +888,7 @@ def run_search(args: argparse.Namespace) -> None:
   )
   device = torch.device(args.device)
   results: list[dict[str, Any]] = []
-  for candidate in DEFAULT_CANDIDATES:
+  for candidate in candidates:
     rollout_steps = max(1, round(args.rollout_seconds / candidate.sample_period_s))
     train_windows = build_windows(
       trajectories, train_routes, candidate, rollout_steps,
@@ -730,6 +925,8 @@ def run_search(args: argparse.Namespace) -> None:
   results.sort(key=lambda item: item["validation"]["score"])
   report = {
     "format_version": FORMAT_VERSION,
+    "search_profile": args.search_profile,
+    "candidate_file": str(args.candidate_file) if args.candidate_file is not None else None,
     "data": {
       "current": inventory,
       "pretraining_performed": False,
@@ -872,14 +1069,20 @@ def main() -> None:
   parser = argparse.ArgumentParser(description="Search and train a neural Ioniq 5 lateral vehicle plant.")
   subparsers = parser.add_subparsers(dest="command", required=True)
   search = subparsers.add_parser("search", parents=[common_parser()])
+  search.add_argument("--search-profile", choices=("initial", "temporal", "architecture"), default="initial")
+  search.add_argument("--candidate-file", type=Path)
   search.set_defaults(func=run_search)
   train = subparsers.add_parser("train", parents=[common_parser()])
   train.add_argument("--name", default="selected_neural_plant")
-  train.add_argument("--family", choices=("mlp", "gru"), default="gru")
+  train.add_argument("--family", choices=("mlp", "gru", "tcn", "transformer"), default="gru")
   train.add_argument("--sample-step", type=int, default=2)
   train.add_argument("--history-steps", type=int, default=100)
   train.add_argument("--hidden-sizes", type=parse_hidden_sizes, default=(256,))
   train.add_argument("--gru-layers", type=int, default=2)
+  train.add_argument("--temporal-layers", type=int, default=2)
+  train.add_argument("--attention-heads", type=int, default=4)
+  train.add_argument("--feedforward-size", type=int, default=256)
+  train.add_argument("--dropout", type=float, default=0.10)
   train.add_argument("--ensemble-seed", type=int, action="append")
   train.set_defaults(func=run_train)
   args = parser.parse_args()

@@ -143,6 +143,10 @@ The ignored output directory contains:
 - `training.json`: reviewable metrics without model tensors;
 - `current_trajectories.joblib`: the reusable full-rate extraction cache.
 
+The promoted model and its training report are checked in under
+`artifacts/tuning/neural_lateral_plant_20260723/`. Intermediate checkpoints
+and extraction caches remain ignored.
+
 Downstream goal-based controller training should use the ensemble mean and
 penalize or reject commands with high member disagreement. The helper
 `load_ensemble_artifact()` reconstructs the members, and

@@ -89,3 +89,95 @@ After training, optimize the Ioniq 5 controller through the same five-step rollo
 ```powershell
 uv run --no-project --with scikit-learn --with joblib --with pycapnp==2.1.0 --with zstandard python -u tools\tuning\optimize_ioniq5_closed_loop.py --model artifacts\tuning\lateral_plant_20260721\lateral_plant_model.joblib --output artifacts\tuning\ioniq5_closed_loop_20260721\optimization.json
 ```
+
+## Neural lateral plant for goal-based NNFF training
+
+Use the neural plant trainer when a controller will be optimized through the
+plant with gradients. It searches both the temporal representation and network
+capacity instead of fixing the original `0.6 s @ 20 Hz`,
+`96 -> 128 -> 128 -> 64 -> 4` surrogate.
+
+The built-in search compares:
+
+- `0.6`, `1.0`, `1.5`, and `2.0` second windows;
+- 20 Hz and 50 Hz retained histories;
+- MLPs from the original 37,444 parameters through larger dense models;
+- two-layer GRU temporal models.
+
+Routes `00000109` and `0000010b` are untouched final holdouts by default.
+Candidate selection uses other complete routes only. Training uses recursive
+multi-step loss rather than one-step teacher forcing alone.
+
+Run the search on a CUDA machine:
+
+```bash
+uv run --no-project --with torch --with joblib --with scikit-learn --with pycapnp==2.1.0 --with zstandard \
+  python -u tools/tuning/train_neural_lateral_plant.py search \
+  --current-root /path/to/realdata \
+  --output-dir artifacts/tuning/neural_lateral_plant_search
+```
+
+Then train a three-member ensemble with the selected configuration. For
+example, for a two-layer, 256-wide GRU using a dense two-second history:
+
+```bash
+uv run --no-project --with torch --with joblib --with scikit-learn --with pycapnp==2.1.0 --with zstandard \
+  python -u tools/tuning/train_neural_lateral_plant.py train \
+  --current-root /path/to/realdata \
+  --family gru --sample-step 2 --history-steps 100 \
+  --hidden-sizes 256 --gru-layers 2 \
+  --output-dir artifacts/tuning/neural_lateral_plant_final
+```
+
+The ignored output directory contains:
+
+- `neural_lateral_plant.pt`: model states, normalization, architecture, data
+  inventory, route splits, and ensemble metadata;
+- `training.json`: reviewable metrics without model tensors;
+- `current_trajectories.joblib`: the reusable full-rate extraction cache.
+
+Downstream goal-based controller training should use the ensemble mean and
+penalize or reject commands with high member disagreement. The helper
+`load_ensemble_artifact()` reconstructs the members, and
+`ensemble_predict_delta()` returns both mean response and disagreement.
+For differentiable policy training, `ensemble_rollout()` returns the
+autoregressive ensemble mean and disagreement across the full horizon.
+This makes model uncertainty visible instead of allowing a controller to
+silently exploit one surrogate's error.
+
+Camera-only Pond archives cannot be used for this model. They do not contain
+the steering torque, vehicle state, and controller messages required for
+training; an archive must contain `rlog`, `rlog.zst`, or equivalent telemetry.
+
+### 2026-07-23 architecture search
+
+The search used 1,258 current-tire rlogs from 50 routes. Thirty routes had
+clean windows for every candidate; four validation routes selected the
+architecture, while routes `00000109` and `0000010b` remained untouched.
+No older-data pretraining was performed because the available Pond archive
+contained camera video rather than telemetry.
+
+| Candidate | History | Parameters | Validation score |
+|---|---:|---:|---:|
+| 1.5 s GRU, 50 Hz | 1.5 s | 376,516 | **0.299563** |
+| 1.5 s MLP, 50 Hz | 1.5 s | 472,452 | 0.300110 |
+| 1.0 s MLP, 50 Hz | 1.0 s | 201,860 | 0.300581 |
+| 2.0 s large MLP, 50 Hz | 2.0 s | 837,508 | 0.305101 |
+| 2.0 s GRU, 50 Hz | 2.0 s | 665,860 | 0.305229 |
+| Original-shape MLP, 20 Hz | 0.6 s | 37,444 | 0.352507 |
+
+The selected 1.5-second GRU improved the weighted normalized two-second
+rollout score by 15.0% over the original surrogate shape. The larger 2-second
+models did not improve validation, so model size was not increased blindly.
+
+The final three-seed ensemble has 376,516 parameters per member and 1,129,548
+parameters in total. It scored `0.293589` across 36,420 validation windows.
+On the previously untouched `00000109` and `0000010b` routes, it scored
+`0.351401` across 20,792 windows.
+
+For a route-matched reference, a separately trained three-seed ensemble using
+the original 37,444-parameter shape scored `0.334715` on validation and
+`0.376804` on the holdout. The selected model therefore improved the
+normalized score by 12.3% on validation and 6.7% on the holdout. Window counts
+differ because the selected model retains 50 Hz samples while the reference
+retains 20 Hz samples.

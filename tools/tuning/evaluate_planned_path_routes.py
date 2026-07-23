@@ -103,6 +103,10 @@ def phase_samples(samples: list[dict[str, Any]], phase: str) -> list[dict[str, A
       and jerk(sample) is not None
       and float(sample["desired"]) * float(sample["desired_jerk"]) < 0.0
     ]
+  if phase == "unwind_left":
+    return [sample for sample in phase_samples(samples, "unwind") if float(sample["desired"]) > 0.0]
+  if phase == "unwind_right":
+    return [sample for sample in phase_samples(samples, "unwind") if float(sample["desired"]) < 0.0]
   if phase == "higher_lat_steady":
     return [
       sample for sample in active
@@ -140,6 +144,8 @@ def summarize(samples: list[dict[str, Any]], last_live_torque: dict[str, Any] | 
     "turn_in_left",
     "turn_in_right",
     "unwind",
+    "unwind_left",
+    "unwind_right",
     "higher_lat_steady",
   )
   return {

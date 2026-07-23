@@ -66,6 +66,10 @@ class Tune:
   sustained_turn_in_ff_lat_start: float = 1.10
   sustained_turn_in_ff_lat_end: float = 3.60
   sustained_turn_in_ff_lat_width: float = 0.30
+  steady_high_lat_taper: float = 0.0
+  steady_high_lat_start: float = 0.35
+  steady_high_lat_width: float = 0.12
+  steady_jerk_width: float = 0.08
   hkg_friction_threshold: bool = False
 
 
@@ -156,6 +160,9 @@ def tune_terms(tune: Tune, desired: np.ndarray, jerk: np.ndarray, speed: np.ndar
     sustained = side(desired, tune.sustained_turn_in_ff_boost_left, tune.sustained_turn_in_ff_boost_right) * sustained_speed * sustained_onset * sustained_cutoff
     sustained = np.where(sustained_mask, sustained, 0.0)
   ff_scale = (1.0 + sustained) * (1.0 - base_reduction) * turn_boost * np.maximum(unwind_taper, 0.0)
+  steady_weight = np.exp(-((jerk / tune.steady_jerk_width) ** 2))
+  steady_high_lat_weight = sigmoid((abs_lat - tune.steady_high_lat_start) / tune.steady_high_lat_width)
+  ff_scale *= 1.0 - tune.steady_high_lat_taper * steady_weight * steady_high_lat_weight
 
   center_speed = sigmoid((speed - tune.center_taper_speed) / tune.center_taper_speed_width)
   center_lat = sigmoid((tune.center_taper_lat - abs_lat) / tune.center_taper_lat_width)

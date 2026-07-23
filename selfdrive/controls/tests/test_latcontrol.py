@@ -512,7 +512,9 @@ class TestLatControl:
     turn_in_right = get_ioniq_5_ff_scale(-0.7, -0.8, 12.0)
     unwind_left = get_ioniq_5_ff_scale(0.7, -0.8, 12.0)
     unwind_right = get_ioniq_5_ff_scale(-0.7, 0.8, 12.0)
+    gentle_turn_in_left = get_ioniq_5_ff_scale(0.7, 0.16, 12.0)
     assert steady_left < steady_right < 1.0
+    assert steady_left < gentle_turn_in_left
     assert turn_in_left > steady_left
     assert turn_in_right >= steady_right
     assert unwind_left < steady_left

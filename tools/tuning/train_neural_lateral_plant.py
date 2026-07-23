@@ -40,6 +40,9 @@ DEFAULT_CURRENT_ROOT = Path(r"D:\comma_driving_logs\10.30.1.75\realdata")
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "artifacts/tuning/neural_lateral_plant"
 FORMAT_VERSION = 1
 STATE_INDEXES = tuple(plant_data.BASE_FEATURES.index(name) for name in plant_data.STATE_FEATURES)
+SIGNED_STEERING_RATE_INDEX = plant_data.BASE_FEATURES.index("signed_steering_rate_deg_s")
+STEERING_RATE_INDEX = plant_data.BASE_FEATURES.index("steering_rate_deg")
+SIGNED_STEERING_RATE_STATE_INDEX = plant_data.STATE_FEATURES.index("signed_steering_rate_deg_s")
 DEFAULT_HOLDOUTS = ("00000109", "0000010b")
 EVALUATION_BATCH_SIZE = 4096
 SEQUENCE_EVALUATION_BATCH_SIZE = 512
@@ -104,41 +107,42 @@ TEMPORAL_CANDIDATES = temporal_candidates()
 
 ARCHITECTURE_CANDIDATES = (
   ModelConfig("architecture_previous_gru_50hz_1p5s", "gru", 2, 75, (192,), gru_layers=2),
-  ModelConfig("architecture_gru_100hz_3s", "gru", 1, 300, (192,), gru_layers=2),
-  ModelConfig("architecture_large_gru_100hz_3s", "gru", 1, 300, (384,), gru_layers=3),
-  ModelConfig("architecture_tcn_100hz_3s", "tcn", 1, 300, (128,), temporal_layers=7),
-  ModelConfig("architecture_large_tcn_100hz_3s", "tcn", 1, 300, (192,), temporal_layers=7),
+  ModelConfig("architecture_temporal_gru_100hz_2s", "gru", 1, 200, (96,), gru_layers=1, dropout=0.0),
+  ModelConfig("architecture_gru_100hz_2s", "gru", 1, 200, (192,), gru_layers=2),
+  ModelConfig("architecture_large_gru_100hz_2s", "gru", 1, 200, (384,), gru_layers=3),
+  ModelConfig("architecture_tcn_100hz_2s", "tcn", 1, 200, (128,), temporal_layers=7),
+  ModelConfig("architecture_large_tcn_100hz_2s", "tcn", 1, 200, (192,), temporal_layers=7),
   ModelConfig(
-    "architecture_small_transformer_100hz_3s",
+    "architecture_small_transformer_100hz_2s",
     "transformer",
     1,
-    300,
+    200,
     (64,),
     temporal_layers=2,
     attention_heads=4,
     feedforward_size=256,
   ),
   ModelConfig(
-    "architecture_transformer_100hz_3s",
+    "architecture_transformer_100hz_2s",
     "transformer",
     1,
-    300,
+    200,
     (128,),
     temporal_layers=4,
     attention_heads=8,
     feedforward_size=512,
   ),
   ModelConfig(
-    "architecture_large_transformer_100hz_3s",
+    "architecture_large_transformer_100hz_2s",
     "transformer",
     1,
-    300,
+    200,
     (192,),
     temporal_layers=4,
     attention_heads=8,
     feedforward_size=768,
   ),
-  ModelConfig("architecture_mlp_100hz_3s", "mlp", 1, 300, (512, 512, 256)),
+  ModelConfig("architecture_mlp_100hz_2s", "mlp", 1, 200, (512, 512, 256)),
 )
 
 
@@ -162,6 +166,8 @@ class MLPPlant(nn.Module):
       layers.append(nn.Linear(input_size, output_width))
       if index < len(sizes) - 2:
         layers.append(nn.SiLU())
+        if config.dropout > 0.0:
+          layers.append(nn.Dropout(config.dropout))
     self.network = nn.Sequential(*layers)
 
   def forward(self, values: torch.Tensor) -> torch.Tensor:
@@ -291,6 +297,13 @@ def evaluation_batch_size(config: ModelConfig) -> int:
   if config.family in ("tcn", "transformer") or config.history_steps >= 150:
     return SEQUENCE_EVALUATION_BATCH_SIZE
   return EVALUATION_BATCH_SIZE
+
+
+def sampled_indexes(length: int, limit: int | None, seed: int) -> np.ndarray:
+  indexes = np.arange(length)
+  if limit is not None and len(indexes) > limit:
+    indexes = np.sort(np.random.default_rng(seed).choice(indexes, limit, replace=False))
+  return indexes
 
 
 def load_ensemble_artifact(path: Path, device: torch.device | str = "cpu") -> tuple[
@@ -547,6 +560,7 @@ def rollout(model: nn.Module, history: torch.Tensor, future_base: torch.Tensor,
     predictions.append(next_state)
     next_base = future_base[:, step].clone()
     next_base[:, state_indexes] = next_state
+    next_base[:, STEERING_RATE_INDEX] = next_state[:, SIGNED_STEERING_RATE_STATE_INDEX].abs()
     history = torch.cat((next_base[:, None], history[:, :-1]), dim=1)
   return torch.stack(predictions, dim=1)
 
@@ -583,8 +597,8 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
   history_report: list[dict[str, float]] = []
   started = perf_counter()
 
-  validation_limit = min(len(validation_windows), 5000)
-  validation_indexes = np.arange(validation_limit)
+  validation_indexes = sampled_indexes(len(validation_windows), 5000, seed + 10_000)
+  validation_limit = len(validation_indexes)
   validation_steps = min(rollout_train_steps, validation_windows.target_states.shape[1])
 
   for epoch in range(1, epochs + 1):
@@ -663,10 +677,7 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
 def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.ndarray],
                    config: ModelConfig, max_windows: int | None, device: torch.device,
                    seed: int) -> dict[str, Any]:
-  rng = np.random.default_rng(seed)
-  indexes = np.arange(len(windows))
-  if max_windows is not None and len(indexes) > max_windows:
-    indexes = np.sort(rng.choice(indexes, max_windows, replace=False))
+  indexes = sampled_indexes(len(windows), max_windows, seed)
   targets = windows.target_states[indexes]
   stats_t = tensor_stats(stats, device)
   predictions: list[np.ndarray] = []
@@ -718,10 +729,7 @@ def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.n
 def evaluate_ensemble(models: list[nn.Module], windows: WindowBatch,
                       stats: dict[str, np.ndarray], config: ModelConfig,
                       max_windows: int | None, device: torch.device, seed: int) -> dict[str, Any]:
-  rng = np.random.default_rng(seed)
-  indexes = np.arange(len(windows))
-  if max_windows is not None and len(indexes) > max_windows:
-    indexes = np.sort(rng.choice(indexes, max_windows, replace=False))
+  indexes = sampled_indexes(len(windows), max_windows, seed)
   targets = windows.target_states[indexes]
   stats_t = tensor_stats(stats, device)
   prediction_batches: list[np.ndarray] = []
@@ -839,6 +847,9 @@ def common_parser() -> argparse.ArgumentParser:
   parser.add_argument("--workers", type=int, default=max(1, min(16, os.cpu_count() or 1)))
   parser.add_argument("--brand", default="hyundai")
   parser.add_argument("--car-fingerprint-contains", default="IONIQ5")
+  parser.add_argument("--max-route-driver-overlay", type=float, default=0.50)
+  parser.add_argument("--pretraining-note")
+  parser.add_argument("--split-report", type=Path)
   parser.add_argument("--validation-fraction", type=float, default=0.15)
   parser.add_argument("--holdout-route-prefix", action="append")
   parser.add_argument("--max-train-windows", type=int, default=300000)
@@ -858,13 +869,78 @@ def common_parser() -> argparse.ArgumentParser:
 
 def load_current(args: argparse.Namespace) -> tuple[list[plant_data.Trajectory], dict[str, Any]]:
   cache_path = args.trajectory_cache or args.output_dir / "current_trajectories.joblib"
-  return load_trajectories(
+  trajectories, inventory = load_trajectories(
     args.current_root, cache_path, args.workers, args.brand, args.car_fingerprint_contains,
   )
+  retained, route_stats, excluded_routes = filter_high_overlay_routes(
+    trajectories, args.max_route_driver_overlay,
+  )
+  print(
+    f"excluded {len(excluded_routes)}/{len(route_stats)} routes above " +
+    f"{args.max_route_driver_overlay:.0%} driver overlay",
+    flush=True,
+  )
+  for route in excluded_routes:
+    print(f"  exclude {route}: {route_stats[route]['driver_overlay_fraction']:.1%} overlay", flush=True)
+  inventory["route_filter"] = {
+    "max_driver_overlay_fraction": args.max_route_driver_overlay,
+    "excluded_routes": excluded_routes,
+    "retained_route_count": len({trajectory.route for trajectory in retained}),
+  }
+  return retained, inventory
 
 
 def route_holdouts(args: argparse.Namespace) -> tuple[str, ...]:
   return tuple(args.holdout_route_prefix or DEFAULT_HOLDOUTS)
+
+
+def filter_high_overlay_routes(
+  trajectories: list[plant_data.Trajectory],
+  max_driver_overlay_fraction: float,
+) -> tuple[list[plant_data.Trajectory], dict[str, dict[str, float]], list[str]]:
+  route_stats = plant_data.route_intervention_stats(trajectories)
+  excluded_routes = sorted(
+    route for route, stats in route_stats.items()
+    if stats["driver_overlay_fraction"] > max_driver_overlay_fraction
+  )
+  retained = [
+    trajectory for trajectory in trajectories
+    if trajectory.route not in excluded_routes
+  ]
+  return retained, route_stats, excluded_routes
+
+
+def pretraining_note(args: argparse.Namespace) -> str:
+  return args.pretraining_note or "Pretraining was not performed by this command."
+
+
+def search_report_path(args: argparse.Namespace) -> Path:
+  label = args.candidate_file.stem if args.candidate_file is not None else args.search_profile
+  return args.output_dir / f"{label}_search.json"
+
+
+def split_from_report(path: Path, usable_routes: set[str],
+                      inventory: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
+  report = json.loads(path.read_text(encoding="utf-8"))
+  data = report["data"]
+  report_inventory = data["current"]
+  for key in ("rlog_count", "rlog_bytes", "newest_mtime_ns"):
+    if report_inventory.get(key) != inventory.get(key):
+      raise ValueError(f"Split report data inventory differs at {key}.")
+  training = set(data["train_routes"])
+  validation = set(data["validation_routes"])
+  holdout = set(data["holdout_routes"])
+  if not training or not validation or not holdout:
+    raise ValueError("Split report must contain non-empty train, validation, and holdout routes.")
+  if training & validation or training & holdout or validation & holdout:
+    raise ValueError("Split report route cohorts must be disjoint.")
+  unavailable = (training | validation | holdout) - usable_routes
+  if unavailable:
+    raise ValueError(
+      "Split report contains routes that are not eligible for this configuration: " +
+      ", ".join(sorted(unavailable))
+    )
+  return training, validation, holdout
 
 
 def run_search(args: argparse.Namespace) -> None:
@@ -879,13 +955,18 @@ def run_search(args: argparse.Namespace) -> None:
     for candidate in candidates
   ]
   common_routes = set.intersection(*candidate_routes)
-  split_trajectories = [
-    trajectory for trajectory in trajectories
-    if trajectory.route in common_routes
-  ]
-  train_routes, validation_routes, holdout_routes = split_routes(
-    split_trajectories, args.validation_fraction, route_holdouts(args), args.random_state,
-  )
+  if args.split_report is not None:
+    train_routes, validation_routes, holdout_routes = split_from_report(
+      args.split_report, common_routes, inventory,
+    )
+  else:
+    split_trajectories = [
+      trajectory for trajectory in trajectories
+      if trajectory.route in common_routes
+    ]
+    train_routes, validation_routes, holdout_routes = split_routes(
+      split_trajectories, args.validation_fraction, route_holdouts(args), args.random_state,
+    )
   device = torch.device(args.device)
   results: list[dict[str, Any]] = []
   for candidate in candidates:
@@ -927,13 +1008,11 @@ def run_search(args: argparse.Namespace) -> None:
     "format_version": FORMAT_VERSION,
     "search_profile": args.search_profile,
     "candidate_file": str(args.candidate_file) if args.candidate_file is not None else None,
+    "split_report": str(args.split_report) if args.split_report is not None else None,
     "data": {
       "current": inventory,
       "pretraining_performed": False,
-      "pretraining_note": (
-        "No older telemetry was available. The supplied Pond archive contained " +
-        "camera MP4 files only, so all candidates used current-tire rlogs."
-      ),
+      "pretraining_note": pretraining_note(args),
       "train_routes": sorted(train_routes),
       "validation_routes": sorted(validation_routes),
       "holdout_routes": sorted(holdout_routes),
@@ -945,7 +1024,7 @@ def run_search(args: argparse.Namespace) -> None:
     "selected": results[0]["config"],
   }
   args.output_dir.mkdir(parents=True, exist_ok=True)
-  path = args.output_dir / "architecture_search.json"
+  path = search_report_path(args)
   path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
   print(f"selected {results[0]['config']['name']}", flush=True)
   print(f"report: {path}", flush=True)
@@ -956,13 +1035,18 @@ def run_train(args: argparse.Namespace) -> None:
   config = config_from_args(args)
   rollout_steps = max(1, round(args.rollout_seconds / config.sample_period_s))
   usable_routes = eligible_routes(trajectories, config, rollout_steps)
-  split_trajectories = [
-    trajectory for trajectory in trajectories
-    if trajectory.route in usable_routes
-  ]
-  train_routes, validation_routes, holdout_routes = split_routes(
-    split_trajectories, args.validation_fraction, route_holdouts(args), args.random_state,
-  )
+  if args.split_report is not None:
+    train_routes, validation_routes, holdout_routes = split_from_report(
+      args.split_report, usable_routes, inventory,
+    )
+  else:
+    split_trajectories = [
+      trajectory for trajectory in trajectories
+      if trajectory.route in usable_routes
+    ]
+    train_routes, validation_routes, holdout_routes = split_routes(
+      split_trajectories, args.validation_fraction, route_holdouts(args), args.random_state,
+    )
   train_windows = build_windows(
     trajectories, train_routes, config, rollout_steps,
     args.max_train_windows, args.random_state,
@@ -1015,10 +1099,8 @@ def run_train(args: argparse.Namespace) -> None:
     "metadata": {
       "current_data": inventory,
       "pretraining_performed": False,
-      "pretraining_note": (
-        "No older telemetry was available. The supplied Pond archive contained " +
-        "camera MP4 files only; this ensemble was trained solely on current-tire rlogs."
-      ),
+      "pretraining_note": pretraining_note(args),
+      "split_report": str(args.split_report) if args.split_report is not None else None,
       "train_routes": sorted(train_routes),
       "validation_routes": sorted(validation_routes),
       "holdout_routes": sorted(holdout_routes),

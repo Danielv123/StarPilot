@@ -107,8 +107,11 @@ The search is split into controlled profiles:
   including the previously selected 50 Hz GRU as a control.
 
 Routes `00000109` and `0000010b` are untouched final holdouts by default.
-Candidate selection uses other complete routes only. Training uses recursive
-multi-step loss rather than one-step teacher forcing alone.
+Routes with more than 50% driver-torque overlay are excluded before any
+cohort is selected. Candidate selection uses other complete routes only.
+Training uses recursive multi-step loss rather than one-step teacher forcing
+alone. The bounded early-stopping evaluation uses a deterministic random
+sample across the full validation window set rather than its first rows.
 
 Run the search on a CUDA machine:
 
@@ -122,15 +125,22 @@ uv run --no-project --with torch --with joblib --with scikit-learn --with pycapn
 
 Run `temporal` first, then adjust or run the `architecture` profile at the
 best temporal setting. A JSON candidate list can be supplied with
-`--candidate-file` for additional controlled experiments.
+`--candidate-file` for additional controlled experiments. Each profile writes
+a distinct report such as `temporal_search.json` or
+`architecture_search.json`; a candidate file named `finalists.json` writes
+`finalists_search.json`.
 
 Then train a three-member ensemble with the selected configuration. For
-example, for a two-layer, 256-wide GRU using a dense two-second history:
+the final comparison and training run, pass the preceding report through
+`--split-report`. The trainer verifies the data inventory and reuses its exact
+training, validation, and holdout route cohorts. For example, for a two-layer,
+256-wide GRU using a dense two-second history:
 
 ```bash
 uv run --no-project --with torch --with joblib --with scikit-learn --with pycapnp==2.1.0 --with zstandard \
   python -u tools/tuning/train_neural_lateral_plant.py train \
   --current-root /path/to/realdata \
+  --split-report artifacts/tuning/neural_lateral_plant_search/architecture_search.json \
   --family gru --sample-step 2 --history-steps 100 \
   --hidden-sizes 256 --gru-layers 2 \
   --output-dir artifacts/tuning/neural_lateral_plant_final
@@ -143,9 +153,11 @@ The ignored output directory contains:
 - `training.json`: reviewable metrics without model tensors;
 - `current_trajectories.joblib`: the reusable full-rate extraction cache.
 
-The promoted model and its training report are checked in under
+The promoted model, training report, finalist definition, and definitive
+temporal/architecture/finalist search reports are checked in under
 `artifacts/tuning/neural_lateral_plant_20260723/`. Intermediate checkpoints
-and extraction caches remain ignored.
+and extraction caches remain ignored. The promoted `.pt` is stored as a
+normal Git blob; Git LFS is not used.
 
 Downstream goal-based controller training should use the ensemble mean and
 penalize or reject commands with high member disagreement. The helper
@@ -158,93 +170,77 @@ silently exploit one surrogate's error.
 
 Camera-only Pond archives cannot be used for this model. They do not contain
 the steering torque, vehicle state, and controller messages required for
-training; an archive must contain `rlog`, `rlog.zst`, or equivalent telemetry.
+training; an archive must contain raw `rlog`, `rlog.zst`, `rlog.bz2`, or
+equivalent telemetry.
 
 ### 2026-07-23 architecture search
 
-The search used 1,258 current-tire rlogs from 50 routes. Thirty routes had
-clean windows for every candidate; four validation routes selected the
-architecture, while routes `00000109` and `0000010b` remained untouched.
-No older-data pretraining was performed because the available Pond archive
-contained camera video rather than telemetry.
+The original search figures and promoted artifact were discarded during
+review. In recursive rollouts, the signed steering rate was predicted but its
+unsigned magnitude was still copied from the logged future row. The corrected
+rollout derives both values from the predicted state, and all results below
+were regenerated after that fix.
+
+The search used 1,258 current-tire rlogs from 50 routes. It first excluded
+nine routes with more than 50% driver overlay, then found 23 routes with clean
+windows for every candidate: 18 training routes, three validation routes, and
+the untouched `00000109` and `0000010b` holdouts. No older-data pretraining
+was performed because the available Pond archive contained camera video
+rather than telemetry.
 
 The fixed-capacity temporal sweep selected a `10 ms` sample interval with
-`3.0 s` of history. The score is the weighted normalized error across the
+`2.0 s` of history. The score is the weighted normalized error across the
 complete two-second autoregressive rollout; lower is better.
 
 | Sample interval | Best history | Best validation score |
 |---:|---:|---:|
-| 10 ms (100 Hz) | 3.0 s | **0.293978** |
-| 20 ms (50 Hz) | 2.0 s | 0.307082 |
-| 50 ms (20 Hz) | 3.0 s | 0.338630 |
+| 10 ms (100 Hz) | 2.0 s | **0.372822** |
+| 20 ms (50 Hz) | 3.0 s | 0.396610 |
+| 50 ms (20 Hz) | 3.0 s | 0.389449 |
 
-At 100 Hz, the five tested histories scored between `0.293978` and
-`0.298511`, so interval mattered more than the exact history length. Three
-seconds was the measured winner, but the small margin over 1.5 seconds
-(`0.294851`) should not be treated as a universal optimum outside this data
-and rollout objective.
+At 100 Hz, the five histories scored between `0.372822` and `0.413582`.
+Two seconds was the measured winner, narrowly ahead of 1.5 seconds
+(`0.375217`); extending the history to three seconds regressed to `0.383675`.
+The selected interval and history are empirical results for this data and
+rollout objective, not assumed constants.
 
-The architecture screen used the 100 Hz, 3.0-second history, except for the
+The architecture screen used the 100 Hz, 2.0-second history, except for the
 previous 50 Hz GRU control. It used a shorter recursive training horizon and
 1,000 validation windows to rank candidates before the expensive finalist
 pass.
 
 | Architecture | Parameters | Screen score |
 |---|---:|---:|
-| 7-block, 192-channel TCN | 1,590,916 | **0.347909** |
-| 3-layer, 384-wide GRU | 2,377,348 | 0.363150 |
-| 7-block, 128-channel TCN | 708,356 | 0.373436 |
-| 4-layer, 192-wide Transformer | 1,876,996 | 0.392425 |
-| 3-layer MLP | 1,624,324 | 0.394568 |
-| 4-layer, 128-wide Transformer | 849,924 | 0.409778 |
-| 2-layer, 192-wide GRU | 376,516 | 0.412320 |
-| Previous 50 Hz GRU control | 376,516 | 0.424192 |
-| 2-layer, 64-wide Transformer | 124,292 | 0.439513 |
+| 4-layer, 192-wide Transformer | 1,857,796 | **0.413439** |
+| 7-block, 192-channel TCN | 1,590,916 | 0.417257 |
+| 2-layer, 192-wide GRU | 376,516 | 0.428121 |
+| 7-block, 128-channel TCN | 708,356 | 0.434001 |
+| 4-layer, 128-wide Transformer | 837,124 | 0.435579 |
+| 1-layer, 96-wide GRU | 40,228 | 0.438219 |
+| 2-layer, 64-wide Transformer | 117,892 | 0.454028 |
+| 3-layer, 384-wide GRU | 2,377,348 | 0.457944 |
+| Previous 50 Hz GRU control | 376,516 | 0.507727 |
+| 3-layer MLP | 1,214,724 | 0.516109 |
 
-The Transformers were valid trainable candidates, but none reached the TCN
-or large-GRU screen scores. This sequence-prediction problem and dataset did
-not reward attention enough to offset its weaker sample efficiency.
-
-The two screen winners then received the same 0.5-second recursive training
-loss and 20,000-window evaluation used for final selection:
+The large Transformer narrowly led the screen, so the full-budget finalist
+pass compares it with the large TCN and the fixed-capacity temporal GRU. All
+three reuse the architecture screen's exact route cohorts and receive the
+same 0.5-second recursive training loss and 20,000-window evaluation:
 
 | Finalist | Parameters | Validation score |
 |---|---:|---:|
-| 7-block, 192-channel TCN | 1,590,916 | **0.303054** |
-| 3-layer, 384-wide GRU | 2,377,348 | 0.314029 |
+| 7-block, 192-channel TCN | 1,590,916 | **0.380103** |
+| 1-layer, 96-wide GRU | 40,228 | 0.380475 |
+| 4-layer, 192-wide Transformer | 1,857,796 | 0.391672 |
 
-Neither larger finalist beat the `0.299563` score from the earlier 50 Hz GRU
-search, while the fixed-capacity 100 Hz temporal winner scored `0.293978`.
-The temporal winner was therefore the only new candidate promoted to
-three-seed ensemble training.
+The full-budget result reversed the abbreviated screen: the TCN beat the
+Transformer and edged the compact GRU by `0.000372` (about 0.1%). The
+1,590,916-parameter TCN was therefore promoted to three-seed ensemble
+training. Its size was selected by the measured route-isolated search, not
+chosen as an arbitrary capacity target.
 
-#### Initial architecture search
-
-| Candidate | History | Parameters | Validation score |
-|---|---:|---:|---:|
-| 1.5 s GRU, 50 Hz | 1.5 s | 376,516 | **0.299563** |
-| 1.5 s MLP, 50 Hz | 1.5 s | 472,452 | 0.300110 |
-| 1.0 s MLP, 50 Hz | 1.0 s | 201,860 | 0.300581 |
-| 2.0 s large MLP, 50 Hz | 2.0 s | 837,508 | 0.305101 |
-| 2.0 s GRU, 50 Hz | 2.0 s | 665,860 | 0.305229 |
-| Original-shape MLP, 20 Hz | 0.6 s | 37,444 | 0.352507 |
-
-That search initially selected the 1.5-second GRU. The expanded search
-superseded it with the 100 Hz, 3.0-second, one-layer GRU. The final
-three-seed ensemble has 40,228 parameters per member and 120,684 parameters
-in total. It scored `0.279085` across 68,950 validation windows. On the
-previously untouched `00000109` and `0000010b` routes, it scored `0.339295`
-across 38,736 windows.
-
-The superseded 50 Hz ensemble scored `0.293589` on validation and `0.351401`
-on the same untouched routes. The denser temporal ensemble therefore
-improved the normalized score by 4.9% on validation and 3.4% on the holdout,
-despite using fewer weights. The 3.0-second recurrent computation remains
-substantially richer than the old 1.5-second input even though parameter
-count alone is lower.
-
-For a route-matched reference, a separately trained three-seed ensemble using
-the original 37,444-parameter shape scored `0.334715` on validation and
-`0.376804` on the holdout. The final temporal ensemble improved those scores
-by 16.6% and 10.0%, respectively. Window counts differ because the final
-model retains 100 Hz samples while the reference retains 20 Hz samples.
+The promoted ensemble has 1,590,916 parameters per member and 4,772,748
+parameters in total. The ensemble scored `0.364085` over 20,000 validation
+windows, a 4.2% improvement over the selected single-member finalist. It
+scored `0.427295` over 30,000 windows from the previously untouched holdout
+routes. The committed model is a 19,155,697-byte normal Git blob.

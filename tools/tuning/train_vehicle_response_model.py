@@ -226,7 +226,12 @@ def discover_log_files(
   route_prefixes: list[str],
   segment_names: set[str] | None = None,
 ) -> list[Path]:
-  candidates = [p for p in root.glob(f"*/{log_type}.zst") if p.is_file()]
+  candidates = sorted({
+    path
+    for filename in (log_type, f"{log_type}.zst", f"{log_type}.bz2")
+    for path in root.glob(f"*/{filename}")
+    if path.is_file()
+  })
   if route_prefixes:
     candidates = [p for p in candidates if any(p.parent.name.startswith(prefix) for prefix in route_prefixes)]
   if segment_names is not None:

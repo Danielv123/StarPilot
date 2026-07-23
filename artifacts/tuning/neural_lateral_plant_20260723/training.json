@@ -11,71 +11,86 @@
   },
   "config": {
     "attention_heads": 4,
-    "dropout": 0.0,
-    "family": "gru",
+    "dropout": 0.1,
+    "family": "tcn",
     "feedforward_size": 256,
-    "gru_layers": 1,
+    "gru_layers": 2,
     "hidden_sizes": [
-      96
+      192
     ],
-    "history_steps": 300,
-    "name": "dense_temporal_gru_100hz_3s",
+    "history_steps": 200,
+    "name": "selected_large_tcn_100hz_2s",
     "sample_step": 1,
-    "temporal_layers": 2
+    "temporal_layers": 7
   },
   "current_data": {
     "newest_mtime_ns": 1784786498000000000,
     "rlog_bytes": 16265578632,
     "rlog_count": 1258,
-    "root": "/home/dvl/dvl/starpilot-plant/data/realdata"
+    "root": "/home/dvl/dvl/starpilot-plant/data/realdata",
+    "route_filter": {
+      "excluded_routes": [
+        "000000b2--fdf93442e8",
+        "000000de--22eaf07e3c",
+        "000000e3--535834b74a",
+        "000000e5--5977a760a9",
+        "000000fb--db9cf9ddec",
+        "000000fd--e16a112216",
+        "000000ff--ede5baeb22",
+        "00000100--e76442e281",
+        "00000101--aac6da3760"
+      ],
+      "max_driver_overlay_fraction": 0.5,
+      "retained_route_count": 41
+    }
   },
-  "eligible_route_count": 30,
+  "eligible_route_count": 23,
   "ensemble_holdout": {
     "mean_normalized_disagreement": {
-      "actual_lateral_accel": 0.03954046592116356,
-      "signed_steering_rate_deg_s": 0.050028543919324875,
-      "steering_angle_deg": 0.02963702194392681,
-      "steering_torque_eps": 0.07514295727014542
+      "actual_lateral_accel": 0.06133585423231125,
+      "signed_steering_rate_deg_s": 0.08596237003803253,
+      "steering_angle_deg": 0.0567832812666893,
+      "steering_torque_eps": 0.08235606551170349
     },
     "normalized_rmse": {
-      "actual_lateral_accel": 0.13565470278263092,
-      "signed_steering_rate_deg_s": 0.8680487275123596,
-      "steering_angle_deg": 0.1564994603395462,
-      "steering_torque_eps": 0.340467244386673
+      "actual_lateral_accel": 0.2097819745540619,
+      "signed_steering_rate_deg_s": 0.9377742409706116,
+      "steering_angle_deg": 0.37114015221595764,
+      "steering_torque_eps": 0.3132498860359192
     },
     "p95_normalized_disagreement": {
-      "actual_lateral_accel": 0.10786152631044388,
-      "signed_steering_rate_deg_s": 0.1799786388874054,
-      "steering_angle_deg": 0.0750025063753128,
-      "steering_torque_eps": 0.2600380778312683
+      "actual_lateral_accel": 0.16666148602962494,
+      "signed_steering_rate_deg_s": 0.37790587544441223,
+      "steering_angle_deg": 0.19588954746723175,
+      "steering_torque_eps": 0.3147304952144623
     },
-    "score": 0.33929505944252014,
-    "windows": 38736
+    "score": 0.42729541659355164,
+    "windows": 30000
   },
-  "ensemble_parameters": 120684,
+  "ensemble_parameters": 4772748,
   "ensemble_validation": {
     "mean_normalized_disagreement": {
-      "actual_lateral_accel": 0.031423188745975494,
-      "signed_steering_rate_deg_s": 0.04771432280540466,
-      "steering_angle_deg": 0.023583661764860153,
-      "steering_torque_eps": 0.082003653049469
+      "actual_lateral_accel": 0.06089151278138161,
+      "signed_steering_rate_deg_s": 0.06315763294696808,
+      "steering_angle_deg": 0.04103380814194679,
+      "steering_torque_eps": 0.0712190493941307
     },
     "normalized_rmse": {
-      "actual_lateral_accel": 0.07774234563112259,
-      "signed_steering_rate_deg_s": 0.7967838048934937,
-      "steering_angle_deg": 0.07121282070875168,
-      "steering_torque_eps": 0.3497903645038605
+      "actual_lateral_accel": 0.2216549515724182,
+      "signed_steering_rate_deg_s": 0.7757210731506348,
+      "steering_angle_deg": 0.19208712875843048,
+      "steering_torque_eps": 0.3277571201324463
     },
     "p95_normalized_disagreement": {
-      "actual_lateral_accel": 0.08011030405759811,
-      "signed_steering_rate_deg_s": 0.1739136278629303,
-      "steering_angle_deg": 0.06038811802864075,
-      "steering_torque_eps": 0.2833002805709839
+      "actual_lateral_accel": 0.1564042568206787,
+      "signed_steering_rate_deg_s": 0.2825106382369995,
+      "steering_angle_deg": 0.13632068037986755,
+      "steering_torque_eps": 0.24853216111660004
     },
-    "score": 0.2790851294994354,
-    "windows": 68950
+    "score": 0.3640853464603424,
+    "windows": 20000
   },
-  "excluded_route_count": 20,
+  "excluded_route_count": 18,
   "feature_names": [
     "applied_torque",
     "actual_lateral_accel",
@@ -91,991 +106,892 @@
     "00000109--aa92859bb6",
     "0000010b--197dec43be"
   ],
-  "holdout_windows": 38736,
+  "holdout_windows": 30000,
   "member_reports": [
     {
       "config": {
         "attention_heads": 4,
-        "dropout": 0.0,
-        "family": "gru",
+        "dropout": 0.1,
+        "family": "tcn",
         "feedforward_size": 256,
-        "gru_layers": 1,
+        "gru_layers": 2,
         "hidden_sizes": [
-          96
+          192
         ],
-        "history_steps": 300,
-        "name": "dense_temporal_gru_100hz_3s",
+        "history_steps": 200,
+        "name": "selected_large_tcn_100hz_2s",
         "sample_step": 1,
-        "temporal_layers": 2
+        "temporal_layers": 7
       },
       "fit": {
-        "best_validation_loss": 0.2179730625,
-        "epochs": 35,
-        "fit_seconds": 442.1998093019938,
+        "best_validation_loss": 0.16425116015625,
+        "epochs": 33,
+        "fit_seconds": 1197.361505801091,
         "history": [
           {
             "epoch": 1,
-            "train_loss": 0.22951972459753353,
-            "validation_loss": 0.508049580078125
+            "train_loss": 0.17025406109169125,
+            "validation_loss": 0.1879968984375
           },
           {
             "epoch": 2,
-            "train_loss": 0.18804674620429676,
-            "validation_loss": 0.37224943359375
+            "train_loss": 0.13967561461031436,
+            "validation_loss": 0.183196322265625
           },
           {
             "epoch": 3,
-            "train_loss": 0.1756829376022021,
-            "validation_loss": 0.3211910390625
+            "train_loss": 0.13197743683122098,
+            "validation_loss": 0.18413721875
           },
           {
             "epoch": 4,
-            "train_loss": 0.16719530957440534,
-            "validation_loss": 0.2987582587890625
+            "train_loss": 0.127428091596812,
+            "validation_loss": 0.1733303876953125
           },
           {
             "epoch": 5,
-            "train_loss": 0.1628298199425141,
-            "validation_loss": 0.2797051240234375
+            "train_loss": 0.1241344042122364,
+            "validation_loss": 0.17355431640625
           },
           {
             "epoch": 6,
-            "train_loss": 0.15945809669792652,
-            "validation_loss": 0.2658649052734375
+            "train_loss": 0.123396688234061,
+            "validation_loss": 0.1680593935546875
           },
           {
             "epoch": 7,
-            "train_loss": 0.1563942221303781,
-            "validation_loss": 0.2574958154296875
+            "train_loss": 0.12174543812870979,
+            "validation_loss": 0.169102982421875
           },
           {
             "epoch": 8,
-            "train_loss": 0.14944596489270529,
-            "validation_loss": 0.245860306640625
+            "train_loss": 0.1214204355608672,
+            "validation_loss": 0.1744982431640625
           },
           {
             "epoch": 9,
-            "train_loss": 0.13909260195990403,
-            "validation_loss": 0.2390778935546875
+            "train_loss": 0.12005815207958222,
+            "validation_loss": 0.1742816376953125
           },
           {
             "epoch": 10,
-            "train_loss": 0.13553048856556416,
-            "validation_loss": 0.23398282421875
+            "train_loss": 0.11779025448486209,
+            "validation_loss": 0.1772710234375
           },
           {
             "epoch": 11,
-            "train_loss": 0.13445150231321654,
-            "validation_loss": 0.2303718779296875
+            "train_loss": 0.11930047213099897,
+            "validation_loss": 0.175245880859375
           },
           {
             "epoch": 12,
-            "train_loss": 0.13279504148910443,
-            "validation_loss": 0.225615390625
+            "train_loss": 0.1179602965246886,
+            "validation_loss": 0.1671306171875
           },
           {
             "epoch": 13,
-            "train_loss": 0.13145142539093893,
-            "validation_loss": 0.2243971025390625
+            "train_loss": 0.11711101438850165,
+            "validation_loss": 0.1672552919921875
           },
           {
             "epoch": 14,
-            "train_loss": 0.13009490296244622,
-            "validation_loss": 0.2237885029296875
+            "train_loss": 0.11624569823034107,
+            "validation_loss": 0.168444634765625
           },
           {
             "epoch": 15,
-            "train_loss": 0.12833212272574504,
-            "validation_loss": 0.224325916015625
+            "train_loss": 0.11615012264810502,
+            "validation_loss": 0.16598829296875
           },
           {
             "epoch": 16,
-            "train_loss": 0.12714688101162513,
-            "validation_loss": 0.22565608984375
+            "train_loss": 0.11526976423338056,
+            "validation_loss": 0.168513173828125
           },
           {
             "epoch": 17,
-            "train_loss": 0.1253140453249216,
-            "validation_loss": 0.2227597978515625
+            "train_loss": 0.11345549514517188,
+            "validation_loss": 0.168099322265625
           },
           {
             "epoch": 18,
-            "train_loss": 0.1243036799132824,
-            "validation_loss": 0.22329208251953125
+            "train_loss": 0.11451385291293263,
+            "validation_loss": 0.1716270224609375
           },
           {
             "epoch": 19,
-            "train_loss": 0.12272089949498574,
-            "validation_loss": 0.2211890556640625
+            "train_loss": 0.11507869344204665,
+            "validation_loss": 0.164747103515625
           },
           {
             "epoch": 20,
-            "train_loss": 0.12174508217722177,
-            "validation_loss": 0.2238376181640625
+            "train_loss": 0.115558817749843,
+            "validation_loss": 0.1676796708984375
           },
           {
             "epoch": 21,
-            "train_loss": 0.1215552224467198,
-            "validation_loss": 0.2226676884765625
+            "train_loss": 0.11508002951741218,
+            "validation_loss": 0.1647907685546875
           },
           {
             "epoch": 22,
-            "train_loss": 0.12077158261090518,
-            "validation_loss": 0.22170036572265625
+            "train_loss": 0.11389115145429969,
+            "validation_loss": 0.1679629990234375
           },
           {
             "epoch": 23,
-            "train_loss": 0.11974518410861493,
-            "validation_loss": 0.22213505126953126
+            "train_loss": 0.11305671287700533,
+            "validation_loss": 0.1682283271484375
           },
           {
             "epoch": 24,
-            "train_loss": 0.11964509611328443,
-            "validation_loss": 0.2204469189453125
+            "train_loss": 0.11214579567313195,
+            "validation_loss": 0.1723307568359375
           },
           {
             "epoch": 25,
-            "train_loss": 0.12014452001700798,
-            "validation_loss": 0.2206830576171875
+            "train_loss": 0.11236955816857516,
+            "validation_loss": 0.1656245009765625
           },
           {
             "epoch": 26,
-            "train_loss": 0.1193082569167018,
-            "validation_loss": 0.2193361474609375
+            "train_loss": 0.11041808421723545,
+            "validation_loss": 0.16425116015625
           },
           {
             "epoch": 27,
-            "train_loss": 0.11855416595935822,
-            "validation_loss": 0.22088459228515625
+            "train_loss": 0.11144359931349754,
+            "validation_loss": 0.1673059892578125
           },
           {
             "epoch": 28,
-            "train_loss": 0.11830150770644347,
-            "validation_loss": 0.22027467041015625
+            "train_loss": 0.11144905313849449,
+            "validation_loss": 0.1676361494140625
           },
           {
             "epoch": 29,
-            "train_loss": 0.11760787467161814,
-            "validation_loss": 0.2231915478515625
+            "train_loss": 0.10938411499373615,
+            "validation_loss": 0.1701238310546875
           },
           {
             "epoch": 30,
-            "train_loss": 0.11727874769518773,
-            "validation_loss": 0.22049572265625
+            "train_loss": 0.10947085302323104,
+            "validation_loss": 0.1656325869140625
           },
           {
             "epoch": 31,
-            "train_loss": 0.11727001654605071,
-            "validation_loss": 0.218683076171875
+            "train_loss": 0.11002938481979072,
+            "validation_loss": 0.1683553857421875
           },
           {
             "epoch": 32,
-            "train_loss": 0.117359619649748,
-            "validation_loss": 0.2196245166015625
+            "train_loss": 0.10953499423339963,
+            "validation_loss": 0.16624662890625
           },
           {
             "epoch": 33,
-            "train_loss": 0.11656072922050953,
-            "validation_loss": 0.2191624267578125
-          },
-          {
-            "epoch": 34,
-            "train_loss": 0.11612678344051043,
-            "validation_loss": 0.2190078427734375
-          },
-          {
-            "epoch": 35,
-            "train_loss": 0.11595968243976434,
-            "validation_loss": 0.2179730625
+            "train_loss": 0.10900806966237724,
+            "validation_loss": 0.167633009765625
           }
         ],
         "rollout_train_seconds": 0.5,
         "rollout_train_steps": 50,
         "seed": 23
       },
-      "history_seconds": 3.0,
-      "parameters": 40228,
+      "history_seconds": 2.0,
+      "parameters": 1590916,
       "sample_period_s": 0.01,
       "validation": {
         "horizons": {
           "0.10s": {
             "actual_lateral_accel": {
-              "mae": 0.00726392911747098,
-              "p95_abs_error": 0.021457001566886902,
-              "rmse": 0.010790924541652203
+              "mae": 0.01625930704176426,
+              "p95_abs_error": 0.052210330963134766,
+              "rmse": 0.024963751435279846
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.4026622772216797,
-              "p95_abs_error": 12.723315238952637,
-              "rmse": 6.042199611663818
+              "mae": 3.331472635269165,
+              "p95_abs_error": 12.549565315246582,
+              "rmse": 6.222742557525635
             },
             "steering_angle_deg": {
-              "mae": 0.08822859823703766,
-              "p95_abs_error": 0.2532813847064972,
-              "rmse": 0.12505237758159637
+              "mae": 0.14051111042499542,
+              "p95_abs_error": 0.45501282811164856,
+              "rmse": 0.2589476704597473
             },
             "steering_torque_eps": {
-              "mae": 0.41644325852394104,
-              "p95_abs_error": 1.3261526823043823,
-              "rmse": 0.5940915942192078
+              "mae": 0.42556121945381165,
+              "p95_abs_error": 1.341884732246399,
+              "rmse": 0.6090413928031921
             }
           },
           "0.25s": {
             "actual_lateral_accel": {
-              "mae": 0.012229900807142258,
-              "p95_abs_error": 0.033782295882701874,
-              "rmse": 0.016945166513323784
+              "mae": 0.032220494002103806,
+              "p95_abs_error": 0.10164492577314377,
+              "rmse": 0.047622378915548325
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.396535873413086,
-              "p95_abs_error": 12.707032203674316,
-              "rmse": 6.0322136878967285
+              "mae": 3.2959508895874023,
+              "p95_abs_error": 12.465648651123047,
+              "rmse": 6.03977108001709
             },
             "steering_angle_deg": {
-              "mae": 0.14573921263217926,
-              "p95_abs_error": 0.4034428298473358,
-              "rmse": 0.20088477432727814
+              "mae": 0.2714858651161194,
+              "p95_abs_error": 0.897999107837677,
+              "rmse": 0.460599422454834
             },
             "steering_torque_eps": {
-              "mae": 0.4733034372329712,
-              "p95_abs_error": 1.5326533317565918,
-              "rmse": 0.6749638319015503
+              "mae": 0.4742082953453064,
+              "p95_abs_error": 1.53044593334198,
+              "rmse": 0.6819049119949341
             }
           },
           "0.50s": {
             "actual_lateral_accel": {
-              "mae": 0.019607102498412132,
-              "p95_abs_error": 0.05258217453956604,
-              "rmse": 0.02663855254650116
+              "mae": 0.055943626910448074,
+              "p95_abs_error": 0.15995670855045319,
+              "rmse": 0.07812942564487457
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.383864641189575,
-              "p95_abs_error": 12.730698585510254,
-              "rmse": 6.0169148445129395
+              "mae": 3.274860143661499,
+              "p95_abs_error": 12.580761909484863,
+              "rmse": 6.0540900230407715
             },
             "steering_angle_deg": {
-              "mae": 0.22902318835258484,
-              "p95_abs_error": 0.6159646511077881,
-              "rmse": 0.30916640162467957
+              "mae": 0.4717930257320404,
+              "p95_abs_error": 1.5092849731445312,
+              "rmse": 0.7692452073097229
             },
             "steering_torque_eps": {
-              "mae": 0.5431424379348755,
-              "p95_abs_error": 1.7157738208770752,
-              "rmse": 0.7670894265174866
+              "mae": 0.5392096042633057,
+              "p95_abs_error": 1.7370747327804565,
+              "rmse": 0.7690057158470154
             }
           },
           "1.00s": {
             "actual_lateral_accel": {
-              "mae": 0.03303585201501846,
-              "p95_abs_error": 0.087811678647995,
-              "rmse": 0.04455069079995155
+              "mae": 0.09564392268657684,
+              "p95_abs_error": 0.2554773688316345,
+              "rmse": 0.12696968019008636
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.4376487731933594,
-              "p95_abs_error": 12.850049018859863,
-              "rmse": 6.117722988128662
+              "mae": 3.331935167312622,
+              "p95_abs_error": 12.702622413635254,
+              "rmse": 6.1811652183532715
             },
             "steering_angle_deg": {
-              "mae": 0.3750799298286438,
-              "p95_abs_error": 1.0138603448867798,
-              "rmse": 0.5033931732177734
+              "mae": 0.8483767509460449,
+              "p95_abs_error": 2.8400588035583496,
+              "rmse": 1.3833988904953003
             },
             "steering_torque_eps": {
-              "mae": 0.6537852883338928,
-              "p95_abs_error": 1.9442431926727295,
-              "rmse": 0.9058283567428589
+              "mae": 0.6397266387939453,
+              "p95_abs_error": 1.9490342140197754,
+              "rmse": 0.8898025155067444
             }
           },
           "2.00s": {
             "actual_lateral_accel": {
-              "mae": 0.05701497569680214,
-              "p95_abs_error": 0.15625503659248352,
-              "rmse": 0.0778774544596672
+              "mae": 0.17488956451416016,
+              "p95_abs_error": 0.4389285147190094,
+              "rmse": 0.2221563309431076
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.6512293815612793,
-              "p95_abs_error": 13.274486541748047,
-              "rmse": 6.705326080322266
+              "mae": 3.5697619915008545,
+              "p95_abs_error": 13.033858299255371,
+              "rmse": 7.21671724319458
             },
             "steering_angle_deg": {
-              "mae": 0.637771487236023,
-              "p95_abs_error": 1.8011687994003296,
-              "rmse": 0.8992004990577698
+              "mae": 1.5776889324188232,
+              "p95_abs_error": 4.99960470199585,
+              "rmse": 2.7193028926849365
             },
             "steering_torque_eps": {
-              "mae": 0.787917971611023,
-              "p95_abs_error": 2.1243672370910645,
-              "rmse": 1.048902988433838
+              "mae": 0.7390900254249573,
+              "p95_abs_error": 2.0737946033477783,
+              "rmse": 0.9958556890487671
             }
           }
         },
         "normalized_rmse": {
-          "actual_lateral_accel": 0.08649106323719025,
-          "signed_steering_rate_deg_s": 0.7988647818565369,
-          "steering_angle_deg": 0.07782001793384552,
-          "steering_torque_eps": 0.3680640459060669
+          "actual_lateral_accel": 0.24567896127700806,
+          "signed_steering_rate_deg_s": 0.7795897126197815,
+          "steering_angle_deg": 0.20611630380153656,
+          "steering_torque_eps": 0.3461022973060608
         },
-        "score": 0.286603718996048,
-        "windows": 68950
+        "score": 0.3809314966201782,
+        "windows": 20000
       }
     },
     {
       "config": {
         "attention_heads": 4,
-        "dropout": 0.0,
-        "family": "gru",
+        "dropout": 0.1,
+        "family": "tcn",
         "feedforward_size": 256,
-        "gru_layers": 1,
+        "gru_layers": 2,
         "hidden_sizes": [
-          96
+          192
         ],
-        "history_steps": 300,
-        "name": "dense_temporal_gru_100hz_3s",
+        "history_steps": 200,
+        "name": "selected_large_tcn_100hz_2s",
         "sample_step": 1,
-        "temporal_layers": 2
+        "temporal_layers": 7
       },
       "fit": {
-        "best_validation_loss": 0.2172359970703125,
-        "epochs": 35,
-        "fit_seconds": 441.9046190499794,
+        "best_validation_loss": 0.1608407431640625,
+        "epochs": 28,
+        "fit_seconds": 1016.742442838964,
         "history": [
           {
             "epoch": 1,
-            "train_loss": 0.22833742573857307,
-            "validation_loss": 0.50599649609375
+            "train_loss": 0.176418412104249,
+            "validation_loss": 0.196577201171875
           },
           {
             "epoch": 2,
-            "train_loss": 0.1848695827027162,
-            "validation_loss": 0.3580772001953125
+            "train_loss": 0.13982999650761485,
+            "validation_loss": 0.178845619140625
           },
           {
             "epoch": 3,
-            "train_loss": 0.17488773949444295,
-            "validation_loss": 0.3174792978515625
+            "train_loss": 0.13263484910130502,
+            "validation_loss": 0.1751578564453125
           },
           {
             "epoch": 4,
-            "train_loss": 0.16724506057798863,
-            "validation_loss": 0.295380294921875
+            "train_loss": 0.12671529636718332,
+            "validation_loss": 0.171016349609375
           },
           {
             "epoch": 5,
-            "train_loss": 0.16375677635272343,
-            "validation_loss": 0.2785356416015625
+            "train_loss": 0.12641368000768125,
+            "validation_loss": 0.1694950205078125
           },
           {
             "epoch": 6,
-            "train_loss": 0.1597880158573389,
-            "validation_loss": 0.264349392578125
+            "train_loss": 0.12504817112348973,
+            "validation_loss": 0.1775549033203125
           },
           {
             "epoch": 7,
-            "train_loss": 0.15739600124458472,
-            "validation_loss": 0.25992212109375
+            "train_loss": 0.122317951079458,
+            "validation_loss": 0.1672595478515625
           },
           {
             "epoch": 8,
-            "train_loss": 0.14863321296870707,
-            "validation_loss": 0.2483857978515625
+            "train_loss": 0.12013818453997374,
+            "validation_loss": 0.1647793349609375
           },
           {
             "epoch": 9,
-            "train_loss": 0.13967140714327494,
-            "validation_loss": 0.238317779296875
+            "train_loss": 0.12159597356803716,
+            "validation_loss": 0.1689378828125
           },
           {
             "epoch": 10,
-            "train_loss": 0.1359156888599197,
-            "validation_loss": 0.23625003125
+            "train_loss": 0.11982243750244378,
+            "validation_loss": 0.1698207998046875
           },
           {
             "epoch": 11,
-            "train_loss": 0.1332700407753388,
-            "validation_loss": 0.231480697265625
+            "train_loss": 0.11900072149001062,
+            "validation_loss": 0.16965002734375
           },
           {
             "epoch": 12,
-            "train_loss": 0.13279514648020269,
-            "validation_loss": 0.2297334775390625
+            "train_loss": 0.11861171922646463,
+            "validation_loss": 0.1660632490234375
           },
           {
             "epoch": 13,
-            "train_loss": 0.1304190820083022,
-            "validation_loss": 0.2276424658203125
+            "train_loss": 0.1195031486917287,
+            "validation_loss": 0.1643625341796875
           },
           {
             "epoch": 14,
-            "train_loss": 0.1291708635787169,
-            "validation_loss": 0.226236015625
+            "train_loss": 0.11640256657265127,
+            "validation_loss": 0.164621447265625
           },
           {
             "epoch": 15,
-            "train_loss": 0.12745538788537183,
-            "validation_loss": 0.226479435546875
+            "train_loss": 0.11817747792229057,
+            "validation_loss": 0.165551904296875
           },
           {
             "epoch": 16,
-            "train_loss": 0.1265720263744394,
-            "validation_loss": 0.22600540625
+            "train_loss": 0.11676106420345604,
+            "validation_loss": 0.166758732421875
           },
           {
             "epoch": 17,
-            "train_loss": 0.12447398031751315,
-            "validation_loss": 0.2253578583984375
+            "train_loss": 0.11723349378444255,
+            "validation_loss": 0.163784306640625
           },
           {
             "epoch": 18,
-            "train_loss": 0.12327977580328782,
-            "validation_loss": 0.22162954296875
+            "train_loss": 0.11527925627306104,
+            "validation_loss": 0.1649398076171875
           },
           {
             "epoch": 19,
-            "train_loss": 0.12236983732630809,
-            "validation_loss": 0.22143756494140626
+            "train_loss": 0.11412362772971392,
+            "validation_loss": 0.166014716796875
           },
           {
             "epoch": 20,
-            "train_loss": 0.12083873407294353,
-            "validation_loss": 0.22181259912109375
+            "train_loss": 0.11313881543464958,
+            "validation_loss": 0.161872408203125
           },
           {
             "epoch": 21,
-            "train_loss": 0.12157926627745232,
-            "validation_loss": 0.22197136181640625
+            "train_loss": 0.11394456783309578,
+            "validation_loss": 0.1608407431640625
           },
           {
             "epoch": 22,
-            "train_loss": 0.12032786545654138,
-            "validation_loss": 0.22164816162109374
+            "train_loss": 0.11363394428044557,
+            "validation_loss": 0.1632425634765625
           },
           {
             "epoch": 23,
-            "train_loss": 0.11949134686340888,
-            "validation_loss": 0.221088779296875
+            "train_loss": 0.11423490731976926,
+            "validation_loss": 0.162749900390625
           },
           {
             "epoch": 24,
-            "train_loss": 0.12031888316075007,
-            "validation_loss": 0.2211253095703125
+            "train_loss": 0.11325754560530185,
+            "validation_loss": 0.1623435673828125
           },
           {
             "epoch": 25,
-            "train_loss": 0.11914140904943148,
-            "validation_loss": 0.2215834013671875
+            "train_loss": 0.11207765135914087,
+            "validation_loss": 0.1636904853515625
           },
           {
             "epoch": 26,
-            "train_loss": 0.11878169725338618,
-            "validation_loss": 0.219902125
+            "train_loss": 0.11195243652909995,
+            "validation_loss": 0.1638538740234375
           },
           {
             "epoch": 27,
-            "train_loss": 0.1186118384823203,
-            "validation_loss": 0.22049829736328125
+            "train_loss": 0.11047236286103726,
+            "validation_loss": 0.1623538955078125
           },
           {
             "epoch": 28,
-            "train_loss": 0.11775096083680789,
-            "validation_loss": 0.221547171875
-          },
-          {
-            "epoch": 29,
-            "train_loss": 0.11757932317753633,
-            "validation_loss": 0.2204790888671875
-          },
-          {
-            "epoch": 30,
-            "train_loss": 0.11766695224990448,
-            "validation_loss": 0.219169798828125
-          },
-          {
-            "epoch": 31,
-            "train_loss": 0.11717793736606837,
-            "validation_loss": 0.21891958984375
-          },
-          {
-            "epoch": 32,
-            "train_loss": 0.11680917510141929,
-            "validation_loss": 0.2189778154296875
-          },
-          {
-            "epoch": 33,
-            "train_loss": 0.11637176610529423,
-            "validation_loss": 0.21845019970703125
-          },
-          {
-            "epoch": 34,
-            "train_loss": 0.11611907320717971,
-            "validation_loss": 0.2172359970703125
-          },
-          {
-            "epoch": 35,
-            "train_loss": 0.11608709233502547,
-            "validation_loss": 0.2176929443359375
+            "train_loss": 0.11205849554389716,
+            "validation_loss": 0.1655469814453125
           }
         ],
         "rollout_train_seconds": 0.5,
         "rollout_train_steps": 50,
         "seed": 41
       },
-      "history_seconds": 3.0,
-      "parameters": 40228,
+      "history_seconds": 2.0,
+      "parameters": 1590916,
       "sample_period_s": 0.01,
       "validation": {
         "horizons": {
           "0.10s": {
             "actual_lateral_accel": {
-              "mae": 0.006963422987610102,
-              "p95_abs_error": 0.021075334399938583,
-              "rmse": 0.010506878606975079
+              "mae": 0.015897516161203384,
+              "p95_abs_error": 0.05063101649284363,
+              "rmse": 0.024500112980604172
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.4023854732513428,
-              "p95_abs_error": 12.8142671585083,
-              "rmse": 6.055217266082764
+              "mae": 3.2580511569976807,
+              "p95_abs_error": 12.49055004119873,
+              "rmse": 6.219132900238037
             },
             "steering_angle_deg": {
-              "mae": 0.08810807019472122,
-              "p95_abs_error": 0.25473666191101074,
-              "rmse": 0.1252918541431427
+              "mae": 0.1429559886455536,
+              "p95_abs_error": 0.45247355103492737,
+              "rmse": 0.259956419467926
             },
             "steering_torque_eps": {
-              "mae": 0.41177889704704285,
-              "p95_abs_error": 1.353934645652771,
-              "rmse": 0.5953565835952759
+              "mae": 0.42247098684310913,
+              "p95_abs_error": 1.339713454246521,
+              "rmse": 0.6046465039253235
             }
           },
           "0.25s": {
             "actual_lateral_accel": {
-              "mae": 0.011658805422484875,
-              "p95_abs_error": 0.0330575555562973,
-              "rmse": 0.01624317839741707
+              "mae": 0.03065693937242031,
+              "p95_abs_error": 0.0917673334479332,
+              "rmse": 0.04544449970126152
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.395850658416748,
-              "p95_abs_error": 12.818917274475098,
-              "rmse": 6.052260875701904
+              "mae": 3.2336792945861816,
+              "p95_abs_error": 12.533201217651367,
+              "rmse": 6.063292026519775
             },
             "steering_angle_deg": {
-              "mae": 0.14594872295856476,
-              "p95_abs_error": 0.3994457721710205,
-              "rmse": 0.20466485619544983
+              "mae": 0.27402105927467346,
+              "p95_abs_error": 0.8541481494903564,
+              "rmse": 0.4573972225189209
             },
             "steering_torque_eps": {
-              "mae": 0.47029733657836914,
-              "p95_abs_error": 1.5612986087799072,
-              "rmse": 0.680109441280365
+              "mae": 0.46622827649116516,
+              "p95_abs_error": 1.5378098487854004,
+              "rmse": 0.6722019910812378
             }
           },
           "0.50s": {
             "actual_lateral_accel": {
-              "mae": 0.018553346395492554,
-              "p95_abs_error": 0.05114511400461197,
-              "rmse": 0.025343814864754677
+              "mae": 0.05259200558066368,
+              "p95_abs_error": 0.14730727672576904,
+              "rmse": 0.07407314330339432
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.383718729019165,
-              "p95_abs_error": 12.811373710632324,
-              "rmse": 6.038566589355469
+              "mae": 3.2063145637512207,
+              "p95_abs_error": 12.59775161743164,
+              "rmse": 6.092617034912109
             },
             "steering_angle_deg": {
-              "mae": 0.2322463095188141,
-              "p95_abs_error": 0.6214519143104553,
-              "rmse": 0.3212321102619171
+              "mae": 0.47057098150253296,
+              "p95_abs_error": 1.4525116682052612,
+              "rmse": 0.7529131174087524
             },
             "steering_torque_eps": {
-              "mae": 0.5427786111831665,
-              "p95_abs_error": 1.7440459728240967,
-              "rmse": 0.7767054438591003
+              "mae": 0.532600462436676,
+              "p95_abs_error": 1.7357940673828125,
+              "rmse": 0.7603727579116821
             }
           },
           "1.00s": {
             "actual_lateral_accel": {
-              "mae": 0.0309444610029459,
-              "p95_abs_error": 0.08361540734767914,
-              "rmse": 0.04223101586103439
+              "mae": 0.08825524896383286,
+              "p95_abs_error": 0.24183973670005798,
+              "rmse": 0.11975089460611343
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.434624195098877,
-              "p95_abs_error": 12.940422058105469,
-              "rmse": 6.129605770111084
+              "mae": 3.240978240966797,
+              "p95_abs_error": 12.673433303833008,
+              "rmse": 6.232946395874023
             },
             "steering_angle_deg": {
-              "mae": 0.3827686905860901,
-              "p95_abs_error": 0.9914939999580383,
-              "rmse": 0.5264010429382324
+              "mae": 0.8352648615837097,
+              "p95_abs_error": 2.56777286529541,
+              "rmse": 1.344153642654419
             },
             "steering_torque_eps": {
-              "mae": 0.6559026837348938,
-              "p95_abs_error": 1.9553742408752441,
-              "rmse": 0.9134256839752197
+              "mae": 0.6324496865272522,
+              "p95_abs_error": 1.9297215938568115,
+              "rmse": 0.8819960355758667
             }
           },
           "2.00s": {
             "actual_lateral_accel": {
-              "mae": 0.05027727410197258,
-              "p95_abs_error": 0.14487488567829132,
-              "rmse": 0.07086420059204102
+              "mae": 0.15367165207862854,
+              "p95_abs_error": 0.3928152024745941,
+              "rmse": 0.19947300851345062
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.650212526321411,
-              "p95_abs_error": 13.368480682373047,
-              "rmse": 6.691417694091797
+              "mae": 3.5127625465393066,
+              "p95_abs_error": 13.055665016174316,
+              "rmse": 7.538738250732422
             },
             "steering_angle_deg": {
-              "mae": 0.6277226209640503,
-              "p95_abs_error": 1.5960811376571655,
-              "rmse": 0.8993698358535767
+              "mae": 1.5688210725784302,
+              "p95_abs_error": 4.840522766113281,
+              "rmse": 3.167665958404541
             },
             "steering_torque_eps": {
-              "mae": 0.7869172692298889,
-              "p95_abs_error": 2.1232354640960693,
-              "rmse": 1.0509824752807617
+              "mae": 0.7097635865211487,
+              "p95_abs_error": 2.00032639503479,
+              "rmse": 0.9605395197868347
             }
           }
         },
         "normalized_rmse": {
-          "actual_lateral_accel": 0.08052933216094971,
-          "signed_steering_rate_deg_s": 0.8007809519767761,
-          "steering_angle_deg": 0.07969743758440018,
-          "steering_torque_eps": 0.37104982137680054
+          "actual_lateral_accel": 0.2259119600057602,
+          "signed_steering_rate_deg_s": 0.7934966683387756,
+          "steering_angle_deg": 0.21836909651756287,
+          "steering_torque_eps": 0.33981767296791077
         },
-        "score": 0.2846636474132538,
-        "windows": 68950
+        "score": 0.3760431110858917,
+        "windows": 20000
       }
     },
     {
       "config": {
         "attention_heads": 4,
-        "dropout": 0.0,
-        "family": "gru",
+        "dropout": 0.1,
+        "family": "tcn",
         "feedforward_size": 256,
-        "gru_layers": 1,
+        "gru_layers": 2,
         "hidden_sizes": [
-          96
+          192
         ],
-        "history_steps": 300,
-        "name": "dense_temporal_gru_100hz_3s",
+        "history_steps": 200,
+        "name": "selected_large_tcn_100hz_2s",
         "sample_step": 1,
-        "temporal_layers": 2
+        "temporal_layers": 7
       },
       "fit": {
-        "best_validation_loss": 0.2191891796875,
-        "epochs": 35,
-        "fit_seconds": 442.1510155440774,
+        "best_validation_loss": 0.157509765625,
+        "epochs": 24,
+        "fit_seconds": 871.896821385948,
         "history": [
           {
             "epoch": 1,
-            "train_loss": 0.21985684124131996,
-            "validation_loss": 0.4973955537109375
+            "train_loss": 0.18074787240475415,
+            "validation_loss": 0.18629823828125
           },
           {
             "epoch": 2,
-            "train_loss": 0.18551772957046828,
-            "validation_loss": 0.3666077041015625
+            "train_loss": 0.14184096679091454,
+            "validation_loss": 0.175223693359375
           },
           {
             "epoch": 3,
-            "train_loss": 0.17561684201161068,
-            "validation_loss": 0.3188916533203125
+            "train_loss": 0.1354836594313383,
+            "validation_loss": 0.1782144404296875
           },
           {
             "epoch": 4,
-            "train_loss": 0.16903745271265508,
-            "validation_loss": 0.2978411142578125
+            "train_loss": 0.12671657442115247,
+            "validation_loss": 0.1661230625
           },
           {
             "epoch": 5,
-            "train_loss": 0.16402382105588914,
-            "validation_loss": 0.2788856416015625
+            "train_loss": 0.12533464250154794,
+            "validation_loss": 0.16943663671875
           },
           {
             "epoch": 6,
-            "train_loss": 0.15957713611423968,
-            "validation_loss": 0.2704558349609375
+            "train_loss": 0.1246225000359118,
+            "validation_loss": 0.1628542392578125
           },
           {
             "epoch": 7,
-            "train_loss": 0.15697985539833706,
-            "validation_loss": 0.2595383271484375
+            "train_loss": 0.1220724695827812,
+            "validation_loss": 0.16190162109375
           },
           {
             "epoch": 8,
-            "train_loss": 0.15033754669129848,
-            "validation_loss": 0.2480685283203125
+            "train_loss": 0.11846867003478109,
+            "validation_loss": 0.16382523046875
           },
           {
             "epoch": 9,
-            "train_loss": 0.137902711580197,
-            "validation_loss": 0.240313419921875
+            "train_loss": 0.11976501871831716,
+            "validation_loss": 0.1628296787109375
           },
           {
             "epoch": 10,
-            "train_loss": 0.13500539225836594,
-            "validation_loss": 0.23565300390625
+            "train_loss": 0.11957360999658703,
+            "validation_loss": 0.1639400693359375
           },
           {
             "epoch": 11,
-            "train_loss": 0.13378269237776597,
-            "validation_loss": 0.2308294541015625
+            "train_loss": 0.11843847874552012,
+            "validation_loss": 0.1649618876953125
           },
           {
             "epoch": 12,
-            "train_loss": 0.13170314145584902,
-            "validation_loss": 0.2288887646484375
+            "train_loss": 0.11743344962596894,
+            "validation_loss": 0.1601494423828125
           },
           {
             "epoch": 13,
-            "train_loss": 0.13057034152249494,
-            "validation_loss": 0.2288111884765625
+            "train_loss": 0.11680087447166443,
+            "validation_loss": 0.1614148232421875
           },
           {
             "epoch": 14,
-            "train_loss": 0.12918920982629062,
-            "validation_loss": 0.22651744921875
+            "train_loss": 0.11639670054428279,
+            "validation_loss": 0.1589766240234375
           },
           {
             "epoch": 15,
-            "train_loss": 0.1273601522669196,
-            "validation_loss": 0.2253065869140625
+            "train_loss": 0.11629118211567402,
+            "validation_loss": 0.159995861328125
           },
           {
             "epoch": 16,
-            "train_loss": 0.12700332396974165,
-            "validation_loss": 0.2249398447265625
+            "train_loss": 0.11628407728858292,
+            "validation_loss": 0.16033325390625
           },
           {
             "epoch": 17,
-            "train_loss": 0.12450574102501075,
-            "validation_loss": 0.2257677138671875
+            "train_loss": 0.1159547517541796,
+            "validation_loss": 0.157509765625
           },
           {
             "epoch": 18,
-            "train_loss": 0.12380145682642857,
-            "validation_loss": 0.2257229267578125
+            "train_loss": 0.11711662742309273,
+            "validation_loss": 0.1642066767578125
           },
           {
             "epoch": 19,
-            "train_loss": 0.12189638589819272,
-            "validation_loss": 0.2236652236328125
+            "train_loss": 0.1162833479233086,
+            "validation_loss": 0.1616798046875
           },
           {
             "epoch": 20,
-            "train_loss": 0.12126530713091294,
-            "validation_loss": 0.2219642431640625
+            "train_loss": 0.11543968562036752,
+            "validation_loss": 0.1626798759765625
           },
           {
             "epoch": 21,
-            "train_loss": 0.12042853944003581,
-            "validation_loss": 0.22187490283203126
+            "train_loss": 0.11333524687215686,
+            "validation_loss": 0.160561427734375
           },
           {
             "epoch": 22,
-            "train_loss": 0.12087261807173491,
-            "validation_loss": 0.223714609375
+            "train_loss": 0.11339952242560684,
+            "validation_loss": 0.1589613857421875
           },
           {
             "epoch": 23,
-            "train_loss": 0.11908204102267822,
-            "validation_loss": 0.222212095703125
+            "train_loss": 0.11278654355555773,
+            "validation_loss": 0.15921734375
           },
           {
             "epoch": 24,
-            "train_loss": 0.1196922122190396,
-            "validation_loss": 0.2237118505859375
-          },
-          {
-            "epoch": 25,
-            "train_loss": 0.1182850827773412,
-            "validation_loss": 0.22212253515625
-          },
-          {
-            "epoch": 26,
-            "train_loss": 0.1184789236014088,
-            "validation_loss": 0.22204020556640625
-          },
-          {
-            "epoch": 27,
-            "train_loss": 0.11840936249742905,
-            "validation_loss": 0.2225976572265625
-          },
-          {
-            "epoch": 28,
-            "train_loss": 0.11748995687812566,
-            "validation_loss": 0.221763333984375
-          },
-          {
-            "epoch": 29,
-            "train_loss": 0.1179699848095576,
-            "validation_loss": 0.22059289306640625
-          },
-          {
-            "epoch": 30,
-            "train_loss": 0.11714263043055932,
-            "validation_loss": 0.21997473779296875
-          },
-          {
-            "epoch": 31,
-            "train_loss": 0.11660191553334395,
-            "validation_loss": 0.21930674560546876
-          },
-          {
-            "epoch": 32,
-            "train_loss": 0.11693163948754469,
-            "validation_loss": 0.21962970654296876
-          },
-          {
-            "epoch": 33,
-            "train_loss": 0.11703170308222373,
-            "validation_loss": 0.2191891796875
-          },
-          {
-            "epoch": 34,
-            "train_loss": 0.11677913119395573,
-            "validation_loss": 0.22040134765625
-          },
-          {
-            "epoch": 35,
-            "train_loss": 0.11656650826334954,
-            "validation_loss": 0.2198193818359375
+            "train_loss": 0.1140186789445579,
+            "validation_loss": 0.1599359296875
           }
         ],
         "rollout_train_seconds": 0.5,
         "rollout_train_steps": 50,
         "seed": 71
       },
-      "history_seconds": 3.0,
-      "parameters": 40228,
+      "history_seconds": 2.0,
+      "parameters": 1590916,
       "sample_period_s": 0.01,
       "validation": {
         "horizons": {
           "0.10s": {
             "actual_lateral_accel": {
-              "mae": 0.0072551630437374115,
-              "p95_abs_error": 0.022202448919415474,
-              "rmse": 0.011053069494664669
+              "mae": 0.016765829175710678,
+              "p95_abs_error": 0.0526365265250206,
+              "rmse": 0.025593694299459457
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.384868621826172,
-              "p95_abs_error": 12.80118465423584,
-              "rmse": 6.056588649749756
+              "mae": 3.304868459701538,
+              "p95_abs_error": 12.427982330322266,
+              "rmse": 6.200969696044922
             },
             "steering_angle_deg": {
-              "mae": 0.09001822769641876,
-              "p95_abs_error": 0.2608676552772522,
-              "rmse": 0.12644578516483307
+              "mae": 0.1401980221271515,
+              "p95_abs_error": 0.4563344717025757,
+              "rmse": 0.25077077746391296
             },
             "steering_torque_eps": {
-              "mae": 0.4139404594898224,
-              "p95_abs_error": 1.3816784620285034,
-              "rmse": 0.6003990769386292
+              "mae": 0.4261114299297333,
+              "p95_abs_error": 1.3663294315338135,
+              "rmse": 0.6117258667945862
             }
           },
           "0.25s": {
             "actual_lateral_accel": {
-              "mae": 0.01260089036077261,
-              "p95_abs_error": 0.036685992032289505,
-              "rmse": 0.01825755648314953
+              "mae": 0.032483991235494614,
+              "p95_abs_error": 0.09615056216716766,
+              "rmse": 0.04804644733667374
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.3782780170440674,
-              "p95_abs_error": 12.831161499023438,
-              "rmse": 6.051978588104248
+              "mae": 3.2870428562164307,
+              "p95_abs_error": 12.42549991607666,
+              "rmse": 6.040056228637695
             },
             "steering_angle_deg": {
-              "mae": 0.14773854613304138,
-              "p95_abs_error": 0.40891024470329285,
-              "rmse": 0.2018689066171646
+              "mae": 0.2690369486808777,
+              "p95_abs_error": 0.8886690139770508,
+              "rmse": 0.4511171877384186
             },
             "steering_torque_eps": {
-              "mae": 0.47215014696121216,
-              "p95_abs_error": 1.5763881206512451,
-              "rmse": 0.6812512278556824
+              "mae": 0.4720476567745209,
+              "p95_abs_error": 1.5547221899032593,
+              "rmse": 0.6798122525215149
             }
           },
           "0.50s": {
             "actual_lateral_accel": {
-              "mae": 0.020938321948051453,
-              "p95_abs_error": 0.0590706542134285,
-              "rmse": 0.029675614088773727
+              "mae": 0.05464693158864975,
+              "p95_abs_error": 0.15949980914592743,
+              "rmse": 0.07766715437173843
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.3713433742523193,
-              "p95_abs_error": 12.829875946044922,
-              "rmse": 6.041752338409424
+              "mae": 3.2620134353637695,
+              "p95_abs_error": 12.612329483032227,
+              "rmse": 6.069153785705566
             },
             "steering_angle_deg": {
-              "mae": 0.23577405512332916,
-              "p95_abs_error": 0.6309500932693481,
-              "rmse": 0.31409692764282227
+              "mae": 0.4560663104057312,
+              "p95_abs_error": 1.514752984046936,
+              "rmse": 0.735767126083374
             },
             "steering_torque_eps": {
-              "mae": 0.5410837531089783,
-              "p95_abs_error": 1.7310943603515625,
-              "rmse": 0.7707942724227905
+              "mae": 0.538688063621521,
+              "p95_abs_error": 1.7402697801589966,
+              "rmse": 0.769432544708252
             }
           },
           "1.00s": {
             "actual_lateral_accel": {
-              "mae": 0.03629099950194359,
-              "p95_abs_error": 0.0985335111618042,
-              "rmse": 0.04987615346908569
+              "mae": 0.09233524650335312,
+              "p95_abs_error": 0.25565940141677856,
+              "rmse": 0.124996118247509
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.424910545349121,
-              "p95_abs_error": 12.959587097167969,
-              "rmse": 6.138864994049072
+              "mae": 3.2885937690734863,
+              "p95_abs_error": 12.623685836791992,
+              "rmse": 6.188050746917725
             },
             "steering_angle_deg": {
-              "mae": 0.3873802125453949,
-              "p95_abs_error": 1.011579990386963,
-              "rmse": 0.5115510821342468
+              "mae": 0.7968723773956299,
+              "p95_abs_error": 2.7448298931121826,
+              "rmse": 1.2881258726119995
             },
             "steering_torque_eps": {
-              "mae": 0.651774525642395,
-              "p95_abs_error": 1.927797794342041,
-              "rmse": 0.9032518267631531
+              "mae": 0.6388782262802124,
+              "p95_abs_error": 1.9563826322555542,
+              "rmse": 0.8913353085517883
             }
           },
           "2.00s": {
             "actual_lateral_accel": {
-              "mae": 0.0640009194612503,
-              "p95_abs_error": 0.16923169791698456,
-              "rmse": 0.08613397926092148
+              "mae": 0.16087806224822998,
+              "p95_abs_error": 0.4114994704723358,
+              "rmse": 0.20636287331581116
             },
             "signed_steering_rate_deg_s": {
-              "mae": 3.642781972885132,
-              "p95_abs_error": 13.406476974487305,
-              "rmse": 6.714107990264893
+              "mae": 3.5738120079040527,
+              "p95_abs_error": 12.966775894165039,
+              "rmse": 7.424196243286133
             },
             "steering_angle_deg": {
-              "mae": 0.6371999382972717,
-              "p95_abs_error": 1.7631710767745972,
-              "rmse": 0.8633146286010742
+              "mae": 1.5217854976654053,
+              "p95_abs_error": 4.922579765319824,
+              "rmse": 2.8408048152923584
             },
             "steering_torque_eps": {
-              "mae": 0.782042920589447,
-              "p95_abs_error": 2.09688138961792,
-              "rmse": 1.042326807975769
+              "mae": 0.7312918305397034,
+              "p95_abs_error": 2.0710113048553467,
+              "rmse": 0.9928019642829895
             }
           }
         },
         "normalized_rmse": {
-          "actual_lateral_accel": 0.09687040746212006,
-          "signed_steering_rate_deg_s": 0.8019188046455383,
-          "steering_angle_deg": 0.07724953442811966,
-          "steering_torque_eps": 0.3676217496395111
+          "actual_lateral_accel": 0.23554390668869019,
+          "signed_steering_rate_deg_s": 0.7857410907745361,
+          "steering_angle_deg": 0.20255932211875916,
+          "steering_torque_eps": 0.34566423296928406
         },
-        "score": 0.2924249768257141,
-        "windows": 68950
+        "score": 0.3767724335193634,
+        "windows": 20000
       }
     }
   ],
   "model_type": "neural_controller_independent_lateral_plant_ensemble",
-  "parameters_per_member": 40228,
-  "pretraining_note": "No older telemetry was available. The supplied Pond archive contained camera MP4 files only; this ensemble was trained solely on current-tire rlogs.",
+  "parameters_per_member": 1590916,
+  "pretraining_note": "No older telemetry was available; the final ensemble used only the local current-tire routes.",
   "pretraining_performed": false,
+  "split_report": "/home/dvl/dvl/starpilot-plant/corrected-finalists/architecture_finalists_search.json",
   "state_feature_names": [
     "actual_lateral_accel",
     "steering_angle_deg",
@@ -1084,7 +1000,6 @@
   ],
   "train_routes": [
     "000000be--744874b49d",
-    "000000bf--bcda544e5c",
     "000000c0--fe7ed95a7d",
     "000000c1--d807ae058b",
     "000000c2--958a3a404b",
@@ -1094,26 +1009,20 @@
     "000000c6--d12fa4d148",
     "000000dc--fe7070223b",
     "000000dd--933e30aca5",
-    "000000de--22eaf07e3c",
+    "000000e0--8cbba9e1fe",
     "000000e2--e0593d8af5",
-    "000000e3--535834b74a",
-    "000000e5--5977a760a9",
-    "000000fa--a56163ff65",
     "000000fc--5279f0bf9b",
-    "000000fd--e16a112216",
-    "00000100--e76442e281",
-    "00000101--aac6da3760",
+    "00000102--c0541556ea",
     "00000103--47c33ced1e",
     "00000105--c0a8fb0d8b",
     "00000106--8be7312707",
-    "00000107--efc51d5992"
+    "00000108--0e980655f5"
   ],
   "train_windows": 200000,
   "validation_routes": [
-    "000000e0--8cbba9e1fe",
-    "000000ff--ede5baeb22",
-    "00000102--c0541556ea",
-    "00000108--0e980655f5"
+    "000000bf--bcda544e5c",
+    "000000fa--a56163ff65",
+    "00000107--efc51d5992"
   ],
-  "validation_windows": 68950
+  "validation_windows": 20000
 }

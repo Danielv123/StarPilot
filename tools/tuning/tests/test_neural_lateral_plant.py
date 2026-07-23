@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -50,6 +53,12 @@ def test_dense_candidates_expand_window_and_capacity() -> None:
   )
 
 
+def test_mlp_applies_configured_dropout() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16, 16), dropout=0.25)
+  model = neural_plant.build_model(config)
+  assert sum(isinstance(module, torch.nn.Dropout) for module in model.modules()) == 2
+
+
 def test_temporal_sweep_varies_interval_and_history_at_fixed_capacity() -> None:
   settings = {
     (candidate.sample_step, round(candidate.history_s, 1))
@@ -71,7 +80,7 @@ def test_architecture_sweep_includes_controls_and_sequence_families() -> None:
   families = {candidate.family for candidate in neural_plant.ARCHITECTURE_CANDIDATES}
   assert families == {"mlp", "gru", "tcn", "transformer"}
   assert any(candidate.sample_step == 2 for candidate in neural_plant.ARCHITECTURE_CANDIDATES)
-  assert all(candidate.history_s == 3.0 for candidate in neural_plant.ARCHITECTURE_CANDIDATES if candidate.sample_step == 1)
+  assert all(candidate.history_s == 2.0 for candidate in neural_plant.ARCHITECTURE_CANDIDATES if candidate.sample_step == 1)
 
 
 def test_sequence_architectures_use_memory_safe_evaluation_batches() -> None:
@@ -110,6 +119,114 @@ def test_build_windows_preserves_current_first_history() -> None:
   assert windows.future_base.shape == (50, 10, len(plant_data.BASE_FEATURES))
   torque_index = plant_data.BASE_FEATURES.index("applied_torque")
   assert np.all(windows.history[:, 0, torque_index] >= windows.history[:, 1, torque_index])
+
+
+def test_rollout_recomputes_unsigned_rate_from_predicted_signed_rate() -> None:
+  class RecordingModel(torch.nn.Module):
+    def __init__(self) -> None:
+      super().__init__()
+      self.inputs: list[torch.Tensor] = []
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+      self.inputs.append(values.detach().clone())
+      return values.new_zeros((len(values), len(plant_data.STATE_FEATURES)))
+
+  config = neural_plant.ModelConfig("fixture", "gru", 1, 2, (8,))
+  model = RecordingModel()
+  history = torch.zeros((1, config.history_steps, len(plant_data.BASE_FEATURES)))
+  history[:, 0, neural_plant.SIGNED_STEERING_RATE_INDEX] = -3.0
+  history[:, 0, neural_plant.STEERING_RATE_INDEX] = 3.0
+  future = torch.zeros((1, 2, len(plant_data.BASE_FEATURES)))
+  future[:, :, neural_plant.STEERING_RATE_INDEX] = 999.0
+  stats = {
+    "x_mean": torch.zeros(config.input_size),
+    "x_std": torch.ones(config.input_size),
+    "y_mean": torch.zeros(len(plant_data.STATE_FEATURES)),
+    "y_std": torch.ones(len(plant_data.STATE_FEATURES)),
+    "state_std": torch.ones(len(plant_data.STATE_FEATURES)),
+  }
+  neural_plant.rollout(model, history, future, stats, steps=2)
+  assert model.inputs[1][0, neural_plant.STEERING_RATE_INDEX] == 3.0
+
+
+def test_rollout_with_derived_rate_backpropagates() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 1, 2, (8,), dropout=0.0)
+  model = neural_plant.build_model(config)
+  history = torch.zeros((2, config.history_steps, len(plant_data.BASE_FEATURES)))
+  future = torch.zeros((2, 3, len(plant_data.BASE_FEATURES)))
+  stats = {
+    "x_mean": torch.zeros(config.input_size),
+    "x_std": torch.ones(config.input_size),
+    "y_mean": torch.zeros(len(plant_data.STATE_FEATURES)),
+    "y_std": torch.ones(len(plant_data.STATE_FEATURES)),
+    "state_std": torch.ones(len(plant_data.STATE_FEATURES)),
+  }
+  neural_plant.rollout(model, history, future, stats, steps=3).sum().backward()
+  assert all(parameter.grad is not None for parameter in model.parameters())
+
+
+def test_early_stopping_subset_is_seeded_and_not_prefix_biased() -> None:
+  first = neural_plant.sampled_indexes(10_000, 5_000, 23)
+  second = neural_plant.sampled_indexes(10_000, 5_000, 23)
+  assert np.array_equal(first, second)
+  assert not np.array_equal(first, np.arange(5_000))
+  assert first.max() >= 5_000
+
+
+def test_high_overlay_routes_are_excluded_before_splitting() -> None:
+  clean = synthetic_trajectory(100)
+  clean.route = "clean"
+  clean.segment = "clean--0"
+  biased = synthetic_trajectory(100)
+  biased.route = "biased"
+  biased.segment = "biased--0"
+  biased.driver_overlay_rows = 51
+  retained, stats, excluded = neural_plant.filter_high_overlay_routes([clean, biased], 0.50)
+  assert excluded == ["biased"]
+  assert stats["biased"]["driver_overlay_fraction"] == 0.51
+  assert {trajectory.route for trajectory in retained} == {"clean"}
+
+
+def test_trajectory_inventory_discovers_supported_rlog_encodings(tmp_path) -> None:
+  for index, filename in enumerate(("rlog", "rlog.zst", "rlog.bz2")):
+    segment = tmp_path / f"segment-{index}"
+    segment.mkdir()
+    (segment / filename).write_bytes(b"fixture")
+  paths, inventory = neural_plant.trajectory_inventory(tmp_path)
+  assert {path.name for path in paths} == {"rlog", "rlog.zst", "rlog.bz2"}
+  assert inventory["rlog_count"] == 3
+
+
+def test_search_profiles_use_distinct_report_paths(tmp_path) -> None:
+  temporal = SimpleNamespace(output_dir=tmp_path, candidate_file=None, search_profile="temporal")
+  architecture = SimpleNamespace(output_dir=tmp_path, candidate_file=None, search_profile="architecture")
+  assert neural_plant.search_report_path(temporal).name == "temporal_search.json"
+  assert neural_plant.search_report_path(architecture).name == "architecture_search.json"
+
+
+def test_split_report_reuses_search_cohorts(tmp_path) -> None:
+  report_path = tmp_path / "temporal_search.json"
+  report_path.write_text(json.dumps({
+    "data": {
+      "current": {"rlog_count": 3, "rlog_bytes": 30, "newest_mtime_ns": 7},
+      "train_routes": ["train"],
+      "validation_routes": ["validation"],
+      "holdout_routes": ["holdout"],
+    },
+  }), encoding="utf-8")
+  split = neural_plant.split_from_report(
+    report_path,
+    {"train", "validation", "holdout", "unused"},
+    {"rlog_count": 3, "rlog_bytes": 30, "newest_mtime_ns": 7},
+  )
+  assert split == ({"train"}, {"validation"}, {"holdout"})
+
+
+def test_pretraining_note_is_generic_unless_explicitly_supplied() -> None:
+  assert neural_plant.pretraining_note(SimpleNamespace(pretraining_note=None)) == (
+    "Pretraining was not performed by this command."
+  )
+  assert neural_plant.pretraining_note(SimpleNamespace(pretraining_note="Inspected archive.")) == "Inspected archive."
 
 
 def test_holdout_routes_are_never_selected_for_training() -> None:

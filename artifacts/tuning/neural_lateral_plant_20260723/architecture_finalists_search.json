@@ -1,0 +1,832 @@
+{
+  "candidate_file": "/home/dvl/dvl/starpilot-plant/architecture_finalists.json",
+  "candidates": [
+    {
+      "config": {
+        "attention_heads": 4,
+        "dropout": 0.1,
+        "family": "tcn",
+        "feedforward_size": 256,
+        "gru_layers": 1,
+        "hidden_sizes": [
+          192
+        ],
+        "history_steps": 200,
+        "name": "finalist_large_tcn_100hz_2s",
+        "sample_step": 1,
+        "temporal_layers": 7
+      },
+      "fit": {
+        "best_validation_loss": 0.1680420927734375,
+        "epochs": 11,
+        "fit_seconds": 399.49449337099213,
+        "history": [
+          {
+            "epoch": 1,
+            "train_loss": 0.17025445261970162,
+            "validation_loss": 0.1880019091796875
+          },
+          {
+            "epoch": 2,
+            "train_loss": 0.13967709513381124,
+            "validation_loss": 0.1831732646484375
+          },
+          {
+            "epoch": 3,
+            "train_loss": 0.13196892756968737,
+            "validation_loss": 0.18411595703125
+          },
+          {
+            "epoch": 4,
+            "train_loss": 0.12743585244752467,
+            "validation_loss": 0.1733083603515625
+          },
+          {
+            "epoch": 5,
+            "train_loss": 0.124131392640993,
+            "validation_loss": 0.1735557177734375
+          },
+          {
+            "epoch": 6,
+            "train_loss": 0.12339884112589061,
+            "validation_loss": 0.1680420927734375
+          },
+          {
+            "epoch": 7,
+            "train_loss": 0.12174863289110363,
+            "validation_loss": 0.169127267578125
+          },
+          {
+            "epoch": 8,
+            "train_loss": 0.12142462776973843,
+            "validation_loss": 0.174546068359375
+          },
+          {
+            "epoch": 9,
+            "train_loss": 0.12004227414727212,
+            "validation_loss": 0.1742889716796875
+          },
+          {
+            "epoch": 10,
+            "train_loss": 0.11801481978036463,
+            "validation_loss": 0.1771275498046875
+          },
+          {
+            "epoch": 11,
+            "train_loss": 0.11943857474252581,
+            "validation_loss": 0.1754543955078125
+          }
+        ],
+        "rollout_train_seconds": 0.5,
+        "rollout_train_steps": 50,
+        "seed": 23
+      },
+      "history_seconds": 2.0,
+      "parameters": 1590916,
+      "sample_period_s": 0.01,
+      "validation": {
+        "horizons": {
+          "0.10s": {
+            "actual_lateral_accel": {
+              "mae": 0.0166524276137352,
+              "p95_abs_error": 0.0524846687912941,
+              "rmse": 0.026278803125023842
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.356862783432007,
+              "p95_abs_error": 12.63664436340332,
+              "rmse": 6.310053825378418
+            },
+            "steering_angle_deg": {
+              "mae": 0.15440165996551514,
+              "p95_abs_error": 0.48125961422920227,
+              "rmse": 0.2884778082370758
+            },
+            "steering_torque_eps": {
+              "mae": 0.4442960023880005,
+              "p95_abs_error": 1.3870514631271362,
+              "rmse": 0.6270846128463745
+            }
+          },
+          "0.25s": {
+            "actual_lateral_accel": {
+              "mae": 0.03202799707651138,
+              "p95_abs_error": 0.09750538319349289,
+              "rmse": 0.04805397614836693
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.3278703689575195,
+              "p95_abs_error": 12.636574745178223,
+              "rmse": 6.11290979385376
+            },
+            "steering_angle_deg": {
+              "mae": 0.299259215593338,
+              "p95_abs_error": 1.007067084312439,
+              "rmse": 0.5205659866333008
+            },
+            "steering_torque_eps": {
+              "mae": 0.4854249060153961,
+              "p95_abs_error": 1.5205714702606201,
+              "rmse": 0.6827141046524048
+            }
+          },
+          "0.50s": {
+            "actual_lateral_accel": {
+              "mae": 0.054340895265340805,
+              "p95_abs_error": 0.1554669290781021,
+              "rmse": 0.07773874700069427
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.3051679134368896,
+              "p95_abs_error": 12.726452827453613,
+              "rmse": 6.1211113929748535
+            },
+            "steering_angle_deg": {
+              "mae": 0.5158333778381348,
+              "p95_abs_error": 1.7427048683166504,
+              "rmse": 0.8670951724052429
+            },
+            "steering_torque_eps": {
+              "mae": 0.5433151125907898,
+              "p95_abs_error": 1.6810460090637207,
+              "rmse": 0.7593080997467041
+            }
+          },
+          "1.00s": {
+            "actual_lateral_accel": {
+              "mae": 0.09213598072528839,
+              "p95_abs_error": 0.2650723159313202,
+              "rmse": 0.1271033138036728
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.3257460594177246,
+              "p95_abs_error": 12.84206771850586,
+              "rmse": 6.192936420440674
+            },
+            "steering_angle_deg": {
+              "mae": 0.919578492641449,
+              "p95_abs_error": 3.342130422592163,
+              "rmse": 1.5177974700927734
+            },
+            "steering_torque_eps": {
+              "mae": 0.6253899335861206,
+              "p95_abs_error": 1.8625569343566895,
+              "rmse": 0.8581058382987976
+            }
+          },
+          "2.00s": {
+            "actual_lateral_accel": {
+              "mae": 0.1550135314464569,
+              "p95_abs_error": 0.41561049222946167,
+              "rmse": 0.2037229686975479
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.5683913230895996,
+              "p95_abs_error": 13.109694480895996,
+              "rmse": 7.241891860961914
+            },
+            "steering_angle_deg": {
+              "mae": 1.6784906387329102,
+              "p95_abs_error": 5.762140274047852,
+              "rmse": 3.151923179626465
+            },
+            "steering_torque_eps": {
+              "mae": 0.6965592503547668,
+              "p95_abs_error": 1.952481746673584,
+              "rmse": 0.9363953471183777
+            }
+          }
+        },
+        "normalized_rmse": {
+          "actual_lateral_accel": 0.23518314957618713,
+          "signed_steering_rate_deg_s": 0.7832536697387695,
+          "steering_angle_deg": 0.23318526148796082,
+          "steering_torque_eps": 0.3340071141719818
+        },
+        "score": 0.38010314106941223,
+        "windows": 20000
+      }
+    },
+    {
+      "config": {
+        "attention_heads": 4,
+        "dropout": 0.0,
+        "family": "gru",
+        "feedforward_size": 256,
+        "gru_layers": 1,
+        "hidden_sizes": [
+          96
+        ],
+        "history_steps": 200,
+        "name": "finalist_temporal_gru_100hz_2s",
+        "sample_step": 1,
+        "temporal_layers": 2
+      },
+      "fit": {
+        "best_validation_loss": 0.168697615234375,
+        "epochs": 25,
+        "fit_seconds": 189.07125951896887,
+        "history": [
+          {
+            "epoch": 1,
+            "train_loss": 0.21771323485299945,
+            "validation_loss": 0.271178650390625
+          },
+          {
+            "epoch": 2,
+            "train_loss": 0.18822681894525886,
+            "validation_loss": 0.2674031015625
+          },
+          {
+            "epoch": 3,
+            "train_loss": 0.18343321802094578,
+            "validation_loss": 0.25070442578125
+          },
+          {
+            "epoch": 4,
+            "train_loss": 0.17853474318981172,
+            "validation_loss": 0.226569310546875
+          },
+          {
+            "epoch": 5,
+            "train_loss": 0.1697132907807827,
+            "validation_loss": 0.2109035068359375
+          },
+          {
+            "epoch": 6,
+            "train_loss": 0.16474348185583948,
+            "validation_loss": 0.2019591591796875
+          },
+          {
+            "epoch": 7,
+            "train_loss": 0.16075080716982484,
+            "validation_loss": 0.1977827734375
+          },
+          {
+            "epoch": 8,
+            "train_loss": 0.15682996101677418,
+            "validation_loss": 0.186196005859375
+          },
+          {
+            "epoch": 9,
+            "train_loss": 0.14285801784135402,
+            "validation_loss": 0.18450476953125
+          },
+          {
+            "epoch": 10,
+            "train_loss": 0.13815154442563654,
+            "validation_loss": 0.182943984375
+          },
+          {
+            "epoch": 11,
+            "train_loss": 0.1385711777023971,
+            "validation_loss": 0.1816397802734375
+          },
+          {
+            "epoch": 12,
+            "train_loss": 0.13606877555139363,
+            "validation_loss": 0.178766052734375
+          },
+          {
+            "epoch": 13,
+            "train_loss": 0.1356859067454934,
+            "validation_loss": 0.179766693359375
+          },
+          {
+            "epoch": 14,
+            "train_loss": 0.13441713354550303,
+            "validation_loss": 0.176690427734375
+          },
+          {
+            "epoch": 15,
+            "train_loss": 0.13379003182053567,
+            "validation_loss": 0.1756308642578125
+          },
+          {
+            "epoch": 16,
+            "train_loss": 0.13271211311221123,
+            "validation_loss": 0.1738847451171875
+          },
+          {
+            "epoch": 17,
+            "train_loss": 0.13098917119204997,
+            "validation_loss": 0.17592578515625
+          },
+          {
+            "epoch": 18,
+            "train_loss": 0.13201131927780807,
+            "validation_loss": 0.1772064208984375
+          },
+          {
+            "epoch": 19,
+            "train_loss": 0.13149677752517164,
+            "validation_loss": 0.1722018486328125
+          },
+          {
+            "epoch": 20,
+            "train_loss": 0.13139189183712005,
+            "validation_loss": 0.1730480078125
+          },
+          {
+            "epoch": 21,
+            "train_loss": 0.13017961722798646,
+            "validation_loss": 0.173120939453125
+          },
+          {
+            "epoch": 22,
+            "train_loss": 0.12794883819296957,
+            "validation_loss": 0.175043693359375
+          },
+          {
+            "epoch": 23,
+            "train_loss": 0.12688475642353297,
+            "validation_loss": 0.168697615234375
+          },
+          {
+            "epoch": 24,
+            "train_loss": 0.12619025483727456,
+            "validation_loss": 0.1740201435546875
+          },
+          {
+            "epoch": 25,
+            "train_loss": 0.1256218551658094,
+            "validation_loss": 0.1733602724609375
+          }
+        ],
+        "rollout_train_seconds": 0.5,
+        "rollout_train_steps": 50,
+        "seed": 23
+      },
+      "history_seconds": 2.0,
+      "parameters": 40228,
+      "sample_period_s": 0.01,
+      "validation": {
+        "horizons": {
+          "0.10s": {
+            "actual_lateral_accel": {
+              "mae": 0.016615360975265503,
+              "p95_abs_error": 0.05087624490261078,
+              "rmse": 0.02595420740544796
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.2930097579956055,
+              "p95_abs_error": 12.420125007629395,
+              "rmse": 6.1786088943481445
+            },
+            "steering_angle_deg": {
+              "mae": 0.14537546038627625,
+              "p95_abs_error": 0.44835594296455383,
+              "rmse": 0.2576667368412018
+            },
+            "steering_torque_eps": {
+              "mae": 0.5093363523483276,
+              "p95_abs_error": 1.5120939016342163,
+              "rmse": 0.6966196894645691
+            }
+          },
+          "0.25s": {
+            "actual_lateral_accel": {
+              "mae": 0.032597895711660385,
+              "p95_abs_error": 0.09841033071279526,
+              "rmse": 0.048684269189834595
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.278358221054077,
+              "p95_abs_error": 12.378328323364258,
+              "rmse": 6.031515121459961
+            },
+            "steering_angle_deg": {
+              "mae": 0.2817906439304352,
+              "p95_abs_error": 0.8973899483680725,
+              "rmse": 0.4613092243671417
+            },
+            "steering_torque_eps": {
+              "mae": 0.552243173122406,
+              "p95_abs_error": 1.652258276939392,
+              "rmse": 0.7547516226768494
+            }
+          },
+          "0.50s": {
+            "actual_lateral_accel": {
+              "mae": 0.05539248138666153,
+              "p95_abs_error": 0.16196422278881073,
+              "rmse": 0.07865682244300842
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.238084077835083,
+              "p95_abs_error": 12.451397895812988,
+              "rmse": 6.031313896179199
+            },
+            "steering_angle_deg": {
+              "mae": 0.48202577233314514,
+              "p95_abs_error": 1.5268980264663696,
+              "rmse": 0.7514907121658325
+            },
+            "steering_torque_eps": {
+              "mae": 0.6092227101325989,
+              "p95_abs_error": 1.803856372833252,
+              "rmse": 0.8281169533729553
+            }
+          },
+          "1.00s": {
+            "actual_lateral_accel": {
+              "mae": 0.09519654512405396,
+              "p95_abs_error": 0.2734285295009613,
+              "rmse": 0.1306639462709427
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.280879259109497,
+              "p95_abs_error": 12.518819808959961,
+              "rmse": 6.15313196182251
+            },
+            "steering_angle_deg": {
+              "mae": 0.8475074172019958,
+              "p95_abs_error": 2.6948225498199463,
+              "rmse": 1.3186062574386597
+            },
+            "steering_torque_eps": {
+              "mae": 0.6876286268234253,
+              "p95_abs_error": 1.9339790344238281,
+              "rmse": 0.9228525757789612
+            }
+          },
+          "2.00s": {
+            "actual_lateral_accel": {
+              "mae": 0.15671171247959137,
+              "p95_abs_error": 0.42740365862846375,
+              "rmse": 0.20895713567733765
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.5276999473571777,
+              "p95_abs_error": 12.780665397644043,
+              "rmse": 7.336001396179199
+            },
+            "steering_angle_deg": {
+              "mae": 1.4960787296295166,
+              "p95_abs_error": 4.551817417144775,
+              "rmse": 2.8179306983947754
+            },
+            "steering_torque_eps": {
+              "mae": 0.7530567646026611,
+              "p95_abs_error": 2.049374580383301,
+              "rmse": 0.9967907667160034
+            }
+          }
+        },
+        "normalized_rmse": {
+          "actual_lateral_accel": 0.24205628037452698,
+          "signed_steering_rate_deg_s": 0.7803192734718323,
+          "steering_angle_deg": 0.20595161616802216,
+          "steering_torque_eps": 0.3605020046234131
+        },
+        "score": 0.3804750442504883,
+        "windows": 20000
+      }
+    },
+    {
+      "config": {
+        "attention_heads": 8,
+        "dropout": 0.1,
+        "family": "transformer",
+        "feedforward_size": 768,
+        "gru_layers": 1,
+        "hidden_sizes": [
+          192
+        ],
+        "history_steps": 200,
+        "name": "finalist_large_transformer_100hz_2s",
+        "sample_step": 1,
+        "temporal_layers": 4
+      },
+      "fit": {
+        "best_validation_loss": 0.170677734375,
+        "epochs": 24,
+        "fit_seconds": 1795.5818718730006,
+        "history": [
+          {
+            "epoch": 1,
+            "train_loss": 0.20253134975209833,
+            "validation_loss": 0.216639916015625
+          },
+          {
+            "epoch": 2,
+            "train_loss": 0.16992760160937906,
+            "validation_loss": 0.224478271484375
+          },
+          {
+            "epoch": 3,
+            "train_loss": 0.16442253142595292,
+            "validation_loss": 0.2094577158203125
+          },
+          {
+            "epoch": 4,
+            "train_loss": 0.14846406928263606,
+            "validation_loss": 0.1869201171875
+          },
+          {
+            "epoch": 5,
+            "train_loss": 0.13497983454726636,
+            "validation_loss": 0.1846618916015625
+          },
+          {
+            "epoch": 6,
+            "train_loss": 0.13195251203142105,
+            "validation_loss": 0.1805316875
+          },
+          {
+            "epoch": 7,
+            "train_loss": 0.13019688441418112,
+            "validation_loss": 0.1788191484375
+          },
+          {
+            "epoch": 8,
+            "train_loss": 0.13037225930020213,
+            "validation_loss": 0.1789496318359375
+          },
+          {
+            "epoch": 9,
+            "train_loss": 0.12819731454364955,
+            "validation_loss": 0.1756776630859375
+          },
+          {
+            "epoch": 10,
+            "train_loss": 0.12565544229000808,
+            "validation_loss": 0.1781283828125
+          },
+          {
+            "epoch": 11,
+            "train_loss": 0.12758635925129055,
+            "validation_loss": 0.179310048828125
+          },
+          {
+            "epoch": 12,
+            "train_loss": 0.12591891633346677,
+            "validation_loss": 0.17968763671875
+          },
+          {
+            "epoch": 13,
+            "train_loss": 0.1256442382466048,
+            "validation_loss": 0.1767239775390625
+          },
+          {
+            "epoch": 14,
+            "train_loss": 0.12451497167348861,
+            "validation_loss": 0.1742316005859375
+          },
+          {
+            "epoch": 15,
+            "train_loss": 0.12427840926684439,
+            "validation_loss": 0.1753532705078125
+          },
+          {
+            "epoch": 16,
+            "train_loss": 0.12330655739642679,
+            "validation_loss": 0.17946862109375
+          },
+          {
+            "epoch": 17,
+            "train_loss": 0.12210373133420944,
+            "validation_loss": 0.1774790673828125
+          },
+          {
+            "epoch": 18,
+            "train_loss": 0.12278909222222864,
+            "validation_loss": 0.1843259580078125
+          },
+          {
+            "epoch": 19,
+            "train_loss": 0.12275817757472396,
+            "validation_loss": 0.170677734375
+          },
+          {
+            "epoch": 20,
+            "train_loss": 0.12385672312229871,
+            "validation_loss": 0.173314525390625
+          },
+          {
+            "epoch": 21,
+            "train_loss": 0.12256432981230318,
+            "validation_loss": 0.172918701171875
+          },
+          {
+            "epoch": 22,
+            "train_loss": 0.12130192816257476,
+            "validation_loss": 0.17080065625
+          },
+          {
+            "epoch": 23,
+            "train_loss": 0.12050251397304237,
+            "validation_loss": 0.171261638671875
+          },
+          {
+            "epoch": 24,
+            "train_loss": 0.12205605707131326,
+            "validation_loss": 0.1748469375
+          }
+        ],
+        "rollout_train_seconds": 0.5,
+        "rollout_train_steps": 50,
+        "seed": 23
+      },
+      "history_seconds": 2.0,
+      "parameters": 1857796,
+      "sample_period_s": 0.01,
+      "validation": {
+        "horizons": {
+          "0.10s": {
+            "actual_lateral_accel": {
+              "mae": 0.017309097573161125,
+              "p95_abs_error": 0.052809085696935654,
+              "rmse": 0.026731502264738083
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.4200282096862793,
+              "p95_abs_error": 12.702873229980469,
+              "rmse": 6.345688343048096
+            },
+            "steering_angle_deg": {
+              "mae": 0.15171770751476288,
+              "p95_abs_error": 0.4905347228050232,
+              "rmse": 0.2696531116962433
+            },
+            "steering_torque_eps": {
+              "mae": 0.4367179274559021,
+              "p95_abs_error": 1.420222282409668,
+              "rmse": 0.6281777620315552
+            }
+          },
+          "0.25s": {
+            "actual_lateral_accel": {
+              "mae": 0.03406381607055664,
+              "p95_abs_error": 0.10124148428440094,
+              "rmse": 0.05046593025326729
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.3618671894073486,
+              "p95_abs_error": 12.573878288269043,
+              "rmse": 6.1220011711120605
+            },
+            "steering_angle_deg": {
+              "mae": 0.29045578837394714,
+              "p95_abs_error": 0.9666433334350586,
+              "rmse": 0.4828087091445923
+            },
+            "steering_torque_eps": {
+              "mae": 0.485639363527298,
+              "p95_abs_error": 1.5922000408172607,
+              "rmse": 0.6980230212211609
+            }
+          },
+          "0.50s": {
+            "actual_lateral_accel": {
+              "mae": 0.0576939694583416,
+              "p95_abs_error": 0.168667271733284,
+              "rmse": 0.08165563642978668
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.355781316757202,
+              "p95_abs_error": 12.75398063659668,
+              "rmse": 6.12643575668335
+            },
+            "steering_angle_deg": {
+              "mae": 0.488239049911499,
+              "p95_abs_error": 1.6683839559555054,
+              "rmse": 0.797049880027771
+            },
+            "steering_torque_eps": {
+              "mae": 0.548280656337738,
+              "p95_abs_error": 1.7554281949996948,
+              "rmse": 0.7779893279075623
+            }
+          },
+          "1.00s": {
+            "actual_lateral_accel": {
+              "mae": 0.09949555993080139,
+              "p95_abs_error": 0.29061800241470337,
+              "rmse": 0.13582743704319
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.4117109775543213,
+              "p95_abs_error": 12.810592651367188,
+              "rmse": 6.248230457305908
+            },
+            "steering_angle_deg": {
+              "mae": 0.8421534895896912,
+              "p95_abs_error": 2.8142213821411133,
+              "rmse": 1.3870567083358765
+            },
+            "steering_torque_eps": {
+              "mae": 0.6404493451118469,
+              "p95_abs_error": 1.8992797136306763,
+              "rmse": 0.8838356733322144
+            }
+          },
+          "2.00s": {
+            "actual_lateral_accel": {
+              "mae": 0.1703917533159256,
+              "p95_abs_error": 0.48309850692749023,
+              "rmse": 0.23015759885311127
+            },
+            "signed_steering_rate_deg_s": {
+              "mae": 3.7271695137023926,
+              "p95_abs_error": 13.206110954284668,
+              "rmse": 7.575435161590576
+            },
+            "steering_angle_deg": {
+              "mae": 1.4872106313705444,
+              "p95_abs_error": 4.9021406173706055,
+              "rmse": 2.91344952583313
+            },
+            "steering_torque_eps": {
+              "mae": 0.7215187549591064,
+              "p95_abs_error": 1.992108941078186,
+              "rmse": 0.9628573060035706
+            }
+          }
+        },
+        "normalized_rmse": {
+          "actual_lateral_accel": 0.257639080286026,
+          "signed_steering_rate_deg_s": 0.7956050634384155,
+          "steering_angle_deg": 0.21280711889266968,
+          "steering_torque_eps": 0.3417978882789612
+        },
+        "score": 0.3916718065738678,
+        "windows": 20000
+      }
+    }
+  ],
+  "data": {
+    "current": {
+      "newest_mtime_ns": 1784786498000000000,
+      "rlog_bytes": 16265578632,
+      "rlog_count": 1258,
+      "root": "/home/dvl/dvl/starpilot-plant/data/realdata",
+      "route_filter": {
+        "excluded_routes": [
+          "000000b2--fdf93442e8",
+          "000000de--22eaf07e3c",
+          "000000e3--535834b74a",
+          "000000e5--5977a760a9",
+          "000000fb--db9cf9ddec",
+          "000000fd--e16a112216",
+          "000000ff--ede5baeb22",
+          "00000100--e76442e281",
+          "00000101--aac6da3760"
+        ],
+        "max_driver_overlay_fraction": 0.5,
+        "retained_route_count": 41
+      }
+    },
+    "eligible_route_count": 23,
+    "excluded_route_count": 18,
+    "holdout_routes": [
+      "00000109--aa92859bb6",
+      "0000010b--197dec43be"
+    ],
+    "pretraining_note": "No older telemetry was available; selection used only the local current-tire routes.",
+    "pretraining_performed": false,
+    "train_routes": [
+      "000000be--744874b49d",
+      "000000c0--fe7ed95a7d",
+      "000000c1--d807ae058b",
+      "000000c2--958a3a404b",
+      "000000c3--d7a725116f",
+      "000000c4--c43d9f1f8d",
+      "000000c5--600bff95b2",
+      "000000c6--d12fa4d148",
+      "000000dc--fe7070223b",
+      "000000dd--933e30aca5",
+      "000000e0--8cbba9e1fe",
+      "000000e2--e0593d8af5",
+      "000000fc--5279f0bf9b",
+      "00000102--c0541556ea",
+      "00000103--47c33ced1e",
+      "00000105--c0a8fb0d8b",
+      "00000106--8be7312707",
+      "00000108--0e980655f5"
+    ],
+    "validation_routes": [
+      "000000bf--bcda544e5c",
+      "000000fa--a56163ff65",
+      "00000107--efc51d5992"
+    ]
+  },
+  "format_version": 1,
+  "search_profile": "initial",
+  "selected": {
+    "attention_heads": 4,
+    "dropout": 0.1,
+    "family": "tcn",
+    "feedforward_size": 256,
+    "gru_layers": 1,
+    "hidden_sizes": [
+      192
+    ],
+    "history_steps": 200,
+    "name": "finalist_large_tcn_100hz_2s",
+    "sample_step": 1,
+    "temporal_layers": 7
+  },
+  "selection_metric": "weighted normalized autoregressive rollout RMSE",
+  "split_report": "/home/dvl/dvl/starpilot-plant/corrected-architecture/architecture_search.json"
+}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 import json
 import math
 from pathlib import Path
@@ -19,6 +20,7 @@ from tools.tuning_viewer import analyze_logs, split_segment_name  # noqa: E402
 
 DEFAULT_LOG_ROOT = Path(r"D:\comma_driving_logs\10.30.1.75\realdata")
 DEFAULT_OUTPUT = REPO_ROOT / "artifacts" / "tuning" / "latest_data_evaluation" / "planned_path_metrics.json"
+DERIVED_JERK_WINDOW_S = 0.20
 
 
 def percentile(values: list[float], pct: float) -> float | None:
@@ -39,6 +41,37 @@ def signed_planned_path_error(sample: dict[str, Any]) -> float | None:
   if desired is None or actual is None or abs(float(desired)) < 1e-6:
     return None
   return math.copysign(1.0, float(desired)) * (float(actual) - float(desired))
+
+
+def populate_derived_jerk(samples: list[dict[str, Any]], window_s: float = DERIVED_JERK_WINDOW_S) -> str:
+  active_jerks = [
+    float(sample["desired_jerk"])
+    for sample in samples
+    if sample.get("active") and sample.get("desired_jerk") is not None and math.isfinite(float(sample["desired_jerk"]))
+  ]
+  if active_jerks and sum(abs(jerk) > 1e-6 for jerk in active_jerks) >= max(10, len(active_jerks) // 100):
+    return "logged"
+
+  valid = [
+    sample for sample in samples
+    if sample.get("t") is not None and sample.get("desired") is not None
+    and math.isfinite(float(sample["t"])) and math.isfinite(float(sample["desired"]))
+  ]
+  valid.sort(key=lambda sample: float(sample["t"]))
+  times = [float(sample["t"]) for sample in valid]
+  desired = [float(sample["desired"]) for sample in valid]
+  half_window = window_s / 2.0
+  for index, sample in enumerate(valid):
+    left = bisect_left(times, times[index] - half_window)
+    right = bisect_left(times, times[index] + half_window)
+    if right >= len(valid):
+      right = len(valid) - 1
+    dt = times[right] - times[left]
+    if dt < window_s * 0.4 or dt > window_s * 2.0:
+      sample["desired_jerk"] = None
+      continue
+    sample["desired_jerk"] = min(max((desired[right] - desired[left]) / dt, -2.5), 2.5)
+  return f"derived_{window_s:.2f}s_centered"
 
 
 def phase_samples(samples: list[dict[str, Any]], phase: str) -> list[dict[str, Any]]:
@@ -150,9 +183,11 @@ def main() -> None:
     print(f"analyzing {index}/{len(routes)} {trip} ({len(log_paths)} segments)", flush=True)
     analysis = analyze_logs(log_paths, log_type=args.log_type, label=trip)
     samples = analysis["samples"]
+    desired_jerk_source = populate_derived_jerk(samples)
     last_live_torque = analysis.get("last_live_torque") or {}
     route_results[trip] = {
       "segment_count": len(log_paths),
+      "desired_jerk_source": desired_jerk_source,
       **summarize(samples, last_live_torque),
     }
     all_samples.extend(samples)
@@ -166,6 +201,7 @@ def main() -> None:
     "route_count": len(routes),
     "segment_count": sum(len(paths) for paths in routes.values()),
     "error_convention": "sign(desiredLateralAccel) * (actualLateralAccel - desiredLateralAccel); positive=tighter/inside, negative=wider/outside",
+    "derived_jerk_window_s": DERIVED_JERK_WINDOW_S,
     "combined": summarize(all_samples, live_snapshots[-1] if live_snapshots else None),
     "routes": route_results,
   }

@@ -28,6 +28,39 @@ LOW_SPEED_X = np.asarray([0.0, 10.0, 20.0, 30.0])
 LOW_SPEED_Y = np.asarray([12.0, 10.5, 8.0, 5.0])
 KI = 0.35
 
+CURRENT_CODE_TUNE = tune_math.Tune(
+  name="current_code",
+  base_lat_accel_factor_mult=1.41,
+  ff_reduction_left=0.345,
+  ff_reduction_right=0.295,
+  turn_in_boost_left=0.075,
+  turn_in_boost_right=0.0,
+  unwind_taper_left=1.09,
+  unwind_taper_right=1.40,
+  turn_in_threshold_reduction_left=0.15,
+  turn_in_threshold_reduction_right=0.17,
+  unwind_threshold_increase_left=0.28,
+  unwind_threshold_increase_right=0.33,
+  turn_in_friction_boost_left=0.02,
+  turn_in_friction_boost_right=0.01,
+  unwind_friction_reduction_left=0.42,
+  unwind_friction_reduction_right=0.44,
+  friction_scale_mult=1.0,
+  center_taper_max=0.1775,
+  center_taper_lat=0.16,
+  center_taper_lat_width=0.04,
+  center_taper_speed=15.0,
+  center_taper_speed_width=2.2,
+  sustained_turn_in_ff_boost_left=0.015,
+  sustained_turn_in_ff_boost_right=0.0,
+  sustained_turn_in_ff_speed=13.5,
+  sustained_turn_in_ff_speed_width=1.8,
+  sustained_turn_in_ff_lat_start=1.10,
+  sustained_turn_in_ff_lat_end=3.60,
+  sustained_turn_in_ff_lat_width=0.30,
+  hkg_friction_threshold=True,
+)
+
 
 @dataclass
 class RolloutBatch:
@@ -52,9 +85,11 @@ class RolloutTrace:
   states: np.ndarray
 
 
-def current_tune(path: Path) -> tune_math.Tune:
+def current_tune(path: Path | None, variant: str = "optimized") -> tune_math.Tune:
+  if path is None:
+    return CURRENT_CODE_TUNE
   payload = json.loads(path.read_text(encoding="utf-8"))
-  values = dict(payload["holdout"]["optimized"]["tune"])
+  values = dict(payload["holdout"][variant]["tune"])
   values["name"] = "current_tune"
   return tune_math.Tune(**values)
 
@@ -360,7 +395,10 @@ def routes_matching_prefixes(routes: list[str], prefixes: list[str]) -> set[str]
 def main() -> None:
   parser = argparse.ArgumentParser(description="Optimize the Ioniq 5 torque tune in an aligned multi-step plant rollout.")
   parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
-  parser.add_argument("--starting-tune", type=Path, default=DEFAULT_TUNE_REPORT)
+  parser.add_argument("--starting-tune", type=Path, default=None,
+                      help="Prior optimization report to start from; defaults to the current Ioniq 5 code tune.")
+  parser.add_argument("--starting-tune-variant", choices=("current", "optimized"), default="optimized",
+                      help="Which holdout tune to read from --starting-tune.")
   parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
   parser.add_argument("--rollout-steps", type=int, default=40, help="Closed-loop horizon (40 = 2.0 s at the default sample period).")
   parser.add_argument("--max-search-windows", type=int, default=1500)
@@ -383,12 +421,16 @@ def main() -> None:
   if len(routes) < 2:
     raise SystemExit(f"Need at least two plant-validation routes; found {len(routes)}.")
   if args.search_route_prefix or args.holdout_route_prefix:
-    if not args.search_route_prefix or not args.holdout_route_prefix:
-      raise SystemExit("Specify both --search-route-prefix and --holdout-route-prefix, or neither.")
-    search_routes = routes_matching_prefixes(routes, args.search_route_prefix)
-    holdout_routes = routes_matching_prefixes(routes, args.holdout_route_prefix)
+    search_routes = routes_matching_prefixes(routes, args.search_route_prefix) if args.search_route_prefix else set(routes)
+    holdout_routes = routes_matching_prefixes(routes, args.holdout_route_prefix) if args.holdout_route_prefix else set(routes)
+    if not args.search_route_prefix:
+      search_routes -= holdout_routes
+    if not args.holdout_route_prefix:
+      holdout_routes -= search_routes
     if search_routes & holdout_routes:
       raise SystemExit("Search and holdout route selections overlap.")
+    if not search_routes or not holdout_routes:
+      raise SystemExit("Search and holdout route selections must both contain at least one route.")
   else:
     search_routes = set(routes[::2])
     holdout_routes = set(routes[1::2])
@@ -398,7 +440,7 @@ def main() -> None:
   holdout_batch = build_batch(trajectories, holdout_routes, history_steps, args.rollout_steps, args.max_holdout_windows, args.random_state + 1)
   print(f"closed-loop windows: search={len(search_batch.history)} holdout={len(holdout_batch.history)}")
 
-  starting_tune = current_tune(args.starting_tune)
+  starting_tune = current_tune(args.starting_tune, args.starting_tune_variant)
   search_evaluator = ClosedLoopEvaluator(model, search_batch, sample_period_s, args.wobble_weight)
   optimized, history = optimize(search_evaluator, starting_tune, args.max_path_regression)
   holdout_evaluator = ClosedLoopEvaluator(model, holdout_batch, sample_period_s, args.wobble_weight)

@@ -31,6 +31,8 @@ from openpilot.tools.tuning import train_vehicle_response_model as log_data
 
 DEFAULT_LOG_ROOT = Path(r"D:\comma_driving_logs\10.30.1.75\realdata")
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "artifacts/tuning/lateral_plant_20260721"
+DERIVED_JERK_WINDOW_S = 0.20
+DERIVED_JERK_LIMIT = 2.5
 
 BASE_FEATURES = (
   "applied_torque",
@@ -106,6 +108,21 @@ def signed_steering_rate(angles: np.ndarray, times: np.ndarray, max_gap_s: float
   return rate
 
 
+def derived_lateral_jerk(accels: np.ndarray, times: np.ndarray,
+                         window_s: float = DERIVED_JERK_WINDOW_S) -> np.ndarray:
+  """Estimate planned lateral jerk from the desired-acceleration timeline."""
+  jerk = np.zeros_like(accels, dtype=np.float32)
+  if len(jerk) < 2:
+    return jerk
+  half_window = window_s / 2.0
+  left = np.searchsorted(times, times - half_window, side="left")
+  right = np.searchsorted(times, times + half_window, side="right") - 1
+  valid = (right > left) & ((times[right] - times[left]) > 1e-4)
+  jerk[valid] = ((accels[right[valid]] - accels[left[valid]]) /
+                 (times[right[valid]] - times[left[valid]])).astype(np.float32)
+  return np.clip(jerk, -DERIVED_JERK_LIMIT, DERIVED_JERK_LIMIT)
+
+
 def read_trajectory(path: Path, brand_filter: str, fingerprint_filter: str, sample_step: int) -> Trajectory | None:
   latest: dict[str, Any] = {}
   brand = ""
@@ -116,7 +133,7 @@ def read_trajectory(path: Path, brand_filter: str, fingerprint_filter: str, samp
   lateral_active_rows = 0
   driver_overlay_rows = 0
 
-  for msg in log_data.iter_log_messages(path):
+  for msg in log_data.stream_log_messages(path):
     try:
       which = msg.which()
     except Exception:
@@ -195,6 +212,8 @@ def read_trajectory(path: Path, brand_filter: str, fingerprint_filter: str, samp
   # Values were only appended for finite sampled times.
   values = {name: np.asarray(value, dtype=np.float32) for name, value in rows.items()}
   values["signed_steering_rate_deg_s"] = signed_steering_rate(values["steering_angle_deg"], sampled_times)
+  if not np.any(np.abs(values["desired_lateral_jerk"]) > 1e-6):
+    values["desired_lateral_jerk"] = derived_lateral_jerk(values["desired_lateral_accel"], sampled_times)
   return Trajectory(
     segment=path.parent.name,
     route=route_name(path.parent.name),

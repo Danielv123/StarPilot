@@ -68,6 +68,14 @@ def test_signed_steering_rate_preserves_direction_and_resets_across_gaps():
   assert np.allclose(rate, [0.0, 20.0, -10.0, 0.0])
 
 
+def test_derived_lateral_jerk_recovers_path_slope_and_clamps_spikes():
+  times = np.arange(7, dtype=np.float64) * 0.05
+  accels = np.asarray([0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 3.0], dtype=np.float32)
+  jerk = plant.derived_lateral_jerk(accels, times)
+  assert np.allclose(jerk[1:4], 1.0, atol=1e-5)
+  assert jerk[-1] == plant.DERIVED_JERK_LIMIT
+
+
 def test_forced_holdout_routes_are_never_used_for_training():
   trajectories = [make_trajectory() for _ in range(4)]
   for index, trajectory in enumerate(trajectories):

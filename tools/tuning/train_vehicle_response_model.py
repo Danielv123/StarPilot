@@ -7,6 +7,7 @@ import csv
 import json
 import math
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -257,6 +258,15 @@ def iter_log_messages(path: Path) -> list[Any]:
     pass
   messages.sort(key=lambda event: event.logMonoTime)
   return messages
+
+
+def stream_log_messages(path: Path) -> Iterator[Any]:
+  """Yield events in their recorded order without materializing and sorting a full rlog."""
+  data = decompress_log_bytes(path)
+  try:
+    yield from capnp_log.Event.read_multiple_bytes(data)
+  except capnp.KjException:
+    return
 
 
 def get_feature_row(latest: dict[str, Any]) -> list[float]:

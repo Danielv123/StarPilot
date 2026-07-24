@@ -94,9 +94,9 @@ class NeuralPlant(nn.Module):
 
 
 class FluxPolicy(nn.Module):
-  def __init__(self, hidden_sizes: tuple[int, ...] = (24, 12, 6)):
+  def __init__(self, hidden_sizes: tuple[int, ...] = (24, 12, 6), input_size: int = 18):
     super().__init__()
-    sizes = (18, *hidden_sizes, 1)
+    sizes = (input_size, *hidden_sizes, 1)
     self.layers = nn.ModuleList([
       nn.Linear(input_size, output_size)
       for input_size, output_size in zip(sizes[:-1], sizes[1:], strict=True)
@@ -305,10 +305,17 @@ def initialize_policy(policy: FluxPolicy, payload: dict[str, Any],
 def distill_policy(source: FluxPolicy, target: FluxPolicy, seed: int,
                    epochs: int = 100, rows: int = 30000) -> None:
   generator = torch.Generator().manual_seed(seed)
-  inputs = torch.clamp(torch.randn((rows, 18), generator=generator), -3.5, 3.5)
+  source_input_size = source.layers[0].in_features
+  target_input_size = target.layers[0].in_features
+  if target_input_size < source_input_size:
+    raise ValueError("The distilled policy cannot have fewer inputs than its source.")
+  inputs = torch.clamp(torch.randn((rows, target_input_size), generator=generator), -3.5, 3.5)
+  inputs[:, source_input_size:] = 0.0
+  with torch.no_grad():
+    target.layers[0].weight[:, source_input_size:] = 0.0
   source.eval()
   with torch.no_grad():
-    labels = source(inputs)
+    labels = source(inputs[:, :source_input_size])
   optimizer = torch.optim.AdamW(target.parameters(), lr=1e-3, weight_decay=1e-5)
   for epoch in range(1, epochs + 1):
     permutation = torch.randperm(rows, generator=generator)
@@ -332,7 +339,8 @@ def policy_from_state_dict(state_dict: dict[str, torch.Tensor]) -> FluxPolicy:
     if key.startswith("layers.") and key.endswith(".weight")
   })
   output_sizes = [int(state_dict[f"layers.{index}.weight"].shape[0]) for index in layer_indexes]
-  policy = FluxPolicy(tuple(output_sizes[:-1]))
+  input_size = int(state_dict[f"layers.{layer_indexes[0]}.weight"].shape[1])
+  policy = FluxPolicy(tuple(output_sizes[:-1]), input_size)
   policy.load_state_dict(state_dict)
   return policy
 

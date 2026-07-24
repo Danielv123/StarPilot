@@ -348,14 +348,18 @@ def main() -> None:
       and path_safe(validation_result, validation_baseline, args.max_path_regression)
     )
   ]
-  if not eligible:
-    raise RuntimeError("No candidate preserved transition and center tracking on the validation route.")
-  selected, selected_search, selected_validation = min(
-    eligible, key=lambda item: item[2]["objective"],
-  )
-  selected = replace(selected, name="neural_plant_optimized")
-  selected_validation = validation_evaluator.evaluate(selected)
-  selected_search = search_evaluator.evaluate(selected)
+  if eligible:
+    selected, selected_search, selected_validation = min(
+      eligible, key=lambda item: item[2]["objective"],
+    )
+    selected = replace(selected, name="neural_plant_optimized")
+    selected_validation = validation_evaluator.evaluate(selected)
+    selected_search = search_evaluator.evaluate(selected)
+  else:
+    print("No retuned feedforward candidate passed validation; sweeping damping on the current tune.", flush=True)
+    selected = replace(baseline_tune, name="neural_plant_damping_base")
+    selected_search = search_baseline
+    selected_validation = validation_baseline
 
   acceptance_evaluator = legacy.ClosedLoopEvaluator(
     predictor, acceptance_batch, config.sample_period_s, args.wobble_weight,

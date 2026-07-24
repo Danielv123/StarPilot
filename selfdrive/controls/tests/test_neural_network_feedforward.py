@@ -9,3 +9,5 @@ def test_ioniq5_nnff_model_loads():
 
   assert [activation for _, _, activation in model.layers] == ["sigmoid", "sigmoid", "sigmoid", "identity"]
   assert math.isfinite(model.evaluate([0.0] * model.input_size))
+  assert model.low_speed_angle_assist_gain == 0.0
+  assert model.low_speed_angle_assist_max == 0.0

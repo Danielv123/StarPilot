@@ -45,6 +45,8 @@ LOW_SPEED_X = [0, 10, 20, 30]
 LOW_SPEED_Y = [12, 3, 1, 0]
 
 LAT_PLAN_MIN_IDX = 5
+IONIQ_5_WHEELBASE_M = 2.97
+IONIQ_5_STEER_RATIO = 14.26
 
 class FluxModel:
   def __init__(self, params_file):
@@ -53,6 +55,8 @@ class FluxModel:
 
     self.input_size = params["input_size"]
     self.output_size = params["output_size"]
+    self.low_speed_angle_assist_gain = float(params.get("low_speed_angle_assist_gain", 0.0))
+    self.low_speed_angle_assist_max = float(params.get("low_speed_angle_assist_max", 0.0))
 
     self.input_mean = np.array(params["input_mean"], dtype=np.float32).T
     self.input_std = np.array(params["input_std"], dtype=np.float32).T
@@ -233,6 +237,11 @@ class LatControlNNFF(LatControl):
     self.torque_params.latAccelOffset = latAccelOffset
     self.torque_params.friction = friction
 
+  def with_optional_curvature(self, input_array, curvature):
+    if self.lat_torque_nn_model and self.lat_torque_nn_model.input_size == len(input_array) + 1:
+      return input_array + [curvature]
+    return input_array
+
   def update(self, active, CS, VM, params, steer_limited_by_safety, desired_curvature, curvature_limited, lat_delay, calibrated_pose, model_data, starpilot_toggles):
     pid_log = log.ControlsState.LateralTorqueState.new_message()
     if not active:
@@ -309,8 +318,14 @@ class LatControlNNFF(LatControl):
           nnff_common = past_rolls + future_rolls
 
           # compute NNFF error response
-          nnff_setpoint_input = base_input[:1] + [setpoint, lateral_jerk_setpoint] + base_input[1:] + [setpoint] * self.past_future_len + nnff_common
-          nnff_measurement_input = base_input[:1] + [measurement, lateral_jerk_measurement] + base_input[1:] + [measurement] * self.past_future_len + nnff_common
+          nnff_setpoint_input = self.with_optional_curvature(
+            base_input[:1] + [setpoint, lateral_jerk_setpoint] + base_input[1:] + [setpoint] * self.past_future_len + nnff_common,
+            desired_curvature,
+          )
+          nnff_measurement_input = self.with_optional_curvature(
+            base_input[:1] + [measurement, lateral_jerk_measurement] + base_input[1:] + [measurement] * self.past_future_len + nnff_common,
+            actual_curvature,
+          )
 
           torque_from_setpoint = self.lat_torque_nn_model.evaluate(nnff_setpoint_input)
           torque_from_measurement = self.lat_torque_nn_model.evaluate(nnff_measurement_input)
@@ -326,8 +341,24 @@ class LatControlNNFF(LatControl):
           # compute feedforward (same as nn setpoint output)
           error = setpoint - measurement
           friction_input = self.lat_accel_friction_factor * error + self.lat_jerk_friction_factor * lookahead_lateral_jerk
-          nn_input = [CS.vEgo, control_lateral_accel, friction_input, roll] + past_lateral_accels_desired + future_lateral_accels + nnff_common
+          nn_input = self.with_optional_curvature(
+            [CS.vEgo, control_lateral_accel, friction_input, roll] + past_lateral_accels_desired + future_lateral_accels + nnff_common,
+            desired_curvature,
+          )
           ff = self.lat_torque_nn_model.evaluate(nn_input)
+          if self.ioniq_5_early_unwind and self.lat_torque_nn_model.low_speed_angle_assist_gain > 0.0:
+            desired_steering_angle = math.degrees(
+              -desired_curvature * IONIQ_5_STEER_RATIO * IONIQ_5_WHEELBASE_M,
+            )
+            angle_error = desired_steering_angle - CS.steeringAngleDeg
+            if desired_steering_angle * angle_error > 0.0:
+              speed_blend = np.clip((8.0 - CS.vEgo) / 3.0, 0.0, 1.0)
+              applied_assist = np.clip(
+                self.lat_torque_nn_model.low_speed_angle_assist_gain * angle_error,
+                -self.lat_torque_nn_model.low_speed_angle_assist_max,
+                self.lat_torque_nn_model.low_speed_angle_assist_max,
+              )
+              ff -= speed_blend * applied_assist
 
           # apply friction override for cars with low NN friction response
           if self.nn_friction_override:

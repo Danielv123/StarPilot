@@ -402,7 +402,7 @@ def test_nnff_policy_export_matches_runtime_schema() -> None:
       "holdout_windows": 30,
     },
   }
-  policy = nnff_policy.legacy.FluxPolicy((4,))
+  policy = nnff_policy.legacy.FluxPolicy((4,), len(nnff_policy.INPUT_VARS))
   payload = nnff_policy.export_policy(
     policy,
     np.zeros(len(nnff_policy.INPUT_VARS)),
@@ -412,6 +412,8 @@ def test_nnff_policy_export_matches_runtime_schema() -> None:
   assert payload["input_size"] == len(nnff_policy.INPUT_VARS)
   assert payload["output_size"] == 1
   assert payload["input_vars"] == list(nnff_policy.INPUT_VARS)
+  assert payload["input_vars"][-1] == "desired_curvature"
+  assert payload["low_speed_angle_assist_gain"] == 0.0
 
 
 def test_nnff_policy_regime_sampler_balances_rare_turns() -> None:
@@ -425,3 +427,43 @@ def test_nnff_policy_regime_sampler_balances_rare_turns() -> None:
     for name in nnff_policy.REGIMES
   }
   assert counts == dict.fromkeys(nnff_policy.REGIMES, 20)
+
+
+def test_low_speed_windows_are_retained() -> None:
+  trajectory = synthetic_trajectory()
+  trajectory.values["v_ego"][:] = 1.0
+  config = neural_plant.ModelConfig("fixture", "gru", 1, 20, (8,), dropout=0.0)
+  sources, _, _ = neural_plant.eligible_sources(trajectory, config, rollout_steps=10)
+  assert len(sources) > 0
+
+
+def test_plant_state_weights_change_with_speed() -> None:
+  weights = neural_plant.speed_conditioned_state_weights(torch.tensor([1.0, 20.0]))
+  accel_index = plant_data.STATE_FEATURES.index("actual_lateral_accel")
+  angle_index = plant_data.STATE_FEATURES.index("steering_angle_deg")
+  assert weights[0, angle_index] > weights[1, angle_index]
+  assert weights[0, accel_index] < weights[1, accel_index]
+
+
+def test_speed_sampler_balances_available_buckets() -> None:
+  speeds = np.concatenate([
+    np.full(10, 1.0),
+    np.full(10, 4.0),
+    np.full(10, 6.0),
+    np.full(10, 10.0),
+    np.full(10, 20.0),
+  ])
+  selected = neural_plant.speed_stratified_indexes(speeds, 100, np.random.default_rng(3))
+  counts = np.bincount(neural_plant.speed_bucket_indexes(speeds[selected]), minlength=5)
+  assert counts.tolist() == [20, 20, 20, 20, 20]
+
+
+def test_low_speed_curvature_identifies_intersection_turn_in() -> None:
+  regimes = nnff_policy.classify_regime(
+    desired=np.asarray([0.02]),
+    jerk=np.asarray([0.01]),
+    speed=np.asarray([2.0]),
+    curvature=np.asarray([0.02]),
+    curvature_rate=np.asarray([0.08]),
+  )
+  assert regimes.tolist() == ["sharp_turn_in"]

@@ -33,6 +33,7 @@ DEFAULT_LOG_ROOT = Path(r"D:\comma_driving_logs\10.30.1.75\realdata")
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "artifacts/tuning/lateral_plant_20260721"
 DERIVED_JERK_WINDOW_S = 0.20
 DERIVED_JERK_LIMIT = 2.5
+MIN_TRAIN_SPEED_MPS = 0.5
 
 BASE_FEATURES = (
   "applied_torque",
@@ -51,6 +52,7 @@ STATE_FEATURES = (
   "steering_torque_eps",
 )
 DIAGNOSTIC_FIELDS = (
+  "desired_curvature",
   "desired_lateral_accel",
   "desired_lateral_jerk",
   "controller_output",
@@ -191,6 +193,7 @@ def read_trajectory(path: Path, brand_filter: str, fingerprint_filter: str, samp
       "steering_torque_eps": finite(nested(car_state, "steeringTorqueEps")),
       "v_ego": finite(nested(car_state, "vEgo")),
       "a_ego": finite(nested(car_state, "aEgo")),
+      "desired_curvature": finite(nested(car_control, "actuators", "curvature")),
       "desired_lateral_accel": finite(nested(torque_state, "desiredLateralAccel")),
       "desired_lateral_jerk": finite(nested(torque_state, "desiredLateralJerk")),
       "controller_output": finite(nested(torque_state, "output")),
@@ -199,7 +202,16 @@ def read_trajectory(path: Path, brand_filter: str, fingerprint_filter: str, samp
       "driver_overlay": float(driver_overlay),
       "saturated": float(bool(nested(torque_state, "saturated"))),
     }
-    if not all(math.isfinite(row[name]) for name in (*BASE_FEATURES, "desired_lateral_accel", "desired_lateral_jerk", "controller_output", "controller_i")):
+    if not math.isfinite(row["desired_curvature"]):
+      row["desired_curvature"] = row["desired_lateral_accel"] / max(row["v_ego"] ** 2, MIN_TRAIN_SPEED_MPS ** 2)
+    if not all(math.isfinite(row[name]) for name in (
+      *BASE_FEATURES,
+      "desired_curvature",
+      "desired_lateral_accel",
+      "desired_lateral_jerk",
+      "controller_output",
+      "controller_i",
+    )):
       times.append(math.nan)
       continue
     times.append(msg.logMonoTime / 1e9)
@@ -241,7 +253,7 @@ def trajectory_samples(trajectory: Trajectory, history_steps: int) -> tuple[np.n
     & (values["lat_active"][source + 1] > 0.5)
     & (values["driver_overlay"][source] < 0.5)
     & (values["driver_overlay"][source + 1] < 0.5)
-    & (values["v_ego"][source] >= 3.0)
+    & (values["v_ego"][source] >= MIN_TRAIN_SPEED_MPS)
     & continuous
   )
   source = source[clean]
@@ -352,7 +364,11 @@ def rollout_metrics(model: Any, trajectories: list[Trajectory], routes: set[str]
     values = trajectory.values
     for source in range(history_steps - 1, len(trajectory.times) - rollout_steps):
       future = slice(source, source + rollout_steps + 1)
-      if values["lat_active"][future].min() < 0.5 or values["driver_overlay"][future].max() > 0.5 or values["v_ego"][source] < 3.0:
+      if (
+        values["lat_active"][future].min() < 0.5
+        or values["driver_overlay"][future].max() > 0.5
+        or values["v_ego"][source] < MIN_TRAIN_SPEED_MPS
+      ):
         continue
       if np.max(np.diff(trajectory.times[source:source + rollout_steps + 1])) >= 0.09:
         continue

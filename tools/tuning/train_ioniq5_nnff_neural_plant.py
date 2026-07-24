@@ -29,7 +29,7 @@ except ModuleNotFoundError as e:
 from openpilot.tools.tuning import train_goal_based_ioniq5_nnff as legacy
 from openpilot.tools.tuning import train_lateral_plant_model as plant_data
 from openpilot.tools.tuning import train_neural_lateral_plant as neural_plant
-from openpilot.tools.tuning.train_ioniq5_nnff import INPUT_VARS, flux_predict
+from openpilot.tools.tuning.train_ioniq5_nnff import INPUT_VARS as LEGACY_INPUT_VARS, flux_predict
 
 
 DEFAULT_PLANT = REPO_ROOT / "artifacts/tuning/neural_lateral_plant_20260723/neural_lateral_plant.pt"
@@ -39,6 +39,9 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "artifacts/tuning/ioniq5_nnff_neural_plant_2026
 DEFAULT_MODEL_OUTPUT = DEFAULT_OUTPUT_DIR / "HYUNDAI_IONIQ_5.json"
 PATH_TIMES_S = (-0.3, -0.2, -0.1, 0.4, 0.7, 1.1, 1.6)
 REGIMES = ("sharp_turn_in", "turn_in", "unwind", "steady", "center")
+IONIQ_5_WHEELBASE_M = 2.97
+IONIQ_5_STEER_RATIO = 14.26
+INPUT_VARS = (*LEGACY_INPUT_VARS, "desired_curvature")
 STATE_CLAMPS = (
   (-5.0, 5.0),
   (-180.0, 180.0),
@@ -51,6 +54,7 @@ STATE_CLAMPS = (
 class PolicyWindows:
   history: np.ndarray
   path: np.ndarray
+  curvature: np.ndarray
   jerk: np.ndarray
   v_ego: np.ndarray
   a_ego: np.ndarray
@@ -64,6 +68,7 @@ class PolicyWindows:
     return PolicyWindows(
       history=self.history[indexes],
       path=self.path[indexes],
+      curvature=self.curvature[indexes],
       jerk=self.jerk[indexes],
       v_ego=self.v_ego[indexes],
       a_ego=self.a_ego[indexes],
@@ -76,12 +81,24 @@ def path_offsets(sample_period_s: float) -> tuple[int, ...]:
   return tuple(round(seconds / sample_period_s) for seconds in PATH_TIMES_S)
 
 
-def classify_regime(desired: np.ndarray, jerk: np.ndarray, speed: np.ndarray) -> np.ndarray:
-  product = desired * jerk
-  center = np.abs(desired) < 0.08
+def classify_regime(desired: np.ndarray, jerk: np.ndarray, speed: np.ndarray,
+                    curvature: np.ndarray | None = None,
+                    curvature_rate: np.ndarray | None = None) -> np.ndarray:
+  low_speed = speed < 8.0
+  accel_product = desired * jerk
+  if curvature is None or curvature_rate is None:
+    curvature = np.zeros_like(desired)
+    curvature_rate = np.zeros_like(desired)
+  curvature_product = curvature * curvature_rate
+  product = np.where(low_speed, curvature_product * 100.0, accel_product)
+  center = np.where(low_speed, np.abs(curvature) < 0.003, np.abs(desired) < 0.08)
   sharp = (
     (product > 0.10)
-    & ((np.abs(desired) >= 0.30) | (np.abs(jerk) >= 0.55))
+    & (
+      (np.abs(desired) >= 0.30)
+      | (np.abs(jerk) >= 0.55)
+      | (low_speed & ((np.abs(curvature) >= 0.01) | (np.abs(curvature_rate) >= 0.02)))
+    )
     & (speed < 18.0)
   )
   labels = np.full(len(desired), "steady", dtype="<U16")
@@ -92,14 +109,24 @@ def classify_regime(desired: np.ndarray, jerk: np.ndarray, speed: np.ndarray) ->
   return labels
 
 
-def balanced_indexes(labels: np.ndarray, size: int, rng: np.random.Generator) -> np.ndarray:
-  present = [name for name in REGIMES if np.any(labels == name)]
-  if not present:
+def balanced_indexes(labels: np.ndarray, size: int, rng: np.random.Generator,
+                     speeds: np.ndarray | None = None) -> np.ndarray:
+  if speeds is None:
+    groups = [(name, labels == name) for name in REGIMES if np.any(labels == name)]
+  else:
+    speed_buckets = neural_plant.speed_bucket_indexes(speeds)
+    groups = [
+      ((name, speed_index), (labels == name) & (speed_buckets == speed_index))
+      for name in REGIMES
+      for speed_index in range(len(neural_plant.SPEED_BUCKETS_MPS))
+      if np.any((labels == name) & (speed_buckets == speed_index))
+    ]
+  if not groups:
     raise ValueError("No policy regimes are present.")
-  quota, remainder = divmod(size, len(present))
+  quota, remainder = divmod(size, len(groups))
   selected: list[np.ndarray] = []
-  for index, name in enumerate(present):
-    candidates = np.flatnonzero(labels == name)
+  for index, (_, mask) in enumerate(groups):
+    candidates = np.flatnonzero(mask)
     count = quota + (1 if index < remainder else 0)
     selected.append(rng.choice(candidates, count, replace=len(candidates) < count))
   result = np.concatenate(selected)
@@ -130,6 +157,7 @@ def build_windows(trajectories: list[plant_data.Trajectory], history_steps: int,
                   window_stride: int, max_windows: int, seed: int) -> PolicyWindows:
   histories: list[np.ndarray] = []
   paths: list[np.ndarray] = []
+  curvatures: list[np.ndarray] = []
   jerks: list[np.ndarray] = []
   speeds: list[np.ndarray] = []
   accelerations: list[np.ndarray] = []
@@ -152,7 +180,7 @@ def build_windows(trajectories: list[plant_data.Trajectory], history_steps: int,
       (values["lat_active"][active_index].min(axis=1) > 0.5)
       & (values["driver_overlay"][active_index].max(axis=1) < 0.5)
       & (values["saturated"][active_index].max(axis=1) < 0.5)
-      & (values["v_ego"][source] >= 3.0)
+      & (values["v_ego"][source] >= plant_data.MIN_TRAIN_SPEED_MPS)
       & (np.diff(trajectory.times[path_index], axis=1).max(axis=1) < 0.035)
     )
     source = source[clean]
@@ -166,6 +194,7 @@ def build_windows(trajectories: list[plant_data.Trajectory], history_steps: int,
       for indexes in history_index
     ])
     path = values["desired_lateral_accel"][path_index]
+    curvature = values["desired_curvature"][path_index]
     jerk = values["desired_lateral_jerk"][future_index]
     # NNFF logs do not populate desiredLateralJerk. Reconstruct the same path
     # derivative used by the runtime controller.
@@ -177,9 +206,19 @@ def build_windows(trajectories: list[plant_data.Trajectory], history_steps: int,
       )
       jerk = np.clip(jerk, -2.5, 2.5)
     speed = values["v_ego"][future_index]
-    regime = classify_regime(path[:, current_index], jerk[:, 0], speed[:, 0])
+    curvature_rate = (
+      curvature[:, current_index + 10] - curvature[:, current_index]
+    ) / 0.10
+    regime = classify_regime(
+      path[:, current_index],
+      jerk[:, 0],
+      speed[:, 0],
+      curvature[:, current_index],
+      curvature_rate,
+    )
     histories.append(history)
     paths.append(path)
+    curvatures.append(curvature)
     jerks.append(jerk)
     speeds.append(speed)
     accelerations.append(values["a_ego"][future_index])
@@ -191,6 +230,7 @@ def build_windows(trajectories: list[plant_data.Trajectory], history_steps: int,
   result = PolicyWindows(
     history=np.concatenate(histories).astype(np.float32),
     path=np.concatenate(paths).astype(np.float32),
+    curvature=np.concatenate(curvatures).astype(np.float32),
     jerk=np.concatenate(jerks).astype(np.float32),
     v_ego=np.concatenate(speeds).astype(np.float32),
     a_ego=np.concatenate(accelerations).astype(np.float32),
@@ -198,7 +238,12 @@ def build_windows(trajectories: list[plant_data.Trajectory], history_steps: int,
     segments=segments,
   )
   if max_windows and len(result) > max_windows:
-    indexes = balanced_indexes(result.regimes, max_windows, np.random.default_rng(seed))
+    indexes = balanced_indexes(
+      result.regimes,
+      max_windows,
+      np.random.default_rng(seed),
+      result.v_ego[:, 0],
+    )
     result = result.subset(indexes)
   print(f"windows={len(result)} regimes={dict(Counter(result.regimes))}", flush=True)
   return result
@@ -226,6 +271,7 @@ def policy_input_stats(windows: PolicyWindows, offsets: tuple[int, ...],
     np.zeros(len(window_indexes), dtype=np.float32),
     path_points,
     zeros,
+    windows.curvature[window_indexes, current_index + step_indexes],
   )).astype(np.float64)
   mean = inputs.mean(axis=0)
   std = inputs.std(axis=0)
@@ -238,6 +284,7 @@ def tensor_batch(windows: PolicyWindows, indexes: np.ndarray,
   return {
     "history": torch.as_tensor(windows.history[indexes], device=device),
     "path": torch.as_tensor(windows.path[indexes], device=device),
+    "curvature": torch.as_tensor(windows.curvature[indexes], device=device),
     "jerk": torch.as_tensor(windows.jerk[indexes], device=device),
     "v_ego": torch.as_tensor(windows.v_ego[indexes], device=device),
     "a_ego": torch.as_tensor(windows.a_ego[indexes], device=device),
@@ -254,11 +301,43 @@ def early_unwind(desired: torch.Tensor, preview: torch.Tensor) -> torch.Tensor:
   return torch.where(enabled, torch.sign(desired) * (desired_abs - reduction), desired)
 
 
-def rollout_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
-                   plant_stats: dict[str, torch.Tensor],
+@dataclass(frozen=True)
+class PlantPredictor:
+  models: list[torch.nn.Module]
+  stats: dict[str, torch.Tensor]
+  low_speed_models: list[torch.nn.Module] | None = None
+  low_speed_stats: dict[str, torch.Tensor] | None = None
+  low_speed_full_below_mps: float = 5.0
+  low_speed_off_above_mps: float = 8.0
+
+  def predict(self, history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    delta, disagreement = neural_plant.ensemble_predict_delta(self.models, history, self.stats)
+    if self.low_speed_models is None or self.low_speed_stats is None:
+      return delta, disagreement
+
+    low_delta, low_disagreement = neural_plant.ensemble_predict_delta(
+      self.low_speed_models, history, self.low_speed_stats,
+    )
+    speed_index = plant_data.BASE_FEATURES.index("v_ego")
+    speed = history[:, 0, speed_index]
+    blend = torch.clamp(
+      (self.low_speed_off_above_mps - speed)
+      / (self.low_speed_off_above_mps - self.low_speed_full_below_mps),
+      0.0,
+      1.0,
+    )[:, None]
+    return (
+      torch.lerp(delta, low_delta, blend),
+      torch.lerp(disagreement, low_disagreement, blend),
+    )
+
+
+def rollout_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
                    policy_mean: torch.Tensor, policy_std: torch.Tensor,
                    batch: dict[str, torch.Tensor], offsets: tuple[int, ...],
-                   sample_period_s: float, command_rate_limit_per_s: float) -> dict[str, torch.Tensor]:
+                   sample_period_s: float, command_rate_limit_per_s: float,
+                   low_speed_angle_assist_gain: float,
+                   low_speed_angle_assist_max: float) -> dict[str, torch.Tensor]:
   history = batch["history"].clone()
   base_index = {name: index for index, name in enumerate(plant_data.BASE_FEATURES)}
   state_indexes = [base_index[name] for name in plant_data.STATE_FEATURES]
@@ -291,22 +370,42 @@ def rollout_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
     friction = 0.7 * (control_desired - actual) + 0.4 * jerk
     feedforward_input = torch.column_stack((
       speed, control_desired, friction, torch.zeros(len(history), device=history.device), path_points, zeros,
+      batch["curvature"][:, current_index + step],
     ))
     setpoint_input = torch.column_stack((
       speed, control_desired, jerk, torch.zeros(len(history), device=history.device),
-      control_desired[:, None].repeat(1, 7), zeros,
+      control_desired[:, None].repeat(1, 7), zeros, batch["curvature"][:, current_index + step],
     ))
+    steering_angle = history[:, 0, base_index["steering_angle_deg"]]
+    actual_curvature = -torch.deg2rad(steering_angle) / (IONIQ_5_STEER_RATIO * IONIQ_5_WHEELBASE_M)
     measurement_input = torch.column_stack((
       speed, actual, torch.zeros(len(history), device=history.device),
       torch.zeros(len(history), device=history.device), actual[:, None].repeat(1, 7), zeros,
+      actual_curvature,
     ))
     torque_error = evaluate(setpoint_input) - evaluate(measurement_input)
     integral = integral + 0.3 * sample_period_s * torque_error
     raw_command = torch.clamp(-(evaluate(feedforward_input) + torque_error + integral), -1.0, 1.0)
+    desired_angle = torch.rad2deg(
+      -batch["curvature"][:, current_index + step] * IONIQ_5_STEER_RATIO * IONIQ_5_WHEELBASE_M,
+    )
+    angle_error = desired_angle - steering_angle
+    needs_turn_in = desired_angle * angle_error > 0.0
+    low_speed_blend = torch.clamp((8.0 - speed) / 3.0, 0.0, 1.0)
+    angle_assist = torch.clamp(
+      low_speed_angle_assist_gain * angle_error,
+      -low_speed_angle_assist_max,
+      low_speed_angle_assist_max,
+    )
+    raw_command = torch.clamp(
+      raw_command + torch.where(needs_turn_in, low_speed_blend * angle_assist, 0.0),
+      -1.0,
+      1.0,
+    )
     command_delta = rate_limit * torch.tanh((raw_command - previous_command) / max(rate_limit, 1e-6))
     command = torch.clamp(previous_command + command_delta, -1.0, 1.0)
     history[:, 0, base_index["applied_torque"]] = command
-    delta, disagreement = neural_plant.ensemble_predict_delta(models, history, plant_stats)
+    delta, disagreement = plant.predict(history)
     next_state = history[:, 0, state_indexes] + delta
     next_state = torch.column_stack([
       torch.clamp(next_state[:, index], lower, upper)
@@ -330,7 +429,7 @@ def rollout_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
     "commands": torch.stack(commands, dim=1),
     "states": torch.stack(states, dim=1),
     "disagreement": torch.stack(disagreements, dim=1),
-    "state_std": plant_stats["state_std"],
+    "state_std": plant.stats["state_std"],
   }
 
 
@@ -338,7 +437,8 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
                 offsets: tuple[int, ...], sample_period_s: float,
                 command_rate_limit_per_s: float, wobble_weight: float,
                 uncertainty_weight: float, slew_weight: float,
-                inside_bias_weight: float) -> tuple[torch.Tensor, dict[str, float]]:
+                inside_bias_weight: float, low_speed_angle_weight: float,
+                low_speed_rate_weight: float) -> tuple[torch.Tensor, dict[str, float]]:
   current_index = -min(offsets)
   desired = torch.stack([
     batch["path"][:, current_index + step + 1] for step in range(trace["errors"].shape[1])
@@ -347,11 +447,31 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
   speed = batch["v_ego"]
   error = trace["errors"]
   commands = trace["commands"]
-  center = desired.abs() < 0.08
-  turn_in = (desired * jerk) > 0.01
-  sharp_turn_in = turn_in & ((desired.abs() >= 0.30) | (jerk.abs() >= 0.55)) & (speed < 18.0)
-  unwind = (desired * jerk) < -0.01
-  steady = (~center) & (jerk.abs() < 0.08)
+  curvature = torch.stack([
+    batch["curvature"][:, current_index + step + 1]
+    for step in range(trace["errors"].shape[1])
+  ], dim=1)
+  current_curvature = batch["curvature"][:, current_index]
+  curvature_rate = torch.diff(
+    torch.cat((current_curvature[:, None], curvature), dim=1),
+    dim=1,
+  ) / sample_period_s
+  low_speed = speed < 8.0
+  turn_signal = torch.where(low_speed, 100.0 * curvature * curvature_rate, desired * jerk)
+  center = torch.where(low_speed, curvature.abs() < 0.003, desired.abs() < 0.08)
+  turn_in = turn_signal > 0.01
+  sharp_turn_in = (
+    turn_in
+    & (
+      (desired.abs() >= 0.30)
+      | (jerk.abs() >= 0.55)
+      | (low_speed & ((curvature.abs() >= 0.01) | (curvature_rate.abs() >= 0.02)))
+    )
+    & (speed < 18.0)
+  )
+  intersection = sharp_turn_in & (speed < 8.0)
+  unwind = turn_signal < -0.01
+  steady = (~center) & torch.where(low_speed, curvature_rate.abs() < 0.005, jerk.abs() < 0.08)
   signed_error = torch.sign(desired) * error
   inside = signed_error > 0.0
   weights = (
@@ -373,7 +493,43 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
   effort = commands.square().mean()
   saturation = torch.relu(commands.abs() - 0.90).square().mean()
   rate_index = plant_data.STATE_FEATURES.index("signed_steering_rate_deg_s")
+  angle_index = plant_data.STATE_FEATURES.index("steering_angle_deg")
   steering_rate = trace["states"][:, :, rate_index]
+  steering_angle = trace["states"][:, :, angle_index]
+  desired_angle = torch.rad2deg(
+    -curvature * IONIQ_5_STEER_RATIO * IONIQ_5_WHEELBASE_M,
+  )
+  current_desired_angle = torch.rad2deg(
+    -current_curvature * IONIQ_5_STEER_RATIO * IONIQ_5_WHEELBASE_M,
+  )
+  current_angle = batch["history"][:, 0, plant_data.BASE_FEATURES.index("steering_angle_deg")]
+  desired_angle = desired_angle + (current_angle - current_desired_angle)[:, None]
+  desired_rate = torch.diff(
+    torch.cat((current_angle[:, None], desired_angle), dim=1),
+    dim=1,
+  ) / sample_period_s
+  desired_rate = torch.clamp(desired_rate, -180.0, 180.0)
+  angle_error = steering_angle - desired_angle
+  rate_error = steering_rate - desired_rate
+  low_speed_blend = torch.clamp((8.0 - speed) / 7.5, 0.0, 1.0)
+  angle_tracking = (
+    low_speed_blend
+    * F.smooth_l1_loss(
+      angle_error / 5.0,
+      torch.zeros_like(angle_error),
+      beta=0.20,
+      reduction="none",
+    )
+  ).sum() / low_speed_blend.sum().clamp_min(1.0)
+  rate_tracking = (
+    low_speed_blend
+    * F.smooth_l1_loss(
+      rate_error / 30.0,
+      torch.zeros_like(rate_error),
+      beta=0.20,
+      reduction="none",
+    )
+  ).sum() / low_speed_blend.sum().clamp_min(1.0)
   quiet = center | steady | unwind
   wobble = (
     (steering_rate / 12.0).square() * quiet.float()
@@ -402,6 +558,8 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
     + wobble_weight * wobble
     + uncertainty_weight * uncertainty
     + inside_bias_weight * inside_bias
+    + low_speed_angle_weight * angle_tracking
+    + low_speed_rate_weight * rate_tracking
   )
 
   def rmse(mask: torch.Tensor) -> float:
@@ -421,6 +579,17 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
     "unwind_bias": bias(unwind),
     "steady_rmse": rmse(steady),
     "center_rmse": rmse(center),
+    "low_speed_angle_rmse_deg": float(
+      torch.sqrt(angle_error[low_speed_blend > 0.0].square().mean()).detach().cpu()
+    ) if (low_speed_blend > 0.0).any() else 0.0,
+    "intersection_angle_rmse_deg": float(
+      torch.sqrt(angle_error[intersection].square().mean()).detach().cpu()
+    ) if intersection.any() else 0.0,
+    "low_speed_rate_rmse_deg_s": float(
+      torch.sqrt(rate_error[low_speed_blend > 0.0].square().mean()).detach().cpu()
+    ) if (low_speed_blend > 0.0).any() else 0.0,
+    "angle_tracking": float(angle_tracking.detach().cpu()),
+    "rate_tracking": float(rate_tracking.detach().cpu()),
     "slew": float(slew.detach().cpu()),
     "effort": float(effort.detach().cpu()),
     "saturation": float(saturation.detach().cpu()),
@@ -430,15 +599,17 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
   }
 
 
-def evaluate_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
-                    plant_stats: dict[str, torch.Tensor],
+def evaluate_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
                     policy_mean: torch.Tensor, policy_std: torch.Tensor,
                     windows: PolicyWindows, args: argparse.Namespace,
                     offsets: tuple[int, ...], sample_period_s: float,
-                    seed: int) -> dict[str, float]:
+                    seed: int, low_speed_angle_assist_gain: float | None = None) -> dict[str, float]:
   rng = np.random.default_rng(seed)
   indexes = balanced_indexes(
-    windows.regimes, min(len(windows), args.max_policy_validation_windows), rng,
+    windows.regimes,
+    min(len(windows), args.max_policy_validation_windows),
+    rng,
+    windows.v_ego[:, 0],
   )
   totals: dict[str, list[tuple[float, int]]] = {}
   policy.eval()
@@ -447,13 +618,20 @@ def evaluate_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
       selected = indexes[start:start + args.policy_batch_size]
       batch = tensor_batch(windows, selected, args.torch_device)
       trace = rollout_policy(
-        policy, models, plant_stats, policy_mean, policy_std, batch, offsets,
+        policy, plant, policy_mean, policy_std, batch, offsets,
         sample_period_s, args.command_rate_limit_per_s,
+        (
+          args.low_speed_angle_assist_gain
+          if low_speed_angle_assist_gain is None
+          else low_speed_angle_assist_gain
+        ),
+        args.low_speed_angle_assist_max,
       )
       _, metrics = policy_loss(
         trace, batch, offsets, sample_period_s, args.command_rate_limit_per_s,
         args.wobble_weight, args.uncertainty_weight, args.slew_weight,
-        args.inside_bias_weight,
+        args.inside_bias_weight, args.low_speed_angle_weight,
+        args.low_speed_rate_weight,
       )
       for name, value in metrics.items():
         totals.setdefault(name, []).append((value, len(selected)))
@@ -463,15 +641,14 @@ def evaluate_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
   }
 
 
-def train_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
-                 plant_stats: dict[str, torch.Tensor],
+def train_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
                  policy_mean: torch.Tensor, policy_std: torch.Tensor,
                  train_windows: PolicyWindows, validation_windows: PolicyWindows,
                  args: argparse.Namespace, offsets: tuple[int, ...],
                  sample_period_s: float) -> tuple[dict[str, Any], dict[str, Any]]:
   initial = evaluate_policy(
-    policy, models, plant_stats, policy_mean, policy_std, validation_windows,
-    args, offsets, sample_period_s, args.random_state + 2,
+    policy, plant, policy_mean, policy_std, validation_windows,
+    args, offsets, sample_period_s, args.random_state + 2, 0.0,
   )
   optimizer = torch.optim.AdamW(policy.parameters(), lr=args.policy_learning_rate, weight_decay=2e-5)
   rng = np.random.default_rng(args.random_state)
@@ -485,16 +662,23 @@ def train_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
     policy.train()
     train_losses: list[float] = []
     for _ in range(args.policy_steps_per_epoch):
-      indexes = balanced_indexes(train_windows.regimes, args.policy_batch_size, rng)
+      indexes = balanced_indexes(
+        train_windows.regimes,
+        args.policy_batch_size,
+        rng,
+        train_windows.v_ego[:, 0],
+      )
       batch = tensor_batch(train_windows, indexes, args.torch_device)
       trace = rollout_policy(
-        policy, models, plant_stats, policy_mean, policy_std, batch, offsets,
+        policy, plant, policy_mean, policy_std, batch, offsets,
         sample_period_s, args.command_rate_limit_per_s,
+        args.low_speed_angle_assist_gain, args.low_speed_angle_assist_max,
       )
       loss, metrics = policy_loss(
         trace, batch, offsets, sample_period_s, args.command_rate_limit_per_s,
         args.wobble_weight, args.uncertainty_weight, args.slew_weight,
-        args.inside_bias_weight,
+        args.inside_bias_weight, args.low_speed_angle_weight,
+        args.low_speed_rate_weight,
       )
       optimizer.zero_grad(set_to_none=True)
       loss.backward()
@@ -502,12 +686,14 @@ def train_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
       optimizer.step()
       train_losses.append(metrics["loss"])
     validation = evaluate_policy(
-      policy, models, plant_stats, policy_mean, policy_std, validation_windows,
+      policy, plant, policy_mean, policy_std, validation_windows,
       args, offsets, sample_period_s, args.random_state + 2,
     )
     constrained = (
-      validation["sharp_turn_in_rmse"] <= initial["sharp_turn_in_rmse"]
-      and validation["turn_in_rmse"] <= initial["turn_in_rmse"]
+      validation["sharp_turn_in_rmse"]
+      <= initial["sharp_turn_in_rmse"] * (1.0 + args.max_turn_in_accel_regression)
+      and validation["turn_in_rmse"]
+      <= initial["turn_in_rmse"] * (1.0 + args.max_turn_in_accel_regression)
       and validation["center_rmse"] <= initial["center_rmse"] * (1.0 + args.max_center_regression)
       and validation["unwind_rmse"] <= initial["unwind_rmse"] * (1.0 + args.max_unwind_regression)
       and validation["turn_in_bias"] <= max(initial["turn_in_bias"] + args.max_inside_bias_increase, 0.01)
@@ -515,6 +701,10 @@ def train_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
       and validation["wobble"] <= initial["wobble"] * (1.0 + args.max_wobble_regression)
       and validation["slew"] <= initial["slew"] * (1.0 + args.max_slew_regression)
       and validation["uncertainty"] <= initial["uncertainty"] * (1.0 + args.max_uncertainty_regression)
+      and validation["intersection_angle_rmse_deg"]
+      <= initial["intersection_angle_rmse_deg"] * (1.0 - args.min_intersection_angle_improvement)
+      and validation["low_speed_rate_rmse_deg_s"]
+      <= initial["low_speed_rate_rmse_deg_s"] * (1.0 + args.max_low_speed_rate_regression)
     )
     if constrained and validation["loss"] < best_loss - 2e-5:
       best_loss = validation["loss"]
@@ -530,6 +720,8 @@ def train_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
           f"validation={validation['loss']:.6f}",
           f"rmse={validation['rmse']:.6f}",
           f"sharp={validation['sharp_turn_in_rmse']:.6f}",
+          f"intersection_angle={validation['intersection_angle_rmse_deg']:.3f}",
+          f"low_speed_rate={validation['low_speed_rate_rmse_deg_s']:.3f}",
           f"unwind_bias={validation['unwind_bias']:+.6f}",
         ])
         print(progress, flush=True)
@@ -545,6 +737,7 @@ def train_policy(policy: legacy.FluxPolicy, models: list[torch.nn.Module],
 
 def export_policy(policy: legacy.FluxPolicy, mean: np.ndarray, std: np.ndarray,
                   report: dict[str, Any]) -> dict[str, Any]:
+  objective = report.get("objective", {})
   layers = []
   for index, layer in enumerate(policy.layers, 1):
     layers.append({
@@ -561,7 +754,9 @@ def export_policy(policy: legacy.FluxPolicy, mean: np.ndarray, std: np.ndarray,
     "input_vars": list(INPUT_VARS),
     "output_size": 1,
     "training_car": "HYUNDAI_IONIQ_5",
-    "training_method": "goal_based_neural_plant_regime_balanced",
+    "training_method": report.get("method", "goal_based_speed_conditioned_plant"),
+    "low_speed_angle_assist_gain": objective.get("low_speed_angle_assist_gain", 0.0),
+    "low_speed_angle_assist_max": objective.get("low_speed_angle_assist_max", 0.0),
     "training_rows": report["data"]["train_windows"],
     "training_windows": report["data"]["train_windows"],
     "validation_windows": report["data"]["validation_windows"],
@@ -575,6 +770,11 @@ def main() -> None:
     description="Train an Ioniq 5 NNFF through the checked-in neural plant ensemble.",
   )
   parser.add_argument("--plant-model", type=Path, default=DEFAULT_PLANT)
+  parser.add_argument(
+    "--low-speed-plant-model",
+    type=Path,
+    help="Optional low-speed specialist blended in below 8 m/s and used fully below 5 m/s.",
+  )
   parser.add_argument("--initial-model", type=Path, default=DEFAULT_INITIAL_MODEL)
   parser.add_argument("--log-root", type=Path, default=DEFAULT_LOG_ROOT)
   parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -599,13 +799,25 @@ def main() -> None:
   parser.add_argument("--uncertainty-weight", type=float, default=0.01)
   parser.add_argument("--slew-weight", type=float, default=0.01)
   parser.add_argument("--inside-bias-weight", type=float, default=5.0)
+  parser.add_argument("--low-speed-angle-weight", type=float, default=0.15)
+  parser.add_argument("--low-speed-rate-weight", type=float, default=0.03)
+  parser.add_argument("--low-speed-angle-assist-gain", type=float, default=0.0)
+  parser.add_argument("--low-speed-angle-assist-max", type=float, default=0.25)
   parser.add_argument("--max-wobble-regression", type=float, default=0.03)
   parser.add_argument("--max-slew-regression", type=float, default=0.05)
   parser.add_argument("--max-center-regression", type=float, default=0.02)
   parser.add_argument("--max-unwind-regression", type=float, default=0.02)
+  parser.add_argument("--max-turn-in-accel-regression", type=float, default=0.05)
   parser.add_argument("--max-uncertainty-regression", type=float, default=0.10)
   parser.add_argument("--max-inside-bias-increase", type=float, default=0.01)
-  parser.add_argument("--hidden-sizes", type=int, nargs="+", default=[24, 12, 6])
+  parser.add_argument("--min-intersection-angle-improvement", type=float, default=0.01)
+  parser.add_argument("--max-low-speed-rate-regression", type=float, default=0.02)
+  parser.add_argument(
+    "--hidden-sizes",
+    type=int,
+    nargs="+",
+    help="Policy hidden sizes; defaults to the initial model architecture.",
+  )
   parser.add_argument("--device", default="cuda")
   parser.add_argument("--random-state", type=int, default=23)
   args = parser.parse_args()
@@ -625,6 +837,18 @@ def main() -> None:
   models, plant_stats, plant_payload = neural_plant.load_ensemble_artifact(
     args.plant_model, args.torch_device, differentiable=True,
   )
+  low_speed_models = None
+  low_speed_stats = None
+  low_speed_payload = None
+  if args.low_speed_plant_model is not None:
+    low_speed_models, low_speed_stats, low_speed_payload = neural_plant.load_ensemble_artifact(
+      args.low_speed_plant_model, args.torch_device, differentiable=True,
+    )
+    primary_shape = {key: value for key, value in plant_payload["config"].items() if key != "name"}
+    low_speed_shape = {key: value for key, value in low_speed_payload["config"].items() if key != "name"}
+    if low_speed_shape != primary_shape:
+      raise SystemExit("Primary and low-speed plant artifacts must use the same model config.")
+  plant = PlantPredictor(models, plant_stats, low_speed_models, low_speed_stats)
   config = neural_plant.ModelConfig(**plant_payload["config"])
   sample_period_s = config.sample_period_s
   offsets = path_offsets(sample_period_s)
@@ -662,33 +886,50 @@ def main() -> None:
   policy_mean = torch.as_tensor(policy_mean_np, dtype=torch.float32, device=args.torch_device)
   policy_std = torch.as_tensor(policy_std_np, dtype=torch.float32, device=args.torch_device)
   initial_payload = json.loads(args.initial_model.read_text(encoding="utf-8"))
-  policy = legacy.FluxPolicy(tuple(args.hidden_sizes)).to(args.torch_device)
-  source = legacy.FluxPolicy().to(args.torch_device)
-  legacy.initialize_policy(source, initial_payload, policy_mean_np, policy_std_np)
-  if [(layer.in_features, layer.out_features) for layer in policy.layers] == [
-    (layer.in_features, layer.out_features) for layer in source.layers
-  ]:
-    policy.load_state_dict(source.state_dict())
+  source_input_size = int(initial_payload["input_size"])
+  source_hidden_sizes = tuple(
+    len(next(value for key, value in layer.items() if key.endswith("_b")))
+    for layer in initial_payload["layers"][:-1]
+  )
+  policy_hidden_sizes = tuple(args.hidden_sizes) if args.hidden_sizes else source_hidden_sizes
+  policy = legacy.FluxPolicy(policy_hidden_sizes, len(INPUT_VARS)).to(args.torch_device)
+  source = legacy.FluxPolicy(source_hidden_sizes, source_input_size).to(args.torch_device)
+  legacy.initialize_policy(
+    source, initial_payload, policy_mean_np[:source_input_size], policy_std_np[:source_input_size],
+  )
+  same_outputs = [layer.out_features for layer in policy.layers] == [
+    layer.out_features for layer in source.layers
+  ]
+  if same_outputs and policy.layers[0].in_features >= source.layers[0].in_features:
+    with torch.no_grad():
+      for index, (target_layer, source_layer) in enumerate(zip(policy.layers, source.layers, strict=True)):
+        target_layer.bias.copy_(source_layer.bias)
+        if index == 0:
+          target_layer.weight.zero_()
+          target_layer.weight[:, :source_input_size].copy_(source_layer.weight)
+        else:
+          target_layer.weight.copy_(source_layer.weight)
   else:
     legacy.distill_policy(source.cpu(), policy.cpu(), args.random_state)
     policy = policy.to(args.torch_device)
 
   holdout_initial = evaluate_policy(
-    policy, models, plant_stats, policy_mean, policy_std, holdout_windows,
-    args, offsets, sample_period_s, args.random_state + 3,
+    policy, plant, policy_mean, policy_std, holdout_windows,
+    args, offsets, sample_period_s, args.random_state + 3, 0.0,
   )
   validation_report, policy_fit = train_policy(
-    policy, models, plant_stats, policy_mean, policy_std,
+    policy, plant, policy_mean, policy_std,
     train_windows, validation_windows, args, offsets, sample_period_s,
   )
   holdout_optimized = evaluate_policy(
-    policy, models, plant_stats, policy_mean, policy_std, holdout_windows,
+    policy, plant, policy_mean, policy_std, holdout_windows,
     args, offsets, sample_period_s, args.random_state + 3,
   )
   accepted = (
     validation_report["optimized"]["loss"] < validation_report["initial"]["loss"]
     and holdout_optimized["rmse"] <= holdout_initial["rmse"] * 1.02
-    and holdout_optimized["sharp_turn_in_rmse"] <= holdout_initial["sharp_turn_in_rmse"] * 1.02
+    and holdout_optimized["sharp_turn_in_rmse"]
+    <= holdout_initial["sharp_turn_in_rmse"] * (1.0 + args.max_turn_in_accel_regression)
     and holdout_optimized["unwind_rmse"] <= holdout_initial["unwind_rmse"] * 1.02
     and holdout_optimized["unwind_bias"]
     <= max(holdout_initial["unwind_bias"] + args.max_inside_bias_increase, 0.01)
@@ -696,10 +937,21 @@ def main() -> None:
     and holdout_optimized["slew"] <= holdout_initial["slew"] * (1.0 + args.max_slew_regression)
     and holdout_optimized["uncertainty"]
     <= holdout_initial["uncertainty"] * (1.0 + args.max_uncertainty_regression)
+    and holdout_optimized["intersection_angle_rmse_deg"]
+    <= holdout_initial["intersection_angle_rmse_deg"] * (1.0 - args.min_intersection_angle_improvement)
+    and holdout_optimized["low_speed_rate_rmse_deg_s"]
+    <= holdout_initial["low_speed_rate_rmse_deg_s"] * (1.0 + args.max_low_speed_rate_regression)
   )
   report = {
-    "method": "goal_based_neural_plant_regime_balanced",
+    "method": (
+      "goal_based_speed_conditioned_hybrid_plant"
+      if args.low_speed_plant_model is not None
+      else "goal_based_speed_conditioned_plant"
+    ),
     "plant_artifact": str(args.plant_model),
+    "low_speed_plant_artifact": (
+      str(args.low_speed_plant_model) if args.low_speed_plant_model is not None else None
+    ),
     "plant_config": plant_payload["config"],
     "accepted": accepted,
     "data": {
@@ -725,12 +977,19 @@ def main() -> None:
       "uncertainty_weight": args.uncertainty_weight,
       "slew_weight": args.slew_weight,
       "inside_bias_weight": args.inside_bias_weight,
+      "low_speed_angle_weight": args.low_speed_angle_weight,
+      "low_speed_rate_weight": args.low_speed_rate_weight,
+      "low_speed_angle_assist_gain": args.low_speed_angle_assist_gain,
+      "low_speed_angle_assist_max": args.low_speed_angle_assist_max,
       "max_wobble_regression": args.max_wobble_regression,
       "max_slew_regression": args.max_slew_regression,
       "max_center_regression": args.max_center_regression,
       "max_unwind_regression": args.max_unwind_regression,
+      "max_turn_in_accel_regression": args.max_turn_in_accel_regression,
       "max_uncertainty_regression": args.max_uncertainty_regression,
       "max_inside_bias_increase": args.max_inside_bias_increase,
+      "min_intersection_angle_improvement": args.min_intersection_angle_improvement,
+      "max_low_speed_rate_regression": args.max_low_speed_rate_regression,
       "command_rate_limit_per_s": args.command_rate_limit_per_s,
     },
     "validation": validation_report,
@@ -740,7 +999,7 @@ def main() -> None:
     },
     "policy_fit": policy_fit,
     "policy": {
-      "hidden_sizes": args.hidden_sizes,
+      "hidden_sizes": list(policy_hidden_sizes),
       "parameters": sum(parameter.numel() for parameter in policy.parameters()),
     },
   }

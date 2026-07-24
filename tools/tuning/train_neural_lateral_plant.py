@@ -43,9 +43,13 @@ STATE_INDEXES = tuple(plant_data.BASE_FEATURES.index(name) for name in plant_dat
 SIGNED_STEERING_RATE_INDEX = plant_data.BASE_FEATURES.index("signed_steering_rate_deg_s")
 STEERING_RATE_INDEX = plant_data.BASE_FEATURES.index("steering_rate_deg")
 SIGNED_STEERING_RATE_STATE_INDEX = plant_data.STATE_FEATURES.index("signed_steering_rate_deg_s")
+V_EGO_INDEX = plant_data.BASE_FEATURES.index("v_ego")
 DEFAULT_HOLDOUTS = ("00000109", "0000010b")
 EVALUATION_BATCH_SIZE = 4096
 SEQUENCE_EVALUATION_BATCH_SIZE = 512
+SPEED_BUCKETS_MPS = ((0.5, 3.0), (3.0, 5.0), (5.0, 8.0), (8.0, 15.0), (15.0, math.inf))
+LOW_SPEED_STATE_WEIGHTS = (0.25, 3.0, 2.0, 0.5)
+HIGH_SPEED_STATE_WEIGHTS = (3.0, 1.0, 1.5, 0.5)
 
 
 @dataclass(frozen=True)
@@ -310,6 +314,38 @@ def sampled_indexes(length: int, limit: int | None, seed: int) -> np.ndarray:
   return indexes
 
 
+def speed_bucket_indexes(speeds: np.ndarray) -> np.ndarray:
+  buckets = np.full(len(speeds), -1, dtype=np.int8)
+  for index, (lower, upper) in enumerate(SPEED_BUCKETS_MPS):
+    buckets[(speeds >= lower) & (speeds < upper)] = index
+  return buckets
+
+
+def speed_stratified_indexes(speeds: np.ndarray, size: int,
+                             rng: np.random.Generator) -> np.ndarray:
+  buckets = speed_bucket_indexes(speeds)
+  present = [index for index in range(len(SPEED_BUCKETS_MPS)) if np.any(buckets == index)]
+  if not present:
+    raise ValueError("No speed buckets are present.")
+  quota, remainder = divmod(size, len(present))
+  selected: list[np.ndarray] = []
+  for order, bucket in enumerate(present):
+    candidates = np.flatnonzero(buckets == bucket)
+    count = quota + (1 if order < remainder else 0)
+    selected.append(rng.choice(candidates, count, replace=len(candidates) < count))
+  result = np.concatenate(selected)
+  rng.shuffle(result)
+  return result
+
+
+def speed_conditioned_state_weights(speed: torch.Tensor) -> torch.Tensor:
+  low = torch.as_tensor(LOW_SPEED_STATE_WEIGHTS, dtype=speed.dtype, device=speed.device)
+  high = torch.as_tensor(HIGH_SPEED_STATE_WEIGHTS, dtype=speed.dtype, device=speed.device)
+  low_blend = torch.clamp((8.0 - speed) / 7.5, 0.0, 1.0)[..., None]
+  weights = low_blend * low + (1.0 - low_blend) * high
+  return weights / weights.mean(dim=-1, keepdim=True).clamp_min(1e-6)
+
+
 def load_ensemble_artifact(path: Path, device: torch.device | str = "cpu",
                            differentiable: bool = False) -> tuple[
   list[nn.Module], dict[str, torch.Tensor], dict[str, Any]
@@ -446,7 +482,7 @@ def eligible_sources(trajectory: plant_data.Trajectory, config: ModelConfig,
     (values["lat_active"][future].min(axis=1) > 0.5)
     & (values["driver_overlay"][future].max(axis=1) < 0.5)
     & (values["saturated"][future].max(axis=1) < 0.5)
-    & (values["v_ego"][source] >= 3.0)
+    & (values["v_ego"][source] >= plant_data.MIN_TRAIN_SPEED_MPS)
   )
   gaps = np.diff(times)
   max_gap = max(0.035, config.sample_period_s * 1.8)
@@ -510,7 +546,11 @@ def build_windows(trajectories: list[plant_data.Trajectory], routes: set[str],
 
   if cap is not None and len(candidates) > cap:
     rng = np.random.default_rng(seed)
-    selected = np.sort(rng.choice(len(candidates), cap, replace=False))
+    candidate_speeds = np.asarray([
+      prepared[trajectory_index][1]["v_ego"][source]
+      for trajectory_index, source in candidates
+    ])
+    selected = speed_stratified_indexes(candidate_speeds, cap, rng)
     candidates = [candidates[index] for index in selected]
 
   feature_names = list(plant_data.BASE_FEATURES)
@@ -627,45 +667,24 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
   stats_t = tensor_stats(stats, device)
   rng = np.random.default_rng(seed)
   best_state = copy.deepcopy(model.state_dict())
-  best_loss = math.inf
   stale_epochs = 0
   history_report: list[dict[str, float]] = []
   started = perf_counter()
 
-  validation_indexes = sampled_indexes(len(validation_windows), 5000, seed + 10_000)
+  validation_indexes = speed_stratified_indexes(
+    validation_windows.history[:, 0, V_EGO_INDEX],
+    min(len(validation_windows), 5000),
+    np.random.default_rng(seed + 10_000),
+  )
   validation_limit = len(validation_indexes)
   validation_steps = min(rollout_train_steps, validation_windows.target_states.shape[1])
 
-  for epoch in range(1, epochs + 1):
-    model.train()
-    losses: list[float] = []
-    for _ in range(steps_per_epoch):
-      indexes = rng.integers(0, len(train_windows), size=min(batch_size, len(train_windows)))
-      batch_history = torch.as_tensor(train_windows.history[indexes], device=device)
-      batch_future = torch.as_tensor(train_windows.future_base[indexes], device=device)
-      batch_targets = torch.as_tensor(train_windows.target_states[indexes], device=device)
-      steps = min(rollout_train_steps, batch_targets.shape[1])
-      predicted = rollout(model, batch_history, batch_future, stats_t, steps)
-      scaled_error = (predicted - batch_targets[:, :steps]) / stats_t["state_std"]
-      step_weights = torch.linspace(1.0, 0.5, steps, device=device)
-      loss = (
-        F.smooth_l1_loss(scaled_error, torch.zeros_like(scaled_error), beta=0.20, reduction="none")
-        .mean(dim=(0, 2))
-        .mul(step_weights)
-        .sum()
-        / step_weights.sum()
-      )
-      optimizer.zero_grad(set_to_none=True)
-      loss.backward()
-      torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-      optimizer.step()
-      losses.append(float(loss.detach().cpu()))
-
+  def validation_loss() -> float:
     model.eval()
+    validation_squared_error = 0.0
+    validation_values = 0
+    validation_batch = evaluation_batch_size(config)
     with torch.no_grad():
-      validation_squared_error = 0.0
-      validation_values = 0
-      validation_batch = evaluation_batch_size(config)
       for start in range(0, validation_limit, validation_batch):
         indexes = validation_indexes[start:start + validation_batch]
         val_history = torch.as_tensor(validation_windows.history[indexes], device=device)
@@ -677,18 +696,67 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
         validation_error = (
           validation_prediction - val_targets[:, :validation_steps]
         ) / stats_t["state_std"]
-        validation_squared_error += float(torch.sum(validation_error ** 2).cpu())
+        validation_weights = speed_conditioned_state_weights(
+          val_future[:, :validation_steps, V_EGO_INDEX],
+        )
+        validation_squared_error += float(torch.sum(validation_error ** 2 * validation_weights).cpu())
         validation_values += validation_error.numel()
-      validation_loss = validation_squared_error / validation_values
+    return validation_squared_error / validation_values
+
+  best_loss = validation_loss()
+  initial_validation_loss = best_loss
+  print(
+    f"{config.name} seed={seed} initial_validation={best_loss:.6f}",
+    flush=True,
+  )
+
+  for epoch in range(1, epochs + 1):
+    model.train()
+    losses: list[float] = []
+    for _ in range(steps_per_epoch):
+      indexes = speed_stratified_indexes(
+        train_windows.history[:, 0, V_EGO_INDEX],
+        min(batch_size, len(train_windows)),
+        rng,
+      )
+      batch_history = torch.as_tensor(train_windows.history[indexes], device=device)
+      batch_future = torch.as_tensor(train_windows.future_base[indexes], device=device)
+      batch_targets = torch.as_tensor(train_windows.target_states[indexes], device=device)
+      steps = min(rollout_train_steps, batch_targets.shape[1])
+      predicted = rollout(model, batch_history, batch_future, stats_t, steps)
+      scaled_error = (predicted - batch_targets[:, :steps]) / stats_t["state_std"]
+      step_weights = torch.linspace(1.0, 0.5, steps, device=device)
+      state_weights = speed_conditioned_state_weights(batch_future[:, :steps, V_EGO_INDEX])
+      loss = (
+        (
+          F.smooth_l1_loss(scaled_error, torch.zeros_like(scaled_error), beta=0.20, reduction="none")
+          * state_weights
+        )
+        .mean(dim=(0, 2))
+        .mul(step_weights)
+        .sum()
+        / step_weights.sum()
+      )
+      optimizer.zero_grad(set_to_none=True)
+      loss.backward()
+      torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+      optimizer.step()
+      losses.append(float(loss.detach().cpu()))
+
+    current_validation_loss = validation_loss()
     train_loss = float(np.mean(losses))
-    history_report.append({"epoch": epoch, "train_loss": train_loss, "validation_loss": validation_loss})
+    history_report.append({
+      "epoch": epoch,
+      "train_loss": train_loss,
+      "validation_loss": current_validation_loss,
+    })
     print(
       f"{config.name} seed={seed} epoch={epoch:03d} " +
-      f"train={train_loss:.6f} validation={validation_loss:.6f}",
+      f"train={train_loss:.6f} validation={current_validation_loss:.6f}",
       flush=True,
     )
-    if validation_loss < best_loss - 1e-6:
-      best_loss = validation_loss
+    if current_validation_loss < best_loss - 1e-6:
+      best_loss = current_validation_loss
       best_state = copy.deepcopy(model.state_dict())
       stale_epochs = 0
     else:
@@ -702,6 +770,7 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
     "seed": seed,
     "epochs": len(history_report),
     "best_validation_loss": best_loss,
+    "initial_validation_loss": initial_validation_loss,
     "fit_seconds": perf_counter() - started,
     "rollout_train_steps": validation_steps,
     "rollout_train_seconds": validation_steps * config.sample_period_s,
@@ -709,10 +778,41 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
   }
 
 
+def normalized_speed_metrics(normalized_error: np.ndarray,
+                             source_speed: np.ndarray) -> dict[str, Any]:
+  buckets = speed_bucket_indexes(source_speed)
+  metrics: dict[str, Any] = {}
+  for index, (lower, upper) in enumerate(SPEED_BUCKETS_MPS):
+    mask = buckets == index
+    if not np.any(mask):
+      continue
+    normalized_rmse = np.sqrt(np.mean(normalized_error[mask] ** 2, axis=(0, 1)))
+    blend_speed = float(np.median(source_speed[mask]))
+    low_blend = float(np.clip((8.0 - blend_speed) / 7.5, 0.0, 1.0))
+    state_weights = (
+      low_blend * np.asarray(LOW_SPEED_STATE_WEIGHTS)
+      + (1.0 - low_blend) * np.asarray(HIGH_SPEED_STATE_WEIGHTS)
+    )
+    upper_label = "inf" if math.isinf(upper) else f"{upper:g}"
+    metrics[f"{lower:g}-{upper_label}mps"] = {
+      "windows": int(np.count_nonzero(mask)),
+      "score": float(np.average(normalized_rmse, weights=state_weights)),
+      "normalized_rmse": {
+        name: float(normalized_rmse[state_index])
+        for state_index, name in enumerate(plant_data.STATE_FEATURES)
+      },
+    }
+  return metrics
+
+
 def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.ndarray],
                    config: ModelConfig, max_windows: int | None, device: torch.device,
                    seed: int) -> dict[str, Any]:
-  indexes = sampled_indexes(len(windows), max_windows, seed)
+  indexes = speed_stratified_indexes(
+    windows.history[:, 0, V_EGO_INDEX],
+    min(len(windows), max_windows) if max_windows is not None else len(windows),
+    np.random.default_rng(seed),
+  )
   targets = windows.target_states[indexes]
   stats_t = tensor_stats(stats, device)
   predictions: list[np.ndarray] = []
@@ -747,9 +847,13 @@ def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.n
       for index, name in enumerate(plant_data.STATE_FEATURES)
     }
   normalized = (prediction - targets) / stats["state_std"]
-  score_weights = np.asarray([3.0, 1.0, 1.5, 0.5], dtype=np.float32)
+  score_weights = np.asarray(HIGH_SPEED_STATE_WEIGHTS, dtype=np.float32)
   normalized_rmse = np.sqrt(np.mean(normalized ** 2, axis=(0, 1)))
   score = float(np.average(normalized_rmse, weights=score_weights))
+  speed_metrics = normalized_speed_metrics(
+    normalized,
+    windows.history[indexes, 0, V_EGO_INDEX],
+  )
   return {
     "windows": len(indexes),
     "score": score,
@@ -757,6 +861,7 @@ def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.n
       name: float(normalized_rmse[index])
       for index, name in enumerate(plant_data.STATE_FEATURES)
     },
+    "speed_buckets": speed_metrics,
     "horizons": horizons,
   }
 
@@ -764,7 +869,11 @@ def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.n
 def evaluate_ensemble(models: list[nn.Module], windows: WindowBatch,
                       stats: dict[str, np.ndarray], config: ModelConfig,
                       max_windows: int | None, device: torch.device, seed: int) -> dict[str, Any]:
-  indexes = sampled_indexes(len(windows), max_windows, seed)
+  indexes = speed_stratified_indexes(
+    windows.history[:, 0, V_EGO_INDEX],
+    min(len(windows), max_windows) if max_windows is not None else len(windows),
+    np.random.default_rng(seed),
+  )
   targets = windows.target_states[indexes]
   stats_t = tensor_stats(stats, device)
   prediction_batches: list[np.ndarray] = []
@@ -790,7 +899,7 @@ def evaluate_ensemble(models: list[nn.Module], windows: WindowBatch,
   normalized = (prediction - targets) / stats["state_std"]
   normalized_rmse = np.sqrt(np.mean(normalized ** 2, axis=(0, 1)))
   normalized_disagreement = disagreement / stats["state_std"]
-  score_weights = np.asarray([3.0, 1.0, 1.5, 0.5], dtype=np.float32)
+  score_weights = np.asarray(HIGH_SPEED_STATE_WEIGHTS, dtype=np.float32)
   return {
     "windows": len(indexes),
     "score": float(np.average(normalized_rmse, weights=score_weights)),
@@ -798,6 +907,10 @@ def evaluate_ensemble(models: list[nn.Module], windows: WindowBatch,
       name: float(normalized_rmse[index])
       for index, name in enumerate(plant_data.STATE_FEATURES)
     },
+    "speed_buckets": normalized_speed_metrics(
+      normalized,
+      windows.history[indexes, 0, V_EGO_INDEX],
+    ),
     "mean_normalized_disagreement": {
       name: float(np.mean(normalized_disagreement[..., index]))
       for index, name in enumerate(plant_data.STATE_FEATURES)
@@ -884,6 +997,7 @@ def common_parser() -> argparse.ArgumentParser:
   parser.add_argument("--car-fingerprint-contains", default="IONIQ5")
   parser.add_argument("--max-route-driver-overlay", type=float, default=0.50)
   parser.add_argument("--pretraining-note")
+  parser.add_argument("--initial-model", type=Path)
   parser.add_argument("--split-report", type=Path)
   parser.add_argument("--validation-fraction", type=float, default=0.15)
   parser.add_argument("--holdout-route-prefix", action="append")
@@ -1114,7 +1228,14 @@ def run_train(args: argparse.Namespace) -> None:
     trajectories, holdout_routes, config, rollout_steps,
     args.max_holdout_windows, args.random_state + 2,
   )
-  stats = normalization(train_windows)
+  initial_payload: dict[str, Any] | None = None
+  if args.initial_model is not None:
+    initial_payload = torch.load(args.initial_model, map_location="cpu", weights_only=False)
+  stats = (
+    initial_payload["normalization"]
+    if initial_payload is not None
+    else normalization(train_windows)
+  )
   device = torch.device(args.device)
   rollout_train_steps = effective_rollout_train_steps(
     args.rollout_train_seconds, config, rollout_steps,
@@ -1122,11 +1243,24 @@ def run_train(args: argparse.Namespace) -> None:
   models: list[nn.Module] = []
   member_reports: list[dict[str, Any]] = []
   ensemble_seeds = args.ensemble_seed or [23, 41, 71]
-  for seed in ensemble_seeds:
+  initial_states: list[dict[str, torch.Tensor]] = []
+  if initial_payload is not None:
+    initial_config = ModelConfig(**initial_payload["config"])
+    initial_shape = asdict(initial_config)
+    current_shape = asdict(config)
+    initial_shape.pop("name")
+    current_shape.pop("name")
+    if initial_shape != current_shape:
+      raise ValueError(
+        f"Initial model config {initial_config.name} does not match {config.name}.",
+      )
+    initial_states = initial_payload["members"]
+  for member_index, seed in enumerate(ensemble_seeds):
     model, fit = train_member(
       config, train_windows, validation_windows, stats,
       seed, args.epochs, args.patience, args.batch_size,
       args.learning_rate, rollout_train_steps, args.steps_per_epoch, device,
+      initial_state=initial_states[member_index % len(initial_states)] if initial_states else None,
     )
     validation = evaluate_model(
       model, validation_windows, stats, config,
@@ -1153,8 +1287,13 @@ def run_train(args: argparse.Namespace) -> None:
     "members": [state_dict_cpu(model) for model in models],
     "metadata": {
       "current_data": inventory,
-      "pretraining_performed": False,
-      "pretraining_note": pretraining_note(args),
+      "pretraining_performed": args.initial_model is not None,
+      "pretraining_note": (
+        f"Fine-tuned from {args.initial_model}."
+        if args.initial_model is not None
+        else pretraining_note(args)
+      ),
+      "initial_model": str(args.initial_model) if args.initial_model is not None else None,
       "split_report": str(args.split_report) if args.split_report is not None else None,
       "train_routes": sorted(train_routes),
       "validation_routes": sorted(validation_routes),

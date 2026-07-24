@@ -106,7 +106,8 @@ The search is split into controlled profiles:
 - `architecture` compares MLP, GRU, dilated TCN, and Transformer candidates,
   including the previously selected 50 Hz GRU as a control.
 
-Routes `00000109` and `0000010b` are untouched final holdouts by default.
+Routes `00000109` and `0000010b` are a route-separated evaluation cohort by
+default.
 Routes with more than 50% driver-torque overlay are excluded before any
 cohort is selected. Candidate selection uses other complete routes only.
 Training uses recursive multi-step loss rather than one-step teacher forcing
@@ -160,8 +161,8 @@ candidates, intermediate checkpoints, extraction caches, and duplicate JSON
 exports remain ignored. The promoted `.pt` is stored as a normal Git blob;
 Git LFS is not used.
 
-Downstream goal-based controller training should use the ensemble mean and
-penalize or reject commands with high member disagreement. The helper
+A downstream policy integration should use the ensemble mean and penalize or
+reject commands with high member disagreement. The helper
 `load_ensemble_artifact()` reconstructs the members, and
 `ensemble_predict_delta()` returns both mean response and disagreement.
 For differentiable policy training, `ensemble_rollout()` returns the
@@ -174,6 +175,11 @@ On CUDA, load a GRU plant with
 training. This keeps the plant weights frozen while enabling cuDNN to retain
 the state needed for gradients through the rollout.
 
+The current `train_goal_based_ioniq5_nnff.py` command still consumes the older
+joblib plant format and cannot load this `.pt` artifact directly. Wiring this
+ensemble and its disagreement penalty into that trainer is separate follow-up
+work.
+
 Camera-only Pond archives cannot be used for this model. They do not contain
 the steering torque, vehicle state, and controller messages required for
 training; an archive must contain raw `rlog`, `rlog.zst`, `rlog.bz2`, or
@@ -183,9 +189,11 @@ equivalent telemetry.
 
 The checked-in artifact was trained from 1,258 current-tire rlogs. Routes with
 more than 50% driver overlay were excluded, and routes `00000109` and
-`0000010b` were reserved for final evaluation.
+`0000010b` were excluded from fitting and used as an acceptance cohort.
 
 The promoted three-member GRU ensemble uses 100 Hz samples and three seconds
 of history. It has 40,228 parameters per member and 120,684 in total. It
 scored `0.370714` over 20,000 validation windows and `0.407723` over 30,000
-previously untouched holdout windows.
+acceptance-cohort windows. Because that cohort was used to choose this GRU
+over the validation-selected TCN, the latter score is selection-biased and is
+not an unbiased holdout estimate.

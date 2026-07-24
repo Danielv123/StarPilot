@@ -59,6 +59,11 @@ def test_mlp_applies_configured_dropout() -> None:
   assert sum(isinstance(module, torch.nn.Dropout) for module in model.modules()) == 2
 
 
+def test_gru_rejects_multiple_hidden_sizes() -> None:
+  with pytest.raises(ValueError, match="exactly one hidden size"):
+    neural_plant.ModelConfig("fixture", "gru", 2, 10, (32, 16))
+
+
 def test_temporal_sweep_varies_interval_and_history_at_fixed_capacity() -> None:
   settings = {
     (candidate.sample_step, round(candidate.history_s, 1))
@@ -119,6 +124,37 @@ def test_build_windows_preserves_current_first_history() -> None:
   assert windows.future_base.shape == (50, 10, len(plant_data.BASE_FEATURES))
   torque_index = plant_data.BASE_FEATURES.index("applied_torque")
   assert np.all(windows.history[:, 0, torque_index] >= windows.history[:, 1, torque_index])
+
+
+def test_search_candidates_use_shared_physical_sources() -> None:
+  trajectory = synthetic_trajectory()
+  dense = neural_plant.ModelConfig("dense", "gru", 1, 20, (8,), dropout=0.0)
+  sparse = neural_plant.ModelConfig("sparse", "gru", 2, 10, (8,), dropout=0.0)
+  configs = (dense, sparse)
+  source_keys = neural_plant.sampled_source_keys(
+    neural_plant.common_source_keys(
+      [trajectory], {trajectory.route}, configs, rollout_seconds=0.2,
+    ),
+    cap=30,
+    seed=5,
+  )
+  torque_index = plant_data.BASE_FEATURES.index("applied_torque")
+  current_torque = []
+  for config in configs:
+    rollout_steps = round(0.2 / config.sample_period_s)
+    windows = neural_plant.build_windows(
+      [trajectory], {trajectory.route}, config, rollout_steps,
+      cap=None, seed=5, source_keys=source_keys,
+    )
+    assert len(windows) == 30
+    current_torque.append(windows.history[:, 0, torque_index])
+  assert np.array_equal(current_torque[0], current_torque[1])
+
+
+def test_recursive_training_horizon_is_clamped_to_available_rollout() -> None:
+  config = neural_plant.ModelConfig("fixture", "gru", 2, 10, (8,), dropout=0.0)
+  assert neural_plant.effective_rollout_train_steps(5.0, config, rollout_steps=100) == 100
+  assert neural_plant.effective_rollout_train_steps(0.5, config, rollout_steps=100) == 25
 
 
 def test_rollout_recomputes_unsigned_rate_from_predicted_signed_rate() -> None:

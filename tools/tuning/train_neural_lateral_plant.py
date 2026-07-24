@@ -61,6 +61,10 @@ class ModelConfig:
   feedforward_size: int = 256
   dropout: float = 0.10
 
+  def __post_init__(self) -> None:
+    if self.family == "gru" and len(self.hidden_sizes) != 1:
+      raise ValueError("GRU configurations require exactly one hidden size.")
+
   @property
   def sample_period_s(self) -> float:
     return self.sample_step * 0.01
@@ -462,15 +466,42 @@ def eligible_routes(trajectories: list[plant_data.Trajectory], config: ModelConf
   }
 
 
+def common_source_keys(trajectories: list[plant_data.Trajectory], routes: set[str],
+                       configs: tuple[ModelConfig, ...], rollout_seconds: float) -> set[tuple[int, int]]:
+  common: set[tuple[int, int]] = set()
+  for trajectory_index, trajectory in enumerate(trajectories):
+    if trajectory.route not in routes:
+      continue
+    config_sources: list[set[int]] = []
+    for config in configs:
+      rollout_steps = max(1, round(rollout_seconds / config.sample_period_s))
+      sources = eligible_sources(trajectory, config, rollout_steps)[0]
+      config_sources.append({int(source) * config.sample_step for source in sources})
+    shared = set.intersection(*config_sources)
+    common.update((trajectory_index, source) for source in shared)
+  return common
+
+
+def sampled_source_keys(source_keys: set[tuple[int, int]], cap: int | None,
+                        seed: int) -> set[tuple[int, int]]:
+  ordered = sorted(source_keys)
+  return {ordered[index] for index in sampled_indexes(len(ordered), cap, seed)}
+
+
 def build_windows(trajectories: list[plant_data.Trajectory], routes: set[str],
                   config: ModelConfig, rollout_steps: int, cap: int | None,
-                  seed: int) -> WindowBatch:
+                  seed: int, source_keys: set[tuple[int, int]] | None = None) -> WindowBatch:
   candidates: list[tuple[int, int]] = []
   prepared: dict[int, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
   for trajectory_index, trajectory in enumerate(trajectories):
     if trajectory.route not in routes:
       continue
     sources, times, values = eligible_sources(trajectory, config, rollout_steps)
+    if source_keys is not None:
+      sources = np.asarray([
+        source for source in sources
+        if (trajectory_index, int(source) * config.sample_step) in source_keys
+      ], dtype=np.int64)
     if len(sources):
       prepared[trajectory_index] = (times, values)
       candidates.extend((trajectory_index, int(source)) for source in sources)
@@ -923,6 +954,12 @@ def search_report_path(args: argparse.Namespace) -> Path:
   return args.output_dir / f"{label}_search.json"
 
 
+def effective_rollout_train_steps(requested_seconds: float, config: ModelConfig,
+                                  rollout_steps: int) -> int:
+  requested_steps = max(1, round(requested_seconds / config.sample_period_s))
+  return min(rollout_steps, requested_steps)
+
+
 def split_from_report(path: Path, usable_routes: set[str],
                       inventory: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
   report = json.loads(path.read_text(encoding="utf-8"))
@@ -971,21 +1008,33 @@ def run_search(args: argparse.Namespace) -> None:
     train_routes, validation_routes, holdout_routes = split_routes(
       split_trajectories, args.validation_fraction, route_holdouts(args), args.random_state,
     )
+  shared_train_sources = sampled_source_keys(
+    common_source_keys(trajectories, train_routes, candidates, args.rollout_seconds),
+    args.max_train_windows,
+    args.random_state,
+  )
+  shared_validation_sources = sampled_source_keys(
+    common_source_keys(trajectories, validation_routes, candidates, args.rollout_seconds),
+    args.max_validation_windows,
+    args.random_state + 1,
+  )
+  if not shared_train_sources or not shared_validation_sources:
+    raise ValueError("No physical source windows are shared by every search candidate.")
   device = torch.device(args.device)
   results: list[dict[str, Any]] = []
   for candidate in candidates:
     rollout_steps = max(1, round(args.rollout_seconds / candidate.sample_period_s))
     train_windows = build_windows(
       trajectories, train_routes, candidate, rollout_steps,
-      args.max_train_windows, args.random_state,
+      None, args.random_state, shared_train_sources,
     )
     validation_windows = build_windows(
       trajectories, validation_routes, candidate, rollout_steps,
-      args.max_validation_windows, args.random_state + 1,
+      None, args.random_state + 1, shared_validation_sources,
     )
     stats = normalization(train_windows)
-    rollout_train_steps = max(
-      1, round(args.rollout_train_seconds / candidate.sample_period_s),
+    rollout_train_steps = effective_rollout_train_steps(
+      args.rollout_train_seconds, candidate, rollout_steps,
     )
     model, fit = train_member(
       candidate, train_windows, validation_windows, stats,
@@ -1022,6 +1071,8 @@ def run_search(args: argparse.Namespace) -> None:
       "holdout_routes": sorted(holdout_routes),
       "eligible_route_count": len(common_routes),
       "excluded_route_count": len({item.route for item in trajectories} - common_routes),
+      "shared_train_source_count": len(shared_train_sources),
+      "shared_validation_source_count": len(shared_validation_sources),
     },
     "selection_metric": "weighted normalized autoregressive rollout RMSE",
     "candidates": results,
@@ -1065,8 +1116,8 @@ def run_train(args: argparse.Namespace) -> None:
   )
   stats = normalization(train_windows)
   device = torch.device(args.device)
-  rollout_train_steps = max(
-    1, round(args.rollout_train_seconds / config.sample_period_s),
+  rollout_train_steps = effective_rollout_train_steps(
+    args.rollout_train_seconds, config, rollout_steps,
   )
   models: list[nn.Module] = []
   member_reports: list[dict[str, Any]] = []
@@ -1121,7 +1172,7 @@ def run_train(args: argparse.Namespace) -> None:
       "anti_exploitation": {
         "strategy": "ensemble mean with member disagreement exposed to downstream policy training",
         "selection_holdout": sorted(holdout_routes),
-        "rollout_training_seconds": args.rollout_train_seconds,
+        "rollout_training_seconds": rollout_train_steps * config.sample_period_s,
         "rollout_training_steps": rollout_train_steps,
         "rollout_validation_seconds": args.rollout_seconds,
       },

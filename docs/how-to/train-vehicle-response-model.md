@@ -89,3 +89,111 @@ After training, optimize the Ioniq 5 controller through the same five-step rollo
 ```powershell
 uv run --no-project --with scikit-learn --with joblib --with pycapnp==2.1.0 --with zstandard python -u tools\tuning\optimize_ioniq5_closed_loop.py --model artifacts\tuning\lateral_plant_20260721\lateral_plant_model.joblib --output artifacts\tuning\ioniq5_closed_loop_20260721\optimization.json
 ```
+
+## Neural lateral plant for goal-based NNFF training
+
+Use the neural plant trainer when a controller will be optimized through the
+plant with gradients. It searches both the temporal representation and network
+capacity instead of fixing the original `0.6 s @ 20 Hz`,
+`96 -> 128 -> 128 -> 64 -> 4` surrogate.
+
+The search is split into controlled profiles:
+
+- `initial` compares the original MLP with denser MLP and GRU candidates;
+- `temporal` holds a one-layer, 40,228-parameter GRU fixed while sweeping
+  `10`, `20`, and `50 ms` sample intervals and `0.5`, `1.0`, `1.5`, `2.0`,
+  and `3.0` second histories;
+- `architecture` compares MLP, GRU, dilated TCN, and Transformer candidates,
+  including the previously selected 50 Hz GRU as a control.
+
+Routes `00000109` and `0000010b` are a route-separated evaluation cohort by
+default.
+Routes with more than 50% driver-torque overlay are excluded before any
+cohort is selected. Candidate selection uses other complete routes only.
+Training uses recursive multi-step loss rather than one-step teacher forcing
+alone. The bounded early-stopping evaluation uses a deterministic random
+sample across the full validation window set rather than its first rows.
+
+Run the search on a CUDA machine:
+
+```bash
+uv run --no-project --with torch --with joblib --with scikit-learn --with pycapnp==2.1.0 --with zstandard \
+  python -u tools/tuning/train_neural_lateral_plant.py search \
+  --search-profile temporal \
+  --current-root /path/to/realdata \
+  --output-dir artifacts/tuning/neural_lateral_plant_search
+```
+
+Run `temporal` first, then adjust or run the `architecture` profile at the
+best temporal setting. A JSON candidate list can be supplied with
+`--candidate-file` for additional controlled experiments. Each profile writes
+a distinct report such as `temporal_search.json` or
+`architecture_search.json`; a candidate file named `finalists.json` writes
+`finalists_search.json`.
+
+Then train a three-member ensemble with the selected configuration. For
+the final comparison and training run, pass the preceding report through
+`--split-report`. The trainer verifies the data inventory and reuses its exact
+training, validation, and holdout route cohorts. For example, for a two-layer,
+256-wide GRU using a dense two-second history:
+
+```bash
+uv run --no-project --with torch --with joblib --with scikit-learn --with pycapnp==2.1.0 --with zstandard \
+  python -u tools/tuning/train_neural_lateral_plant.py train \
+  --current-root /path/to/realdata \
+  --split-report artifacts/tuning/neural_lateral_plant_search/architecture_search.json \
+  --family gru --sample-step 2 --history-steps 100 \
+  --hidden-sizes 256 --gru-layers 2 \
+  --output-dir artifacts/tuning/neural_lateral_plant_final
+```
+
+The ignored output directory contains:
+
+- `neural_lateral_plant.pt`: model states, normalization, architecture, data
+  inventory, route splits, and ensemble metadata;
+- `training.json`: reviewable metrics without model tensors;
+- `current_trajectories.joblib`: the reusable full-rate extraction cache.
+
+The promoted self-contained model is checked in under
+`artifacts/tuning/neural_lateral_plant_20260723/`. It includes its architecture,
+normalization, route splits, and evaluation metadata. Search reports, rejected
+candidates, intermediate checkpoints, extraction caches, and duplicate JSON
+exports remain ignored. The promoted `.pt` is stored as a normal Git blob;
+Git LFS is not used.
+
+A downstream policy integration should use the ensemble mean and penalize or
+reject commands with high member disagreement. The helper
+`load_ensemble_artifact()` reconstructs the members, and
+`ensemble_predict_delta()` returns both mean response and disagreement.
+For differentiable policy training, `ensemble_rollout()` returns the
+autoregressive ensemble mean and disagreement across the full horizon.
+This makes model uncertainty visible instead of allowing a controller to
+silently exploit one surrogate's error.
+
+On CUDA, load a GRU plant with
+`load_ensemble_artifact(..., differentiable=True)` for downstream policy
+training. This keeps the plant weights frozen while enabling cuDNN to retain
+the state needed for gradients through the rollout.
+
+The current `train_goal_based_ioniq5_nnff.py` command still consumes the older
+joblib plant format and cannot load this `.pt` artifact directly. Wiring this
+ensemble and its disagreement penalty into that trainer is separate follow-up
+work.
+
+Camera-only Pond archives cannot be used for this model. They do not contain
+the steering torque, vehicle state, and controller messages required for
+training; an archive must contain raw `rlog`, `rlog.zst`, `rlog.bz2`, or
+equivalent telemetry.
+
+### Promoted Ioniq 5 plant
+
+The checked-in artifact was trained from 1,258 current-tire rlogs. Routes with
+more than 50% driver overlay were excluded, and routes `00000109` and
+`0000010b` were excluded from fitting and used as an acceptance cohort.
+
+The promoted three-member GRU ensemble uses 100 Hz samples and three seconds
+of history. It has 40,228 parameters per member and 120,684 in total. It
+scored `0.370714` over 20,000 validation windows and `0.407723` over 30,000
+acceptance-cohort windows. Because that cohort was used to choose this GRU
+over the validation-selected TCN, the latter score is selection-biased and is
+not an unbiased holdout estimate.

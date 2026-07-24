@@ -66,6 +66,38 @@ class TestGMFingerprint:
 
 
 class TestGMInterface:
+  @parameterized.expand([
+    CAR.CHEVROLET_BOLT_CC_2017,
+    CAR.CHEVROLET_BOLT_CC_2018_2021,
+    CAR.CHEVROLET_BOLT_ACC_2022_2023_PEDAL,
+    CAR.CHEVROLET_BOLT_CC_2022_2023,
+    CAR.CHEVROLET_MALIBU_HYBRID_CC,
+  ])
+  def test_bolt_pedal_long_uses_shared_planning_delay_without_retuning_pid(self, car_model):
+    CarInterface = interfaces[car_model]
+    fingerprint = _empty_fingerprint()
+    fingerprint[0][0x201] = 8
+    params = Params()
+
+    try:
+      params.put_bool("GMPedalLongitudinal", True)
+      car_params = CarInterface.get_params(
+        car_model,
+        fingerprint,
+        [],
+        alpha_long=False,
+        is_release=False,
+        docs=False,
+        starpilot_toggles=_test_starpilot_toggles(),
+      )
+    finally:
+      params.remove("GMPedalLongitudinal")
+
+    assert car_params.longitudinalActuatorDelay == pytest.approx(0.6)
+    assert list(car_params.longitudinalTuning.kpV) == pytest.approx([0.095, 0.085, 0.065, 0.050])
+    assert list(car_params.longitudinalTuning.kiV) == pytest.approx([0.07, 0.10, 0.15, 0.24])
+    assert car_params.longitudinalTuning.kfDEPRECATED == pytest.approx(0.20)
+
   def test_bolt_acc_pedal_pid_accel_limits_keep_full_negative_authority(self):
     cp = SimpleNamespace(
       enableGasInterceptorDEPRECATED=True,
@@ -362,6 +394,9 @@ class TestGMInterface:
     assert car_params.alternativeExperience & ALTERNATIVE_EXPERIENCE.GM_REMAP_CANCEL_TO_DISTANCE
     assert car_params.safetyConfigs[0].safetyParam & GMSafetyFlags.FLAG_GM_BOLT_2022_PEDAL.value
     assert car_params.safetyConfigs[0].safetyParam & GMSafetyFlags.FLAG_GM_PANDA_PADDLE_SCHED.value
+    assert car_params.startingState
+    assert car_params.startAccel == pytest.approx(0.55)
+    assert car_params.vEgoStarting == pytest.approx(0.35)
 
   def test_cadillac_xt5_sdgm_sascm_gates_alpha_long(self):
     CarInterface = interfaces[CAR.CADILLAC_XT5]
@@ -429,6 +464,19 @@ class TestGMInterface:
     assert low_torque < linear_low_torque * 1.30
     assert high_torque == pytest.approx(linear_high_torque, rel=0.03)
     assert torque_from_lataccel(-low_lataccel, car_params.lateralTuning.torque) == pytest.approx(-low_torque, rel=1e-6)
+
+  @parameterized.expand((CAR.CHEVROLET_VOLT_ASCM, CAR.CHEVROLET_VOLT_CAMERA, CAR.CHEVROLET_VOLT_CC, CAR.CHEVROLET_VOLT_2019))
+  def test_volt_integration_variants_share_nonlinear_torque_curve(self, candidate):
+    assert gm_interface.get_nonlinear_torque_params(candidate) == gm_interface.NON_LINEAR_TORQUE_PARAMS[CAR.CHEVROLET_VOLT]
+
+    CarInterface = interfaces[candidate]
+    car_params = CarInterface.get_non_essential_params(candidate)
+    ci = CarInterface(car_params, custom.StarPilotCarParams.new_message())
+    torque_from_lataccel = ci.torque_from_lateral_accel()
+
+    left_torque = torque_from_lataccel(0.5, car_params.lateralTuning.torque)
+    right_torque = torque_from_lataccel(-0.5, car_params.lateralTuning.torque)
+    assert left_torque > abs(right_torque)
 
 
 class TestGMCarController:
@@ -540,6 +588,53 @@ class TestGMCarController:
     msgs = gmcan.create_gm_cc_spam_command(packer, controller, cs, actuators, SimpleNamespace(is_metric=False))
 
     assert [msg[2] for msg in msgs] == [0]
+
+  def test_xt4_cc_redneck_spam_matches_physical_button_burst(self):
+    packer = CANPacker(DBC[CAR.CADILLAC_XT4_CC][Bus.pt])
+    controller = SimpleNamespace(
+      frame=int(0.3 / DT_CTRL),
+      last_button_frame=0,
+      apply_speed=0,
+      malibu_button_phase=0,
+      xt4_cc_button_burst_remaining=0,
+      xt4_cc_button_burst_button=CruiseButtons.INIT,
+      xt4_cc_button_burst_last_counter=-1,
+      xt4_cc_button_observed_counter=-1,
+      xt4_cc_button_counter_frame=0,
+    )
+    cs = SimpleNamespace(
+      CP=SimpleNamespace(
+        carFingerprint=CAR.CADILLAC_XT4_CC,
+        flags=GMFlags.CC_LONG.value,
+        minEnableSpeed=24 * CV.MPH_TO_MS,
+      ),
+      buttons_counter=0,
+      out=SimpleNamespace(
+        vEgo=25.0,
+        cruiseState=SimpleNamespace(speed=20.0),
+      ),
+    )
+    actuators = SimpleNamespace(accel=1.0)
+
+    dats = []
+    send_counts = []
+    for counter in (0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 0, 0, 0, 1, 1, 1):
+      cs.buttons_counter = counter
+      msgs = gmcan.create_gm_cc_spam_command(packer, controller, cs, actuators, SimpleNamespace(is_metric=False))
+      send_counts.append(len(msgs))
+      dats.extend(bytes(msg[1]).hex() for msg in msgs)
+      controller.frame += 1
+
+    assert send_counts == [0, 1, 0] * gmcan.XT4_CC_BUTTON_BURST_FRAMES
+    assert dats == [
+      "000000010125de",
+      "00000001022acd",
+      "00000001032fbc",
+      "000000010020ef",
+      "000000010125de",
+      "00000001022acd",
+    ]
+    assert controller.xt4_cc_button_burst_remaining == 0
 
   def test_acc_dashboard_command_preserves_raw_fcw_alert_level(self):
     packer = CANPacker(DBC[CAR.CHEVROLET_BOLT_ACC_2022_2023][Bus.pt])

@@ -28,6 +28,7 @@ ENABLE_BUTTONS = (ButtonType.accelCruise, ButtonType.decelCruise, ButtonType.can
 # Track when ECU disable happened - used to permanently suppress CAN errors from disabled ECU
 ECU_DISABLE_TIMESTAMP = 0.0
 KONA_NON_SCC_FCA_RADAR_ADDR = 0x602
+KIA_EV9_ACCEL_MAX = 2.5
 
 
 def apply_platform_longitudinal_params(ret: structs.CarParams) -> None:
@@ -45,6 +46,12 @@ def apply_platform_longitudinal_params(ret: structs.CarParams) -> None:
 def apply_kia_ev6_gt_line_longitudinal_params(ret: structs.CarParams) -> None:
   ret.startAccel = 1.4
   ret.longitudinalActuatorDelay = 0.35
+  ret.vEgoStarting = 0.5
+
+
+def apply_kia_ev9_longitudinal_params(ret: structs.CarParams) -> None:
+  ret.startAccel = 0.2
+  ret.longitudinalActuatorDelay = 0.3
   ret.vEgoStarting = 0.5
 
 
@@ -74,7 +81,8 @@ class CarInterface(CarInterfaceBase):
 
   @staticmethod
   def get_pid_accel_limits(CP, current_speed, cruise_speed):
-    return ACCEL_MIN, CarControllerParams.ACCEL_MAX
+    accel_max = KIA_EV9_ACCEL_MAX if CP.carFingerprint == CAR.KIA_EV9 else CarControllerParams.ACCEL_MAX
+    return ACCEL_MIN, accel_max
 
   @staticmethod
   def apply_post_fingerprint_params(CP: structs.CarParams, candidate, fingerprint, car_fw) -> None:
@@ -104,10 +112,10 @@ class CarInterface(CarInterfaceBase):
         # Most angle-steering LKA platforms still need stock longitudinal validation.
         ret.alphaLongitudinalAvailable = False
 
-      ret.enableBsm = 0x1ba in fingerprint[CAN.ECAN]
+      ret.enableBsm = 0x1ba in fingerprint[CAN.ECAN] or candidate == CAR.KIA_EV9
 
-      # Check if the car is hybrid. Only HEV/PHEV cars have 0xFA on E-CAN.
-      if 0xFA in fingerprint[CAN.ECAN]:
+      # Carnival HEV can fingerprint with too little E-CAN traffic to see 0xFA.
+      if 0xFA in fingerprint[CAN.ECAN] or candidate == CAR.KIA_CARNIVAL_HEV_4TH_GEN:
         ret.flags |= HyundaiFlags.HYBRID.value
 
       if lka_steering:
@@ -115,6 +123,10 @@ class CarInterface(CarInterfaceBase):
         ret.flags |= HyundaiFlags.CANFD_LKA_STEERING.value
         if 0x110 in fingerprint[CAN.CAM]:
           ret.flags |= HyundaiFlags.CANFD_LKA_STEERING_ALT.value
+        # This HDA II Carnival uses the alternate 0x1AA cruise-button frame even
+        # though other LKA-steering platforms use 0x1CF.
+        if candidate == CAR.KIA_CARNIVAL_2025 and 0x1aa in fingerprint[CAN.ECAN] and 0x1cf not in fingerprint[CAN.ECAN]:
+          ret.flags |= HyundaiFlags.CANFD_ALT_BUTTONS.value
       else:
         # no LKA steering
         if 0x1cf not in fingerprint[CAN.ECAN]:
@@ -148,8 +160,13 @@ class CarInterface(CarInterfaceBase):
       if ret.flags & HyundaiFlags.CANFD_ANGLE_STEERING:
         ret.steerControlType = structs.CarParams.SteerControlType.angle
         ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.CANFD_ANGLE_STEERING.value
-        if candidate == CAR.KIA_EV9:
-          ret.steerAtStandstill = True
+      if candidate == CAR.HYUNDAI_IONIQ_6:
+        # Keep lateral active through stops: zeroing torque at standstill dropped the
+        # stop-turn hold and forced a rate-limit re-ramp from zero on every pull-away
+        # (turn1/turn2 rlogs 2026-07-14). Torque steering has no standstill gate in the
+        # panda safety or the carcontroller; the MDPS tolerating held torque at 0 speed
+        # is being validated on-road.
+        ret.steerAtStandstill = True
       if ret.flags & HyundaiFlags.CCNC and not ret.flags & HyundaiFlags.CANFD_LKA_STEERING:
         ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.CCNC.value
 
@@ -176,6 +193,8 @@ class CarInterface(CarInterfaceBase):
 
       if ret.flags & HyundaiFlags.CAMERA_SCC:
         ret.safetyConfigs[0].safetyParam |= HyundaiSafetyFlags.CAMERA_SCC.value
+      if candidate in (CAR.HYUNDAI_ELANTRA_2024, CAR.HYUNDAI_ELANTRA_HEV_2024):
+        ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.CAN_REFRESH_MSGS.value
 
       # These cars expose an LKAS/LFA steering-wheel button that StarPilot can customize.
       if 0x391 in fingerprint[0] or ret.flags & HyundaiFlags.CAN_CANFD_BLENDED:
@@ -220,6 +239,8 @@ class CarInterface(CarInterfaceBase):
 
     if ret.openpilotLongitudinalControl:
       ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.LONG.value
+      if candidate in CANFD_ANGLE_LONGITUDINAL_CAR and ret.flags & HyundaiFlags.CCNC:
+        ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.CCNC.value
     if ret.flags & HyundaiFlags.HYBRID:
       ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.HYBRID_GAS.value
     elif ret.flags & HyundaiFlags.EV:
@@ -240,8 +261,19 @@ class CarInterface(CarInterfaceBase):
       ret.vEgoStarting = 0.5
       ret.vEgoStopping = 0.35
 
+    if candidate == CAR.HYUNDAI_ELANTRA_2021:
+      ret.longitudinalActuatorDelay = 0.22
+      ret.stopAccel = -1.5
+      ret.stoppingDecelRate = 0.5
+
+    if candidate == CAR.HYUNDAI_ELANTRA_HEV_2024:
+      ret.longitudinalActuatorDelay = 0.22
+
     if candidate == CAR.HYUNDAI_IONIQ_6:
       ret.longitudinalActuatorDelay = 0.6
+
+    if candidate == CAR.KIA_EV9 and ret.openpilotLongitudinalControl:
+      apply_kia_ev9_longitudinal_params(ret)
 
     if candidate == CAR.KIA_NIRO_PHEV_2022:
       ret.stopAccel = -1.4

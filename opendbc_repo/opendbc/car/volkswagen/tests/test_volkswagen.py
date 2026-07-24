@@ -2,6 +2,7 @@ import random
 import re
 
 from opendbc.car.structs import CarParams
+from opendbc.car.volkswagen.interface import CarInterface
 from opendbc.car.volkswagen.values import CAR, FW_QUERY_CONFIG, WMI
 from opendbc.car.volkswagen.fingerprints import FW_VERSIONS
 
@@ -13,6 +14,13 @@ SPARE_PART_FW_PATTERN = re.compile(b'\xf1\x87(?P<gateway>[0-9][0-9A-Z]{2})(?P<un
 
 
 class TestVolkswagenPlatformConfigs:
+  def test_taos_longitudinal_actuator_delay(self):
+    taos_cp = CarInterface.get_non_essential_params(CAR.VOLKSWAGEN_TAOS_MK1)
+    golf_cp = CarInterface.get_non_essential_params(CAR.VOLKSWAGEN_GOLF_MK7)
+
+    assert abs(taos_cp.longitudinalActuatorDelay - 0.25) < 1e-6
+    assert abs(golf_cp.longitudinalActuatorDelay - 0.15) < 1e-6
+
   def test_spare_part_fw_pattern(self, subtests):
     # Relied on for determining if a FW is likely VW
     for platform, ecus in FW_VERSIONS.items():

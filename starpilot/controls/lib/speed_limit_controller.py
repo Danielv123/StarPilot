@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
+from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 
 from cereal import custom
 from openpilot.starpilot.common.starpilot_utilities import calculate_bearing_offset, calculate_distance_to_point, is_url_pingable
@@ -36,6 +37,9 @@ OFFSET_MAP_METRIC = [
 ]
 
 SLC_OVERRIDE_DISABLE_CLEAR_TIME = 0.75
+VISION_LARGE_REFERENCE_SPEED_DELTA = 30 * CV.MPH_TO_MS
+VISION_LARGE_SET_SPEED_MIN_SUPPORT = 3
+VISION_SUPPORT_SPEED_TOLERANCE = 0.5 * CV.MPH_TO_MS
 
 class SpeedLimitController:
   def __init__(self, StarPilotVCruise):
@@ -326,7 +330,21 @@ class SpeedLimitController:
 
   def update_limits(self, dashboard_speed_limit, now, time_validated, v_cruise, v_ego, sm, display_only=False):
     self.update_map_speed_limit(v_ego, sm)
-    self.vision_limit = self.starpilot_planner.params_memory.get_float("VisionSpeedLimit") if getattr(self.starpilot_toggles, "vision_speed_limit_detection", False) else 0
+    vision_enabled = getattr(self.starpilot_toggles, "vision_speed_limit_detection", False)
+    self.vision_limit = self.starpilot_planner.params_memory.get_float("VisionSpeedLimit") if vision_enabled else 0
+    usable_vision_limit = self.vision_limit
+    # The planner clamps V_CRUISE_UNSET to V_CRUISE_MAX, so plausibility must use the raw selected speed.
+    raw_set_speed_kph = float(sm["carState"].vCruise)
+    selected_set_speed = raw_set_speed_kph * CV.KPH_TO_MS if 0 < raw_set_speed_kph < V_CRUISE_UNSET else 0
+    reference_speed = selected_set_speed if selected_set_speed > 0 else max(float(v_ego), 0)
+    if (
+      usable_vision_limit > 0 and reference_speed > 0 and
+      abs(usable_vision_limit - reference_speed) >= VISION_LARGE_REFERENCE_SPEED_DELTA
+    ):
+      support_count = self.starpilot_planner.params_memory.get_int("VisionSpeedLimitSupportCount")
+      support_speed = self.starpilot_planner.params_memory.get_float("VisionSpeedLimitSupportSpeed")
+      if support_count < VISION_LARGE_SET_SPEED_MIN_SUPPORT or abs(support_speed - usable_vision_limit) > VISION_SUPPORT_SPEED_TOLERANCE:
+        usable_vision_limit = 0
 
     configured_priorities = {
       self.starpilot_toggles.speed_limit_priority1,
@@ -337,7 +355,7 @@ class SpeedLimitController:
       "Map Data": self.map_speed_limit,
     }
     if "Vision" in configured_priorities:
-      limits["Vision"] = self.vision_limit
+      limits["Vision"] = usable_vision_limit
     filtered_limits = {source: limit for source, limit in limits.items() if limit >= 1}
 
     if self.starpilot_toggles.speed_limit_priority_highest:
@@ -485,7 +503,5 @@ class SpeedLimitController:
         self.overridden_speed = float(np.clip(self.overridden_speed, target_to_use + offset, v_cruise + v_cruise_diff))
       elif self.starpilot_toggles.speed_limit_controller_override_set_speed:
         self.overridden_speed = v_cruise + v_cruise_diff
-
-      self.source = "None"
     else:
       self.overridden_speed = 0

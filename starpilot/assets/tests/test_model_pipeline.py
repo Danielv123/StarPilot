@@ -1,7 +1,15 @@
 import hashlib
+import io
+import json
+import sys
+from pathlib import Path
 
+from scripts import model_compiler
 from scripts.model_compiler import split_oversized_artifact
+from openpilot.common import file_chunker
+from openpilot.selfdrive.modeld import compile_modeld
 from openpilot.starpilot.assets import download_functions
+from openpilot.starpilot.assets import model_manager
 from openpilot.starpilot.assets.model_manager import MANIFEST_CANDIDATES, ModelManager
 from openpilot.starpilot.common.model_versions import UNIFIED_ARTIFACT_FORMAT
 
@@ -19,6 +27,74 @@ def test_behavior_version_does_not_control_artifact_layout():
     "example_driving_tinygrad.pkl",
   ]
   assert manager._required_files("example", "split") == []
+
+
+def test_external_gpu_requirement_is_cached_from_manifest(tmp_path, monkeypatch):
+  monkeypatch.setattr(model_manager, "MODELS_PATH", tmp_path)
+  manager = object.__new__(ModelManager)
+  metadata = manager._build_artifact_metadata_map([
+    {"id": "large", "artifact_format": UNIFIED_ARTIFACT_FORMAT, "uses_external_gpu": True},
+    {"id": "normal", "artifact_format": UNIFIED_ARTIFACT_FORMAT},
+  ])
+  (tmp_path / model_manager.ARTIFACT_METADATA_CACHE).write_text(json.dumps(metadata))
+
+  assert model_manager.model_uses_external_gpu("large")
+  assert not model_manager.model_uses_external_gpu("normal")
+  assert not model_manager.model_uses_external_gpu("missing")
+
+
+def test_external_gpu_compilation_is_opt_in(tmp_path, monkeypatch):
+  invocations = []
+  monkeypatch.setattr(model_compiler, "build_compile_env", lambda: {
+    "DEV": "QCOM", "IMAGE": "2", "NOLOCALS": "1", "OPENPILOT_HACKS": "1",
+  })
+  monkeypatch.setattr(model_compiler.subprocess, "run", lambda command, **kwargs: invocations.append((command, kwargs)))
+  files = {"driving_supercombo": tmp_path / "model.onnx"}
+
+  model_compiler.compile_driving("normal", files, "supercombo", "v15", tmp_path, "policy")
+  model_compiler.compile_driving("large", files, "supercombo", "v15", tmp_path, "policy", external_gpu=True)
+
+  normal_command, normal_kwargs = invocations[0]
+  external_command, external_kwargs = invocations[1]
+  assert "--out-of-band" not in normal_command
+  assert normal_kwargs["env"]["DEV"] == "QCOM"
+  assert normal_kwargs["env"]["IMAGE"] == "2"
+  assert "--out-of-band" in external_command
+  assert external_kwargs["env"]["DEV"] == "USB+AMD:LLVM"
+  assert external_kwargs["env"]["WARP_DEV"] == "QCOM"
+  assert all(flag not in external_kwargs["env"] for flag in ("IMAGE", "NOLOCALS", "OPENPILOT_HACKS"))
+
+
+def test_gpu_is_external_gpu_cli_alias(monkeypatch):
+  monkeypatch.setattr(sys, "argv", ["models", "--model", "large", "--gpu"])
+  args = model_compiler.parse_args()
+  assert args.external_gpu
+
+
+def test_requested_model_id_uses_only_staged_source(tmp_path):
+  source = tmp_path / "big_driving_supercombo.onnx"
+  source.touch()
+  assert model_compiler.resolve_model_files(tmp_path, "lebowski") == {
+    "driving_supercombo": source,
+  }
+
+
+def test_fat_onnx_is_streamed_to_disk(tmp_path, monkeypatch):
+  payload = b"fat model" * 1024
+
+  class StreamingOnly(io.BytesIO):
+    def read(self, size=-1):
+      assert size >= 0, "staging must not materialize the whole ONNX"
+      return super().read(size)
+
+  monkeypatch.setattr(file_chunker, "open_file_chunked", lambda _: StreamingOnly(payload))
+  source = tmp_path / "big_driving_supercombo.onnx"
+  staged = compile_modeld.read_file_chunked_to_disk(source)
+  try:
+    assert staged == f"{source}.unchunked"
+    assert Path(staged).read_bytes() == payload
+  finally:
+    Path(staged).unlink(missing_ok=True)
 
 
 def test_dropbox_urls_are_direct_downloads():

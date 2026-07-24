@@ -32,6 +32,7 @@ from openpilot.system.hardware import HARDWARE
 
 from openpilot.starpilot.common.starpilot_utilities import contains_event_type
 from openpilot.starpilot.common.starpilot_variables import get_starpilot_toggles
+from openpilot.starpilot.common.vision_bsm import get_fresh_vasm_state
 
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
@@ -55,13 +56,21 @@ StarPilotEventName = custom.StarPilotOnroadEvent.EventName
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
 
-def should_loud_blindspot_alert_without_lateral(CS, sm, starpilot_toggles) -> bool:
+def commanded_torque_at_max_for_saturation(CP, output: float) -> bool:
+  torque_controller = (CP.steerControlType == car.CarParams.SteerControlType.torque and
+                       CP.lateralTuning.which() == "torque")
+  return torque_controller and abs(output) > 0.99
+
+
+def should_loud_blindspot_alert_without_lateral(CS, sm, starpilot_toggles, combined_left_bsm=None, combined_right_bsm=None) -> bool:
   if not (getattr(starpilot_toggles, "loud_blindspot_alert", False) and
           getattr(starpilot_toggles, "loud_blindspot_alert_when_disengaged", False)):
     return False
 
-  left_signal_blocked = bool(CS.leftBlinker and CS.leftBlindspot)
-  right_signal_blocked = bool(CS.rightBlinker and CS.rightBlindspot)
+  combined_left_bsm = CS.leftBlindspot if combined_left_bsm is None else combined_left_bsm
+  combined_right_bsm = CS.rightBlindspot if combined_right_bsm is None else combined_right_bsm
+  left_signal_blocked = bool(CS.leftBlinker and combined_left_bsm)
+  right_signal_blocked = bool(CS.rightBlinker and combined_right_bsm)
   one_blinker = bool(CS.leftBlinker) != bool(CS.rightBlinker)
   if not (one_blinker and (left_signal_blocked or right_signal_blocked)):
     return False
@@ -496,12 +505,17 @@ class SelfdriveD:
       self.events.add(EventName.excessiveActuation)
     # ******************************************************************************************
 
-    # Handle lane change
+    # Handle lane change - combine OEM BSM with fresh V-ASM state.
     blindspot_alert_added = False
+    vasm_left, vasm_right = (False, False)
+    if getattr(self.starpilot_toggles, "v_asm_enabled", False):
+      vasm_left, vasm_right = get_fresh_vasm_state(self.params_memory)
+    combined_left_bsm = CS.leftBlindspot or vasm_left
+    combined_right_bsm = CS.rightBlindspot or vasm_right
     if self.sm['modelV2'].meta.laneChangeState == LaneChangeState.preLaneChange:
       direction = self.sm['modelV2'].meta.laneChangeDirection
-      if (CS.leftBlindspot and direction == LaneChangeDirection.left) or \
-         (CS.rightBlindspot and direction == LaneChangeDirection.right):
+      if (combined_left_bsm and direction == LaneChangeDirection.left) or \
+         (combined_right_bsm and direction == LaneChangeDirection.right):
         blindspot_alert_added = True
         if self.starpilot_toggles.loud_blindspot_alert:
           self.starpilot_events.add(StarPilotEventName.laneChangeBlockedLoud)
@@ -523,7 +537,7 @@ class SelfdriveD:
                                                     LaneChangeState.laneChangeFinishing):
       self.events.add(EventName.laneChange)
 
-    if not blindspot_alert_added and should_loud_blindspot_alert_without_lateral(CS, self.sm, self.starpilot_toggles):
+    if not blindspot_alert_added and should_loud_blindspot_alert_without_lateral(CS, self.sm, self.starpilot_toggles, combined_left_bsm, combined_right_bsm):
       self.starpilot_events.add(StarPilotEventName.laneChangeBlockedLoud)
 
     for i, pandaState in enumerate(self.sm['pandaStates']):
@@ -643,7 +657,7 @@ class SelfdriveD:
       desired_lateral_accel = self.sm['modelV2'].action.desiredCurvature * (clipped_speed**2)
       undershooting = abs(desired_lateral_accel) / abs(1e-3 + actual_lateral_accel) > 1.2
       turning = abs(desired_lateral_accel) > 1.0
-      commanded_torque_at_max = abs(lac.output) > 0.99
+      commanded_torque_at_max = commanded_torque_at_max_for_saturation(self.CP, lac.output)
       # TODO: lac.saturated includes speed and other checks, should be pulled out
       if undershooting and turning and (lac.saturated or commanded_torque_at_max):
         now = time.monotonic()

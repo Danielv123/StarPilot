@@ -1,5 +1,6 @@
 import os
 import platform
+import weakref
 import numpy as np
 import pyray as rl
 
@@ -127,6 +128,8 @@ class CameraView(Widget):
     self._enhance_driver_val = rl.ffi.new("int[1]", [1 if stream_type == VisionStreamType.VISION_STREAM_DRIVER else 0])
 
     self.frame: VisionBuf | None = None
+    self._last_frame_id = -1
+    self._regressive_frame_count = 0
     self.texture_y: rl.Texture | None = None
     self.texture_uv: rl.Texture | None = None
 
@@ -135,27 +138,38 @@ class CameraView(Widget):
     self.egl_texture: rl.Texture | None = None
 
     self._placeholder_color: rl.Color | None = None
+    self._closed = False
 
     # Initialize EGL for zero-copy rendering when available.
     if self._use_egl:
-      # Create a 1x1 pixel placeholder texture for EGL image binding
-      temp_image = rl.gen_image_color(1, 1, rl.BLACK)
-      self.egl_texture = rl.load_texture_from_image(temp_image)
-      rl.unload_image(temp_image)
+      self._create_egl_texture()
 
-    ui_state.add_offroad_transition_callback(self._offroad_transition)
+    self_ref = weakref.ref(self)
+
+    def offroad_transition_callback():
+      if (view := self_ref()) is not None:
+        view._offroad_transition()
+
+    self._offroad_transition_callback = offroad_transition_callback
+    ui_state.add_offroad_transition_callback(self._offroad_transition_callback)
 
   def _offroad_transition(self):
-    # Reconnect if not first time going onroad
-    if ui_state.is_onroad() and self.frame is not None:
-      # Prevent old frames from showing when going onroad. Qt has a separate thread
-      # which drains the VisionIpcClient SubSocket for us. Re-connecting is not enough
-      # and only clears internal buffers, not the message queue.
-      self.available_streams.clear()
-      if self.client:
-        del self.client
-      self.client = VisionIpcClient(self._name, self._stream_type, conflate=True)
+    self._reset_camera_connection()
+
+  def _reset_camera_connection(self):
+    # EGL images and VisionBuf objects both retain the imported camera buffer.
+    # Release them on every road-state transition instead of pinning the old
+    # camerad allocation until this view happens to render again.
+    self._clear_textures()
     self.frame = None
+    self._last_frame_id = -1
+    self.available_streams.clear()
+    self.client = VisionIpcClient(self._name, self._stream_type, conflate=True)
+    self._target_client = None
+    self._target_stream_type = None
+    self._switching = False
+    self._texture_needs_update = True
+    self.last_connection_attempt = 0.0
 
   def _set_placeholder_color(self, color: rl.Color):
     """Set a placeholder color to be drawn when no frame is available."""
@@ -182,12 +196,15 @@ class CameraView(Widget):
     return self._stream_type
 
   def close(self) -> None:
-    self._clear_textures()
+    if self._closed:
+      return
+    self._closed = True
 
-    # Clean up EGL texture
-    if self.egl_texture:
-      rl.unload_texture(self.egl_texture)
-      self.egl_texture = None
+    callback = getattr(self, "_offroad_transition_callback", None)
+    if callback is not None:
+      ui_state.remove_offroad_transition_callback(callback)
+      self._offroad_transition_callback = None
+    self._clear_textures()
 
     # Clean up shader
     if self.shader and self.shader.id:
@@ -195,8 +212,10 @@ class CameraView(Widget):
       self.shader.id = 0
 
     self.frame = None
+    self._last_frame_id = -1
     self.available_streams.clear()
     self.client = None
+    self._target_client = None
 
   def __del__(self):
     self.close()
@@ -227,11 +246,13 @@ class CameraView(Widget):
       self._draw_placeholder(rect)
       return
 
+    if self._use_egl:
+      self._observe_displayed_frame()
+
     # Try to get a new buffer without blocking
     buffer = self.client.recv(timeout_ms=0)
     if buffer:
-      self._texture_needs_update = True
-      self.frame = buffer
+      self._accept_frame(buffer, self.client.frame_id)
     elif not self.client.is_connected():
       # ensure we clear the displayed frame when the connection is lost
       self.frame = None
@@ -268,6 +289,27 @@ class CameraView(Widget):
   def _draw_placeholder(self, rect: rl.Rectangle):
     if self._placeholder_color:
       rl.draw_rectangle_rec(rect, self._placeholder_color)
+
+  def _observe_displayed_frame(self) -> None:
+    if self.frame is not None:
+      client_frame_id = getattr(self.client, "frame_id", -1) if hasattr(self, "client") and self.client is not None else -1
+      frame_id = getattr(self.frame, "frame_id", client_frame_id)
+      self._last_frame_id = max(self._last_frame_id, int(frame_id))
+
+  def _accept_frame(self, frame: VisionBuf, packet_frame_id: int) -> bool:
+    content_frame_id = int(getattr(frame, "frame_id", packet_frame_id))
+    if content_frame_id < self._last_frame_id:
+      self._regressive_frame_count += 1
+      if self._regressive_frame_count == 1 or self._regressive_frame_count % 100 == 0:
+        message = f"Dropping regressive {self._name} frame: content={content_frame_id}, packet={packet_frame_id}, "
+        message += f"displayed={self._last_frame_id}, idx={frame.idx}, count={self._regressive_frame_count}"
+        cloudlog.warning(message)
+      return False
+
+    self.frame = frame
+    self._last_frame_id = content_frame_id
+    self._texture_needs_update = True
+    return True
 
   def _render_egl(self, src_rect: rl.Rectangle, dst_rect: rl.Rectangle) -> None:
     """Render using EGL for direct buffer access"""
@@ -329,6 +371,7 @@ class CameraView(Widget):
   def _ensure_connection(self) -> bool:
     if not self.client.is_connected():
       self.frame = None
+      self._last_frame_id = -1
       self.available_streams.clear()
 
       # Throttle connection attempts
@@ -337,6 +380,9 @@ class CameraView(Widget):
         return False
       self.last_connection_attempt = current_time
 
+      # A GL texture can retain the last EGL image after camerad exits. Release
+      # it before connect() frees and replaces the client's imported buffers.
+      self._clear_textures()
       if not self.client.connect(False) or not self.client.num_buffers:
         return False
 
@@ -367,13 +413,15 @@ class CameraView(Widget):
   def _complete_switch(self) -> None:
     """Instantly switch to target stream."""
     cloudlog.debug(f"Switching to {self._target_stream_type}")
-    # Clean up current resources
-    if self.client:
-      del self.client
+    # Delete the GL texture before releasing the old client. Merely destroying
+    # the EGLImage handle leaves its storage alive while a texture sibling exists.
+    self._clear_textures()
 
     # Switch to target
     self.client = self._target_client
     self._stream_type = self._target_stream_type
+    client_frame_id = getattr(self.client, "frame_id", -1) if hasattr(self, "client") and self.client is not None else -1
+    self._last_frame_id = int(getattr(self.frame, "frame_id", client_frame_id)) if self.frame is not None else -1
     self._texture_needs_update = True
 
     # Reset state
@@ -386,11 +434,19 @@ class CameraView(Widget):
 
   def _initialize_textures(self):
     self._clear_textures()
-    if not self._use_egl:
+    if self._use_egl:
+      self._create_egl_texture()
+    else:
       self.texture_y = rl.load_texture_from_image(rl.Image(None, int(self.client.stride),
         int(self.client.height), 1, rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_GRAYSCALE))
       self.texture_uv = rl.load_texture_from_image(rl.Image(None, int(self.client.stride // 2),
         int(self.client.height // 2), 1, rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA))
+
+  def _create_egl_texture(self):
+    # A fresh texture has no EGL image sibling from a previous camera client.
+    temp_image = rl.gen_image_color(1, 1, rl.BLACK)
+    self.egl_texture = rl.load_texture_from_image(temp_image)
+    rl.unload_image(temp_image)
 
   def _clear_textures(self):
     if self.texture_y and self.texture_y.id:
@@ -401,8 +457,13 @@ class CameraView(Widget):
       rl.unload_texture(self.texture_uv)
       self.texture_uv = None
 
-    # Clean up EGL resources
+    # Delete the texture first. eglDestroyImageKHR only destroys the EGLImage
+    # handle; the image storage stays alive while a GL texture sibling exists.
     if self._use_egl:
+      if self.egl_texture and self.egl_texture.id:
+        rl.unload_texture(self.egl_texture)
+      self.egl_texture = None
+
       for data in self.egl_images.values():
         destroy_egl_image(data)
       self.egl_images = {}

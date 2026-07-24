@@ -2,8 +2,10 @@ import json
 import math
 import numpy as np
 
+from opendbc.car.chrysler.values import CAR as CHRYSLER_CAR
 from opendbc.car.gm.values import CAR as GM_CAR
 from opendbc.car.hyundai.values import CAR as HYUNDAI_CAR
+from opendbc.car.subaru.values import CAR as SUBARU_CAR
 from opendbc.car.toyota.values import CAR as TOYOTA_CAR
 from openpilot.common.constants import CV
 from openpilot.starpilot.common.testing_grounds import testing_ground
@@ -72,6 +74,7 @@ BOLT_2017_CARS = (
 BOLT_CARS = BOLT_2022_2023_CARS + BOLT_2018_2021_CARS + BOLT_2017_CARS
 VOLT_STANDARD_CARS = (
   GM_CAR.CHEVROLET_VOLT,
+  GM_CAR.CHEVROLET_VOLT_2019,
   GM_CAR.CHEVROLET_VOLT_ASCM,
   GM_CAR.CHEVROLET_VOLT_CAMERA,
   GM_CAR.CHEVROLET_VOLT_CC,
@@ -110,6 +113,12 @@ ELANTRA_NON_SCC_CARS = (
 KIA_EV6_CARS = (
   HYUNDAI_CAR.KIA_EV6,
 )
+KIA_CARNIVAL_CARS = (
+  HYUNDAI_CAR.KIA_CARNIVAL_2025,
+)
+TUCSON_4TH_GEN_CARS = (
+  HYUNDAI_CAR.HYUNDAI_TUCSON_4TH_GEN,
+)
 KIA_XCEED_CARS = (
   HYUNDAI_CAR.KIA_XCEED_PHEV,
 )
@@ -123,6 +132,22 @@ KIA_FORTE_CARS = (
 )
 PRIUS_CARS = (
   TOYOTA_CAR.TOYOTA_PRIUS,
+)
+
+RAV4_PRIME_CARS = (
+  TOYOTA_CAR.TOYOTA_RAV4_PRIME,
+)
+
+LEXUS_IS_CARS = (
+  TOYOTA_CAR.LEXUS_IS,
+)
+
+SUBARU_IMPREZA_CARS = (
+  SUBARU_CAR.SUBARU_IMPREZA,
+)
+
+RAM_1500_CARS = (
+  CHRYSLER_CAR.RAM_1500_5TH_GEN,
 )
 
 BOLT_2017_LATERAL_TESTING_GROUND_ID = testing_ground.id_3
@@ -328,6 +353,23 @@ KIA_NIRO_PHEV_2022_FRICTION_SPEED_WIDTH = 2.5
 KIA_NIRO_PHEV_2022_FRICTION_CALM_JERK = 0.22
 KIA_NIRO_PHEV_2022_FRICTION_CALM_JERK_WIDTH = 0.06
 KIA_NIRO_PHEV_2022_FRICTION_THRESHOLD_GAIN = 0.12
+
+KIA_CARNIVAL_CENTER_TAPER_MAX = 0.20
+KIA_CARNIVAL_CENTER_TAPER_LAT = 0.20
+KIA_CARNIVAL_CENTER_TAPER_LAT_WIDTH = 0.055
+KIA_CARNIVAL_CENTER_TAPER_SPEED = 3.5
+KIA_CARNIVAL_CENTER_TAPER_SPEED_WIDTH = 1.8
+KIA_CARNIVAL_CENTER_TAPER_SPEED_MAX = 14.5
+KIA_CARNIVAL_CENTER_TAPER_SPEED_MAX_WIDTH = 2.0
+KIA_CARNIVAL_FRICTION_THRESHOLD_GAIN = 0.24
+KIA_CARNIVAL_FRICTION_CENTER_FADE_MAX = 0.34
+
+TUCSON_4TH_GEN_CENTER_TAPER_MAX = 0.44
+TUCSON_4TH_GEN_CENTER_TAPER_LAT = 0.28
+TUCSON_4TH_GEN_CENTER_TAPER_LAT_WIDTH = 0.055
+TUCSON_4TH_GEN_CENTER_TAPER_SPEED_MAX = 14.0
+TUCSON_4TH_GEN_CENTER_TAPER_SPEED_WIDTH = 1.5
+TUCSON_4TH_GEN_FRICTION_THRESHOLD_GAIN = 0.28
 
 KIA_FORTE_BASE_LAT_ACCEL_FACTOR_MULT = 1.05
 KIA_FORTE_FF_REDUCTION_LEFT = 0.05
@@ -602,6 +644,8 @@ IONIQ_6_CURVY_UNWIND_LAT_START = 0.45
 IONIQ_6_CURVY_UNWIND_LAT_END = 3.6
 IONIQ_6_CURVY_UNWIND_LAT_ONSET_WIDTH = 0.14
 IONIQ_6_CURVY_UNWIND_LAT_CUTOFF_WIDTH = 0.55
+IONIQ_6_CURVY_RIGHT_UNWIND_JERK_ONSET = 0.40
+IONIQ_6_CURVY_RIGHT_UNWIND_JERK_WIDTH = 0.22
 IONIQ_6_CURVY_TURN_IN_TRIM_SPEED_MIN = 11.5
 IONIQ_6_CURVY_TURN_IN_TRIM_SPEED_MAX = 20.5
 IONIQ_6_CURVY_TURN_IN_TRIM_SPEED_WIDTH = 1.2
@@ -647,6 +691,17 @@ KIA_EV6_TURN_IN_BOOST_LEFT = 0.62
 KIA_EV6_TURN_IN_BOOST_RIGHT = 0.60
 KIA_EV6_UNWIND_TAPER_LEFT = 0.56
 KIA_EV6_UNWIND_TAPER_RIGHT = 0.54
+KIA_EV6_BASE_UNWIND_TAPER_LEFT = 0.06
+KIA_EV6_BASE_UNWIND_TAPER_RIGHT = 0.05
+KIA_EV6_JWARM_BASE_TURN_IN_BOOST_LEFT = 0.13
+KIA_EV6_JWARM_BASE_TURN_IN_BOOST_RIGHT = 0.15
+KIA_EV6_JWARM_BASE_UNWIND_TAPER_LEFT = 0.17
+KIA_EV6_JWARM_BASE_UNWIND_TAPER_RIGHT = 0.18
+KIA_EV6_JWARM_PHASE_STABILITY_MAX_REDUCTION = 0.55
+KIA_EV6_JWARM_PHASE_STABILITY_SPEED = 10.0
+KIA_EV6_JWARM_PHASE_STABILITY_SPEED_WIDTH = 1.8
+KIA_EV6_JWARM_PHASE_STABILITY_JERK = 0.70
+KIA_EV6_JWARM_PHASE_STABILITY_JERK_WIDTH = 0.18
 KIA_EV6_FRICTION_MULT = 1.01
 KIA_EV6_FRICTION_LAT_RISE = 0.18
 KIA_EV6_FRICTION_JERK_RISE = 0.22
@@ -704,6 +759,41 @@ PRIUS_CENTER_TAPER_LAT = 0.16
 PRIUS_CENTER_TAPER_LAT_WIDTH = 0.035
 PRIUS_CENTER_TAPER_SPEED = 18.0
 PRIUS_CENTER_TAPER_SPEED_WIDTH = 2.2
+
+RAV4_PRIME_PHASE_SCALE = 0.12
+RAV4_PRIME_UNWIND_FF_REDUCTION_LEFT = 0.15
+RAV4_PRIME_UNWIND_FF_REDUCTION_RIGHT = 0.13
+RAV4_PRIME_UNWIND_FRICTION_REDUCTION_LEFT = 0.16
+RAV4_PRIME_UNWIND_FRICTION_REDUCTION_RIGHT = 0.14
+RAV4_PRIME_UNWIND_OUTPUT_REDUCTION_LEFT = 0.12
+RAV4_PRIME_UNWIND_OUTPUT_REDUCTION_RIGHT = 0.14
+RAV4_PRIME_FRICTION_THRESHOLD_GAIN = 0.24
+RAV4_PRIME_FRICTION_CENTER_LAT = 0.30
+RAV4_PRIME_FRICTION_CENTER_LAT_WIDTH = 0.07
+RAV4_PRIME_SPEED_ONSET = 5.0
+RAV4_PRIME_SPEED_ONSET_WIDTH = 1.5
+RAV4_PRIME_SPEED_MAX = 20.0
+RAV4_PRIME_SPEED_MAX_WIDTH = 2.5
+
+LEXUS_IS_PHASE_SCALE = 0.10
+LEXUS_IS_UNWIND_FF_REDUCTION_LEFT = 0.06
+LEXUS_IS_UNWIND_FF_REDUCTION_RIGHT = 0.12
+LEXUS_IS_UNWIND_LAT_ONSET = 0.18
+LEXUS_IS_UNWIND_LAT_WIDTH = 0.07
+LEXUS_IS_UNWIND_SPEED_ONSET = 9.0
+LEXUS_IS_UNWIND_SPEED_WIDTH = 2.0
+
+SUBARU_IMPREZA_PID_TAPER_START_DEG = 0.75
+SUBARU_IMPREZA_PID_TAPER_FULL_DEG = 4.0
+SUBARU_IMPREZA_PID_TAPER_MIN = 0.58
+
+RAM_1500_TRANSITION_TAPER_MAX = 0.34
+RAM_1500_TRANSITION_SPEED_ONSET = 10.0
+RAM_1500_TRANSITION_SPEED_FULL = 15.0
+RAM_1500_TRANSITION_JERK_ONSET = 0.35
+RAM_1500_TRANSITION_JERK_FULL = 1.10
+RAM_1500_TRANSITION_LAT_FADE_START = 0.65
+RAM_1500_TRANSITION_LAT_FADE_END = 1.85
 
 TRAILER_LOAD_FULL_ASSIST_KG = 15000.0 * CV.LB_TO_KG
 TRAILER_LATERAL_MIN_SPEED = 15.0 * CV.MPH_TO_MS
@@ -952,6 +1042,82 @@ def get_prius_center_taper_scale(desired_lateral_accel: float, v_ego: float) -> 
   center_weight = _prius_sigmoid((PRIUS_CENTER_TAPER_LAT - abs(desired_lateral_accel)) / PRIUS_CENTER_TAPER_LAT_WIDTH)
   reduction = _flm_vehicle_knob("toyota_prius.center_taper_max", PRIUS_CENTER_TAPER_MAX) * speed_weight * center_weight
   return 1.0 - reduction
+
+
+def _rav4_prime_side_value(desired_lateral_accel: float, left_value: float, right_value: float) -> float:
+  return left_value if desired_lateral_accel >= 0.0 else right_value
+
+
+def _rav4_prime_speed_weight(v_ego: float) -> float:
+  onset = _sigmoid((v_ego - RAV4_PRIME_SPEED_ONSET) / RAV4_PRIME_SPEED_ONSET_WIDTH)
+  cutoff = _sigmoid((RAV4_PRIME_SPEED_MAX - v_ego) / RAV4_PRIME_SPEED_MAX_WIDTH)
+  return onset * cutoff
+
+
+def _rav4_prime_unwind_weight(desired_lateral_accel: float, desired_lateral_jerk: float) -> float:
+  phase = math.tanh((desired_lateral_accel * desired_lateral_jerk) / RAV4_PRIME_PHASE_SCALE)
+  lat_weight = _sigmoid((abs(desired_lateral_accel) - 0.20) / 0.07)
+  return max(-phase, 0.0) * lat_weight
+
+
+def get_rav4_prime_ff_scale(desired_lateral_accel: float, desired_lateral_jerk: float, v_ego: float) -> float:
+  reduction = _rav4_prime_side_value(desired_lateral_accel,
+                                     RAV4_PRIME_UNWIND_FF_REDUCTION_LEFT,
+                                     RAV4_PRIME_UNWIND_FF_REDUCTION_RIGHT)
+  return 1.0 - (reduction * _rav4_prime_unwind_weight(desired_lateral_accel, desired_lateral_jerk) *
+                _rav4_prime_speed_weight(v_ego))
+
+
+def get_rav4_prime_friction_threshold(v_ego: float, desired_lateral_accel: float = 0.0,
+                                      desired_lateral_jerk: float = 0.0) -> float:
+  del desired_lateral_jerk
+  center_weight = _sigmoid((RAV4_PRIME_FRICTION_CENTER_LAT - abs(desired_lateral_accel)) /
+                           RAV4_PRIME_FRICTION_CENTER_LAT_WIDTH)
+  scale = 1.0 + (RAV4_PRIME_FRICTION_THRESHOLD_GAIN * center_weight * _rav4_prime_speed_weight(v_ego))
+  return get_standard_friction_threshold(v_ego) * scale
+
+
+def get_rav4_prime_friction_scale(v_ego: float, desired_lateral_accel: float, desired_lateral_jerk: float) -> float:
+  reduction = _rav4_prime_side_value(desired_lateral_accel,
+                                     RAV4_PRIME_UNWIND_FRICTION_REDUCTION_LEFT,
+                                     RAV4_PRIME_UNWIND_FRICTION_REDUCTION_RIGHT)
+  return 1.0 - (reduction * _rav4_prime_unwind_weight(desired_lateral_accel, desired_lateral_jerk) *
+                _rav4_prime_speed_weight(v_ego))
+
+
+def get_rav4_prime_output_taper_scale(desired_lateral_accel: float, desired_lateral_jerk: float, v_ego: float) -> float:
+  reduction = _rav4_prime_side_value(desired_lateral_accel,
+                                     RAV4_PRIME_UNWIND_OUTPUT_REDUCTION_LEFT,
+                                     RAV4_PRIME_UNWIND_OUTPUT_REDUCTION_RIGHT)
+  return 1.0 - (reduction * _rav4_prime_unwind_weight(desired_lateral_accel, desired_lateral_jerk) *
+                _rav4_prime_speed_weight(v_ego))
+
+
+def get_lexus_is_ff_scale(desired_lateral_accel: float, desired_lateral_jerk: float, v_ego: float) -> float:
+  if desired_lateral_accel == 0.0:
+    return 1.0
+
+  phase = math.tanh((desired_lateral_accel * desired_lateral_jerk) / LEXUS_IS_PHASE_SCALE)
+  unwind_weight = max(-phase, 0.0)
+  lat_weight = _sigmoid((abs(desired_lateral_accel) - LEXUS_IS_UNWIND_LAT_ONSET) / LEXUS_IS_UNWIND_LAT_WIDTH)
+  speed_weight = _sigmoid((v_ego - LEXUS_IS_UNWIND_SPEED_ONSET) / LEXUS_IS_UNWIND_SPEED_WIDTH)
+  reduction = LEXUS_IS_UNWIND_FF_REDUCTION_LEFT if desired_lateral_accel >= 0.0 else LEXUS_IS_UNWIND_FF_REDUCTION_RIGHT
+  return 1.0 - (reduction * unwind_weight * lat_weight * speed_weight)
+
+
+def get_subaru_impreza_pid_output_scale(angle_error_deg: float) -> float:
+  error_weight = min(max((abs(angle_error_deg) - SUBARU_IMPREZA_PID_TAPER_START_DEG) /
+                         (SUBARU_IMPREZA_PID_TAPER_FULL_DEG - SUBARU_IMPREZA_PID_TAPER_START_DEG), 0.0), 1.0)
+  return 1.0 - ((1.0 - SUBARU_IMPREZA_PID_TAPER_MIN) * error_weight)
+
+
+def get_ram_1500_transition_output_scale(desired_lateral_accel: float, desired_lateral_jerk: float, v_ego: float) -> float:
+  speed_weight = float(np.interp(v_ego, [RAM_1500_TRANSITION_SPEED_ONSET, RAM_1500_TRANSITION_SPEED_FULL], [0.0, 1.0]))
+  jerk_weight = float(np.interp(abs(desired_lateral_jerk),
+                                [RAM_1500_TRANSITION_JERK_ONSET, RAM_1500_TRANSITION_JERK_FULL], [0.0, 1.0]))
+  lat_weight = 1.0 - float(np.interp(abs(desired_lateral_accel),
+                                     [RAM_1500_TRANSITION_LAT_FADE_START, RAM_1500_TRANSITION_LAT_FADE_END], [0.0, 1.0]))
+  return 1.0 - (RAM_1500_TRANSITION_TAPER_MAX * speed_weight * jerk_weight * lat_weight)
 
 
 def civic_bosch_modified_lateral_testing_ground_active() -> bool:
@@ -1615,6 +1781,48 @@ def get_kia_niro_phev_2022_friction_threshold(v_ego: float, desired_lateral_acce
   return base_threshold * min(max(threshold_scale, 1.0), 1.18)
 
 
+def _kia_carnival_center_weights(desired_lateral_accel: float, v_ego: float) -> tuple[float, float]:
+  speed_onset = _sigmoid((v_ego - KIA_CARNIVAL_CENTER_TAPER_SPEED) / KIA_CARNIVAL_CENTER_TAPER_SPEED_WIDTH)
+  speed_cutoff = _sigmoid((KIA_CARNIVAL_CENTER_TAPER_SPEED_MAX - v_ego) / KIA_CARNIVAL_CENTER_TAPER_SPEED_MAX_WIDTH)
+  speed_weight = speed_onset * speed_cutoff
+  center_weight = _sigmoid((KIA_CARNIVAL_CENTER_TAPER_LAT - abs(desired_lateral_accel)) / KIA_CARNIVAL_CENTER_TAPER_LAT_WIDTH)
+  return speed_weight, center_weight
+
+
+def get_kia_carnival_center_taper_scale(desired_lateral_accel: float, v_ego: float) -> float:
+  speed_weight, center_weight = _kia_carnival_center_weights(desired_lateral_accel, v_ego)
+  return 1.0 - (KIA_CARNIVAL_CENTER_TAPER_MAX * speed_weight * center_weight)
+
+
+def get_kia_carnival_friction_threshold(v_ego: float, desired_lateral_accel: float = 0.0, desired_lateral_jerk: float = 0.0) -> float:
+  del desired_lateral_jerk
+  speed_weight, center_weight = _kia_carnival_center_weights(desired_lateral_accel, v_ego)
+  return get_hkg_canfd_base_friction_threshold(v_ego) * (1.0 + KIA_CARNIVAL_FRICTION_THRESHOLD_GAIN * speed_weight * center_weight)
+
+
+def get_kia_carnival_friction_center_fade_scale(desired_lateral_accel: float, v_ego: float) -> float:
+  speed_weight, center_weight = _kia_carnival_center_weights(desired_lateral_accel, v_ego)
+  return 1.0 - (KIA_CARNIVAL_FRICTION_CENTER_FADE_MAX * speed_weight * center_weight)
+
+
+def _tucson_4th_gen_center_weights(desired_lateral_accel: float, v_ego: float) -> tuple[float, float]:
+  speed_weight = _sigmoid((TUCSON_4TH_GEN_CENTER_TAPER_SPEED_MAX - v_ego) / TUCSON_4TH_GEN_CENTER_TAPER_SPEED_WIDTH)
+  center_weight = _sigmoid((TUCSON_4TH_GEN_CENTER_TAPER_LAT - abs(desired_lateral_accel)) / TUCSON_4TH_GEN_CENTER_TAPER_LAT_WIDTH)
+  return speed_weight, center_weight
+
+
+def get_tucson_4th_gen_center_taper_scale(desired_lateral_accel: float, v_ego: float) -> float:
+  speed_weight, center_weight = _tucson_4th_gen_center_weights(desired_lateral_accel, v_ego)
+  return 1.0 - (TUCSON_4TH_GEN_CENTER_TAPER_MAX * speed_weight * center_weight)
+
+
+def get_tucson_4th_gen_friction_threshold(v_ego: float, desired_lateral_accel: float = 0.0,
+                                          desired_lateral_jerk: float = 0.0) -> float:
+  del desired_lateral_jerk
+  speed_weight, center_weight = _tucson_4th_gen_center_weights(desired_lateral_accel, v_ego)
+  return get_hkg_canfd_base_friction_threshold(v_ego) * (1.0 + TUCSON_4TH_GEN_FRICTION_THRESHOLD_GAIN * speed_weight * center_weight)
+
+
 def _kia_forte_sigmoid(x: float) -> float:
   return _sigmoid(x)
 
@@ -2151,12 +2359,16 @@ def get_ioniq_6_directional_taper_scale(desired_lateral_accel: float, desired_la
   curvy_unwind_weight = 0.0
   curvy_unwind_floor_relief = 0.0
   if v_ego is not None:
+    curvy_unwind_phase_weight = unwind_weight
+    if desired_lateral_accel < 0.0:
+      curvy_unwind_phase_weight = max(-phase, 0.0) * _ioniq_6_sigmoid(
+        (abs(desired_lateral_jerk) - IONIQ_6_CURVY_RIGHT_UNWIND_JERK_ONSET) / IONIQ_6_CURVY_RIGHT_UNWIND_JERK_WIDTH)
     curvy_unwind_speed_weight = _ioniq_6_curvy_speed_weight(v_ego)
     curvy_unwind_lat_onset = _ioniq_6_sigmoid((abs_lateral_accel - IONIQ_6_CURVY_UNWIND_LAT_START) /
                                               IONIQ_6_CURVY_UNWIND_LAT_ONSET_WIDTH)
     curvy_unwind_lat_cutoff = _ioniq_6_sigmoid((IONIQ_6_CURVY_UNWIND_LAT_END - abs_lateral_accel) /
                                                IONIQ_6_CURVY_UNWIND_LAT_CUTOFF_WIDTH)
-    curvy_unwind_weight = curvy_unwind_speed_weight * curvy_unwind_lat_onset * curvy_unwind_lat_cutoff * unwind_weight
+    curvy_unwind_weight = curvy_unwind_speed_weight * curvy_unwind_lat_onset * curvy_unwind_lat_cutoff * curvy_unwind_phase_weight
     curvy_unwind_floor_relief = (_ioniq_6_side_value(desired_lateral_accel,
                                                      _flm_vehicle_knob("hyundai_ioniq_6.curvy_unwind_floor_relief_left", IONIQ_6_CURVY_UNWIND_FLOOR_RELIEF_LEFT),
                                                      _flm_vehicle_knob("hyundai_ioniq_6.curvy_unwind_floor_relief_right", IONIQ_6_CURVY_UNWIND_FLOOR_RELIEF_RIGHT)) *
@@ -2270,6 +2482,16 @@ def _kia_ev6_transition_envelope(v_ego: float, desired_lateral_accel: float, des
   return _kia_ev6_low_speed_factor(v_ego) * lat_factor * jerk_factor
 
 
+def get_kia_ev6_jwarm_phase_confidence(v_ego: float, desired_lateral_jerk: float) -> float:
+  low_speed_weight = _kia_ev6_sigmoid(
+    (KIA_EV6_JWARM_PHASE_STABILITY_SPEED - v_ego) / KIA_EV6_JWARM_PHASE_STABILITY_SPEED_WIDTH
+  )
+  abrupt_transition_weight = _kia_ev6_sigmoid(
+    (abs(desired_lateral_jerk) - KIA_EV6_JWARM_PHASE_STABILITY_JERK) / KIA_EV6_JWARM_PHASE_STABILITY_JERK_WIDTH
+  )
+  return 1.0 - (KIA_EV6_JWARM_PHASE_STABILITY_MAX_REDUCTION * low_speed_weight * abrupt_transition_weight)
+
+
 def get_kia_ev6_ff_scale(desired_lateral_accel: float, desired_lateral_jerk: float, v_ego: float) -> float:
   if desired_lateral_accel == 0.0:
     return 1.0
@@ -2299,7 +2521,25 @@ def get_kia_ev6_ff_scale(desired_lateral_accel: float, desired_lateral_jerk: flo
                          _flm_vehicle_knob("hyundai_kia_ev6.unwind_taper_right", KIA_EV6_UNWIND_TAPER_RIGHT),
                        ) *
                          unwind_weight * (0.35 + 0.65 * low_speed_factor))
-  return 1.0 + (extra_scale * turn_in_boost * max(unwind_taper, 0.0))
+  jwarm_tune = kia_ev6_lateral_testing_ground_active()
+  jwarm_phase_confidence = get_kia_ev6_jwarm_phase_confidence(v_ego, desired_lateral_jerk) if jwarm_tune else 0.0
+  base_turn_in_boost = 1.0 + ((_kia_ev6_side_value(
+                                desired_lateral_accel,
+                                KIA_EV6_JWARM_BASE_TURN_IN_BOOST_LEFT,
+                                KIA_EV6_JWARM_BASE_TURN_IN_BOOST_RIGHT,
+                              ) if jwarm_tune else 0.0) *
+                                jwarm_phase_confidence * turn_in_weight * onset * cutoff)
+  base_unwind_taper_left = _flm_vehicle_knob("hyundai_kia_ev6.base_unwind_taper_left", KIA_EV6_BASE_UNWIND_TAPER_LEFT)
+  base_unwind_taper_right = _flm_vehicle_knob("hyundai_kia_ev6.base_unwind_taper_right", KIA_EV6_BASE_UNWIND_TAPER_RIGHT)
+  if jwarm_tune:
+    base_unwind_taper_left += (KIA_EV6_JWARM_BASE_UNWIND_TAPER_LEFT - base_unwind_taper_left) * jwarm_phase_confidence
+    base_unwind_taper_right += (KIA_EV6_JWARM_BASE_UNWIND_TAPER_RIGHT - base_unwind_taper_right) * jwarm_phase_confidence
+  base_unwind_taper = 1.0 - (_kia_ev6_side_value(
+                              desired_lateral_accel,
+                              base_unwind_taper_left,
+                              base_unwind_taper_right,
+                            ) * unwind_weight * onset * cutoff)
+  return (base_unwind_taper * base_turn_in_boost) + (extra_scale * turn_in_boost * max(unwind_taper, 0.0))
 
 
 def get_kia_ev6_friction_threshold(v_ego: float, desired_lateral_accel: float = 0.0, desired_lateral_jerk: float = 0.0) -> float:
@@ -2673,6 +2913,8 @@ FLM_SUPPORTED_VEHICLE_KNOBS = {
   "hyundai_kia_ev6.turn_in_boost_right": {"profile": "hyundai_kia_ev6", "min": 0.0, "max": 1.20, "precision": 0.001, "deltaType": "absolute", "safeLiveTrial": True, "defaultValue": KIA_EV6_TURN_IN_BOOST_RIGHT},
   "hyundai_kia_ev6.unwind_taper_left": {"profile": "hyundai_kia_ev6", "min": 0.0, "max": 1.20, "precision": 0.001, "deltaType": "absolute", "safeLiveTrial": True, "defaultValue": KIA_EV6_UNWIND_TAPER_LEFT},
   "hyundai_kia_ev6.unwind_taper_right": {"profile": "hyundai_kia_ev6", "min": 0.0, "max": 1.20, "precision": 0.001, "deltaType": "absolute", "safeLiveTrial": True, "defaultValue": KIA_EV6_UNWIND_TAPER_RIGHT},
+  "hyundai_kia_ev6.base_unwind_taper_left": {"profile": "hyundai_kia_ev6", "min": 0.0, "max": 0.20, "precision": 0.001, "deltaType": "absolute", "safeLiveTrial": True, "defaultValue": KIA_EV6_BASE_UNWIND_TAPER_LEFT},
+  "hyundai_kia_ev6.base_unwind_taper_right": {"profile": "hyundai_kia_ev6", "min": 0.0, "max": 0.20, "precision": 0.001, "deltaType": "absolute", "safeLiveTrial": True, "defaultValue": KIA_EV6_BASE_UNWIND_TAPER_RIGHT},
   "hyundai_kia_ev6.center_taper_max": {"profile": "hyundai_kia_ev6", "min": 0.0, "max": 0.20, "precision": 0.001, "deltaType": "absolute", "safeLiveTrial": True, "defaultValue": KIA_EV6_CENTER_TAPER_MAX},
   "hyundai_kia_ev6.turn_in_threshold_reduction_left": {"profile": "hyundai_kia_ev6", "min": 0.0, "max": 0.40, "precision": 0.001, "deltaType": "absolute", "safeLiveTrial": True, "defaultValue": KIA_EV6_TURN_IN_THRESHOLD_REDUCTION_LEFT},
   "hyundai_kia_ev6.turn_in_threshold_reduction_right": {"profile": "hyundai_kia_ev6", "min": 0.0, "max": 0.40, "precision": 0.001, "deltaType": "absolute", "safeLiveTrial": True, "defaultValue": KIA_EV6_TURN_IN_THRESHOLD_REDUCTION_RIGHT},
@@ -2701,9 +2943,10 @@ def _add_flm_full_surface_profile_knobs(profile_key: str, defaults: dict[str, fl
     symbol = _flm_profile_symbol(profile_key, suffix)
     if symbol in FLM_SUPPORTED_VEHICLE_KNOBS:
       continue
+    minimum = -0.40 if profile_key == FLM_UNIVERSAL_PROFILE_KEY and suffix in ("ff_gain_left", "ff_gain_right") else meta["min"]
     FLM_SUPPORTED_VEHICLE_KNOBS[symbol] = {
       "profile": profile_key,
-      "min": meta["min"],
+      "min": minimum,
       "max": meta["max"],
       "precision": meta["precision"],
       "deltaType": meta["deltaType"],
@@ -2745,14 +2988,14 @@ def get_flm_capabilities(car_fingerprint, brand: str = "", hyundai_canfd: bool =
 
   dedicated_friction = car_fingerprint in (
     set(BOLT_2022_2023_CARS) | set(BOLT_2018_2021_CARS) | set(VOLT_STANDARD_CARS) | set(PALISADE_CARS) |
-    set(PRIUS_CARS) | set(IONIQ_5_CARS) | set(IONIQ_6_CARS) | set(KIA_EV6_CARS) | set(KIA_FORTE_CARS) |
-    set(KIA_NIRO_PHEV_2022_CARS) | set(GENESIS_G90_CARS)
+    set(PRIUS_CARS) | set(RAV4_PRIME_CARS) | set(IONIQ_5_CARS) | set(IONIQ_6_CARS) | set(KIA_EV6_CARS) | set(KIA_FORTE_CARS) |
+    set(KIA_NIRO_PHEV_2022_CARS) | set(KIA_CARNIVAL_CARS) | set(GENESIS_G90_CARS)
   )
   dedicated_center_taper = car_fingerprint in (
     set(PRIUS_CARS) | set(BOLT_CARS) | set(VOLT_STANDARD_CARS) | set(IONIQ_5_CARS) |
     set(IONIQ_EV_OLD_CARS) | set(IONIQ_6_CARS) | set(SONATA_CARS) | set(SONATA_HYBRID_CARS) |
     set(KIA_XCEED_CARS) | set(KIA_NIRO_PHEV_2022_CARS) | set(KIA_FORTE_CARS) | set(KIA_EV6_CARS) |
-    set(SILVERADO_CARS)
+    set(KIA_CARNIVAL_CARS) | set(TUCSON_4TH_GEN_CARS) | set(SILVERADO_CARS)
   )
   rich_knobs = [name for name, meta in FLM_SUPPORTED_VEHICLE_KNOBS.items() if meta["profile"] == profile_key]
   return {

@@ -44,6 +44,18 @@ FLM_STATUS_MAX_AGE_SECONDS = 3600.0
 FLM_ANALYZER_ROUTE_LIMIT = 8
 FLM_ANALYZER_PROCESS = None
 FLM_ANALYZER_LOCK = threading.Lock()
+FLM_PROGRESS_FILENAME = "progress.json"
+FLM_ONROAD_POLL_INTERVAL_SECONDS = 0.25
+FLM_SEGMENT_TIMEOUT_SECONDS = 180.0
+
+
+class FLMAnalysisCancelled(RuntimeError):
+  pass
+
+
+class FLMSegmentTimeout(RuntimeError):
+  pass
+
 
 TRIAL_PARAM_SPECS = {
   "AdvancedLateralTune": "bool",
@@ -126,7 +138,7 @@ FLM_DRIVER_OVERRIDE_PRE_BUFFER_S = 0.35
 FLM_DRIVER_OVERRIDE_POST_BUFFER_S = 1.0
 
 
-@dataclass
+@dataclass(slots=True)
 class RouteSource:
   route: str
   footage_path: str
@@ -136,7 +148,7 @@ class RouteSource:
   used_qlog: bool
 
 
-@dataclass
+@dataclass(slots=True)
 class FLMSample:
   route: str
   segment: int
@@ -277,6 +289,56 @@ def _write_json(path: Path, payload) -> None:
   tmp_path.replace(path)
 
 
+def _progress_path() -> Path:
+  return get_flm_workspace_root() / FLM_PROGRESS_FILENAME
+
+
+def _record_cleanup_progress(car_fingerprint: str, source_report_id: str = "") -> None:
+  fingerprint = str(car_fingerprint or "").strip()
+  if not fingerprint:
+    return
+
+  progress = _read_json(_progress_path(), {})
+  if not isinstance(progress, dict):
+    progress = {}
+  vehicles = progress.get("vehicles", {})
+  if not isinstance(vehicles, dict):
+    vehicles = {}
+  vehicles[fingerprint] = {
+    "minimumPathKey": "cleanup_pass",
+    "sourceReportId": str(source_report_id or ""),
+    "updatedAt": time.time(),
+  }
+  _write_json(_progress_path(), {"version": 1, "vehicles": vehicles})
+
+
+def _cleanup_progress_locked(car_fingerprint: str) -> bool:
+  fingerprint = str(car_fingerprint or "").strip()
+  if not fingerprint:
+    return False
+
+  progress = _read_json(_progress_path(), {})
+  vehicle_progress = progress.get("vehicles", {}).get(fingerprint, {}) if isinstance(progress, dict) else {}
+  if isinstance(vehicle_progress, dict) and vehicle_progress.get("minimumPathKey") == "cleanup_pass":
+    return True
+
+  # Bootstrap workspaces created before progression tracking was added.
+  for path in _workspace_paths()["reports"].glob("*.json"):
+    report = _read_json(path, {})
+    if not isinstance(report, dict):
+      continue
+    car_info = report.get("car", {})
+    if (
+      isinstance(car_info, dict)
+      and str(car_info.get("carFingerprint", "")) == fingerprint
+      and car_info.get("controlPath") == "torque"
+      and report.get("primaryPathKey") == "cleanup_pass"
+    ):
+      _record_cleanup_progress(fingerprint, str(report.get("reportId", path.stem)))
+      return True
+  return False
+
+
 def _worker_env(repo_root: Path) -> dict[str, str]:
   env = os.environ.copy()
   pythonpath = [
@@ -316,6 +378,12 @@ def clear_flm_status() -> None:
     pass
 
 
+def _require_flm_offroad(params: Params | None = None) -> None:
+  params = params or Params(return_defaults=True)
+  if params.get_bool("IsOnroad"):
+    raise FLMAnalysisCancelled("FLM analysis stopped because the vehicle went onroad.")
+
+
 def flm_analyzer_running() -> bool:
   process = FLM_ANALYZER_PROCESS
   if process is not None and process.poll() is None:
@@ -341,7 +409,42 @@ def flm_analyzer_running() -> bool:
   return True
 
 
-def stop_flm_background_analysis() -> bool:
+def _terminate_flm_process(process) -> None:
+  try:
+    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+  except (AttributeError, ProcessLookupError, PermissionError, OSError):
+    try:
+      process.terminate()
+    except (AttributeError, ProcessLookupError, OSError):
+      pass
+
+  try:
+    process.wait(timeout=2.0)
+  except subprocess.TimeoutExpired:
+    try:
+      os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (AttributeError, ProcessLookupError, PermissionError, OSError):
+      try:
+        process.kill()
+      except (AttributeError, ProcessLookupError, OSError):
+        pass
+    try:
+      process.wait(timeout=1.0)
+    except (AttributeError, subprocess.TimeoutExpired):
+      pass
+
+
+def _write_flm_cancelled_status(status: dict[str, Any], reason: str) -> None:
+  _write_flm_status({
+    **status,
+    "pid": 0,
+    "running": False,
+    "state": "cancelled_onroad" if reason == "onroad" else "cancelled",
+    "error": "FLM analysis stopped because the vehicle went onroad." if reason == "onroad" else "",
+  })
+
+
+def stop_flm_background_analysis(reason: str = "") -> bool:
   global FLM_ANALYZER_PROCESS
 
   with FLM_ANALYZER_LOCK:
@@ -350,36 +453,114 @@ def stop_flm_background_analysis() -> bool:
     pid = int(status.get("pid") or 0)
 
     if process is not None and process.poll() is None:
-      process.terminate()
-      try:
-        process.wait(timeout=2.0)
-      except subprocess.TimeoutExpired:
-        process.kill()
+      _terminate_flm_process(process)
       FLM_ANALYZER_PROCESS = None
-      clear_flm_status()
+      if reason:
+        _write_flm_cancelled_status(status, reason)
+      else:
+        clear_flm_status()
       return True
 
     if pid > 0:
       try:
-        os.kill(pid, signal.SIGTERM)
+        os.killpg(pid, signal.SIGTERM)
       except ProcessLookupError:
         pass
+      except PermissionError:
+        try:
+          os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+          return False
       except OSError:
-        return False
-      clear_flm_status()
+        try:
+          os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+          return False
+      if reason:
+        _write_flm_cancelled_status(status, reason)
+      else:
+        clear_flm_status()
       return True
 
   return False
 
 
-def start_flm_background_analysis(route_names: list[str], footage_paths: list[str]) -> bool:
+def _watch_flm_process_for_onroad(process) -> None:
+  params = Params(return_defaults=True)
+  while process.poll() is None:
+    if params.get_bool("IsOnroad"):
+      stop_flm_background_analysis(reason="onroad")
+      return
+    time.sleep(FLM_ONROAD_POLL_INTERVAL_SECONDS)
+
+
+def _watch_flm_worker_for_onroad() -> None:
+  params = Params(return_defaults=True)
+  while True:
+    if params.get_bool("IsOnroad"):
+      _write_flm_cancelled_status(read_flm_status(), "onroad")
+      # Workers are launched as process-group leaders. Terminate the entire group
+      # so any log decompression helpers cannot survive the onroad transition.
+      if os.getpgrp() == os.getpid():
+        try:
+          os.killpg(os.getpgrp(), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+          pass
+      os._exit(0)
+    time.sleep(FLM_ONROAD_POLL_INTERVAL_SECONDS)
+
+
+def cancel_flm_if_onroad() -> bool:
+  if not Params(return_defaults=True).get_bool("IsOnroad"):
+    return False
+  if not flm_analyzer_running():
+    return False
+  return stop_flm_background_analysis(reason="onroad")
+
+
+def _optional_segment_number(value: Any) -> int | None:
+  if value is None or str(value).strip() == "":
+    return None
+  number = int(value)
+  if number < 0:
+    raise ValueError("Segment numbers cannot be negative.")
+  return number
+
+
+def normalize_segment_ranges(route_names: list[str], segment_ranges: Any) -> dict[str, dict[str, int | None]]:
+  if not isinstance(segment_ranges, dict):
+    return {}
+
+  normalized: dict[str, dict[str, int | None]] = {}
+  valid_routes = set(route_names)
+  for route, raw_range in segment_ranges.items():
+    route_name = str(route).strip()
+    if route_name not in valid_routes or not isinstance(raw_range, dict):
+      continue
+    start = _optional_segment_number(raw_range.get("start"))
+    end = _optional_segment_number(raw_range.get("end"))
+    if start is not None and end is not None and start > end:
+      raise ValueError(f"{route_name}: the first segment cannot be after the last segment.")
+    if start is not None or end is not None:
+      normalized[route_name] = {"start": start, "end": end}
+  return normalized
+
+
+def start_flm_background_analysis(route_names: list[str], footage_paths: list[str],
+                                  segment_ranges: dict[str, dict[str, int | None]] | None = None) -> bool:
   global FLM_ANALYZER_PROCESS
 
   route_names = [str(route) for route in route_names if str(route).strip()]
   if not route_names:
     return False
+  segment_ranges = normalize_segment_ranges(route_names, segment_ranges)
+  try:
+    _require_flm_offroad()
+  except FLMAnalysisCancelled:
+    return False
 
   ensure_flm_workspace()
+  process_to_watch = None
   with FLM_ANALYZER_LOCK:
     if flm_analyzer_running():
       return True
@@ -395,6 +576,11 @@ def start_flm_background_analysis(route_names: list[str], footage_paths: list[st
       json.dumps({
         "routes": route_names[:FLM_ANALYZER_ROUTE_LIMIT],
         "footagePaths": [str(path) for path in footage_paths],
+        "segmentRanges": {
+          route: segment_range
+          for route, segment_range in segment_ranges.items()
+          if route in route_names[:FLM_ANALYZER_ROUTE_LIMIT]
+        },
       }),
     ]
     log_file = None
@@ -408,12 +594,14 @@ def start_flm_background_analysis(route_names: list[str], footage_paths: list[st
         stderr=log_file,
         start_new_session=True,
       )
+      process_to_watch = FLM_ANALYZER_PROCESS
       _write_flm_status({
         "pid": FLM_ANALYZER_PROCESS.pid,
         "startedAt": time.time(),
         "running": True,
         "state": "queued",
         "routes": route_names[:FLM_ANALYZER_ROUTE_LIMIT],
+        "segmentRanges": segment_ranges,
         "progress": 0,
         "total": len(route_names[:FLM_ANALYZER_ROUTE_LIMIT]),
       })
@@ -423,6 +611,9 @@ def start_flm_background_analysis(route_names: list[str], footage_paths: list[st
     finally:
       if log_file is not None:
         log_file.close()
+
+  if process_to_watch is not None:
+    threading.Thread(target=_watch_flm_process_for_onroad, args=(process_to_watch,), daemon=True).start()
 
   return flm_analyzer_running()
 
@@ -434,16 +625,26 @@ def _parse_segment_num(segment_name: str) -> int:
     return 0
 
 
-def resolve_route_sources(route_names: list[str], footage_paths: list[str]) -> tuple[list[RouteSource], list[str]]:
+def resolve_route_sources(route_names: list[str], footage_paths: list[str],
+                          segment_ranges: dict[str, dict[str, int | None]] | None = None) -> tuple[list[RouteSource], list[str]]:
   sources: list[RouteSource] = []
   warnings: list[str] = []
+  segment_ranges = normalize_segment_ranges(route_names, segment_ranges)
   for route in route_names:
     route_added = False
+    segment_range = segment_ranges.get(route, {})
+    segment_start = segment_range.get("start")
+    segment_end = segment_range.get("end")
     for footage_path in footage_paths:
       segments = utilities.get_segments_in_route(route, footage_path)
       if not segments:
         continue
       for segment in segments:
+        segment_num = _parse_segment_num(segment)
+        if segment_start is not None and segment_num < segment_start:
+          continue
+        if segment_end is not None and segment_num > segment_end:
+          continue
         segment_path = Path(footage_path) / segment
         rlog_path = None
         qlog_path = None
@@ -466,7 +667,7 @@ def resolve_route_sources(route_names: list[str], footage_paths: list[str]) -> t
           route=route,
           footage_path=str(footage_path),
           segment=segment,
-          segment_num=_parse_segment_num(segment),
+          segment_num=segment_num,
           log_path=str(log_path),
           used_qlog=rlog_path is None,
         ))
@@ -474,7 +675,12 @@ def resolve_route_sources(route_names: list[str], footage_paths: list[str]) -> t
       if route_added:
         break
     if not route_added:
-      warnings.append(f"{route} could not be resolved to a local route with logs.")
+      if segment_range:
+        start_label = segment_start if segment_start is not None else "first"
+        end_label = segment_end if segment_end is not None else "last"
+        warnings.append(f"{route} had no local logs in the selected segment range {start_label}-{end_label}.")
+      else:
+        warnings.append(f"{route} could not be resolved to a local route with logs.")
   sources.sort(key=lambda source: (source.route, source.segment_num))
   return sources, warnings
 
@@ -659,15 +865,79 @@ def _build_plot_svg(plot_data: dict[str, Any]) -> str:
   )
 
 
-def _segment_samples(segment_source: RouteSource) -> tuple[list[FLMSample], car.CarParams | None, dict[str, str]]:
+def _decode_init_param(init, key: str) -> str:
+  params = getattr(init, "params", None)
+  if isinstance(params, dict):
+    value = params.get(key, b"")
+  else:
+    value = next((entry.value for entry in getattr(params, "entries", []) if entry.key == key), b"")
+
+  try:
+    return bytes(value).decode("utf-8", errors="replace")
+  except (TypeError, ValueError):
+    return str(value or "")
+
+
+def _car_params_control_path(car_params) -> str:
+  angle_type = getattr(car.CarParams.SteerControlType, "angle", None)
+  if angle_type is not None and getattr(car_params, "steerControlType", None) == angle_type:
+    return "angle"
+
+  lateral_tuning = getattr(car_params, "lateralTuning", None)
+  tuning_type = lateral_tuning.which() if lateral_tuning is not None else ""
+  return tuning_type if tuning_type in ("torque", "pid") else "unknown"
+
+
+def _effective_control_path(car_params, observed_states: dict[str, int]) -> tuple[str, str]:
+  state_paths = {
+    "torqueState": "torque",
+    "pidState": "pid",
+    "angleState": "angle",
+  }
+  observed_paths = {
+    path for state, path in state_paths.items()
+    if int(observed_states.get(state, 0) or 0) > 0
+  }
+  if len(observed_paths) == 1:
+    return observed_paths.pop(), "controlsState"
+  if len(observed_paths) > 1:
+    return "mixed", "controlsState"
+  return _car_params_control_path(car_params), "carParams"
+
+
+def _effective_torque_car_params(car_params):
+  if _car_params_control_path(car_params) == "torque":
+    return car_params
+
+  try:
+    from opendbc.car.interfaces import CarInterfaceBase
+
+    builder = car_params.as_builder()
+    CarInterfaceBase.configure_torque_tune(builder.carFingerprint, builder.lateralTuning)
+    return builder
+  except (AttributeError, KeyError, TypeError, ValueError):
+    return car_params
+
+
+def _segment_samples(segment_source: RouteSource, params: Params | None = None) -> tuple[list[FLMSample], car.CarParams | None, dict[str, str], dict[str, int]]:
   samples: list[FLMSample] = []
   car_params = None
   init_data: dict[str, str] = {}
+  control_states: dict[str, int] = {}
   latest: dict[str, Any] = {}
+  params = params or Params(return_defaults=True)
+  last_offroad_check = 0.0
 
-  for msg in LogReader(segment_source.log_path, sort_by_time=True):
+  _require_flm_offroad(params)
+
+  for msg in LogReader(segment_source.log_path):
+    now = time.monotonic()
+    if now - last_offroad_check >= FLM_ONROAD_POLL_INTERVAL_SECONDS:
+      _require_flm_offroad(params)
+      last_offroad_check = now
+
     which = msg.which()
-    if which == "carParams" and car_params is None:
+    if which == "carParams":
       car_params = msg.carParams
       continue
     if which == "initData":
@@ -675,6 +945,7 @@ def _segment_samples(segment_source: RouteSource) -> tuple[list[FLMSample], car.
       init_data = {
         "gitCommit": str(getattr(init, "gitCommit", "") or ""),
         "gitBranch": str(getattr(init, "gitBranch", "") or ""),
+        "ForceTorqueController": _decode_init_param(init, "ForceTorqueController"),
       }
       continue
     if which == "carState":
@@ -689,12 +960,14 @@ def _segment_samples(segment_source: RouteSource) -> tuple[list[FLMSample], car.
     if which == "liveParameters":
       latest["liveParameters"] = msg.liveParameters
       continue
-    if which != "controlsState" or "carState" not in latest or "carControl" not in latest:
+    if which != "controlsState":
       continue
 
     controls_state = msg.controlsState
     lateral_state = controls_state.lateralControlState
-    if lateral_state.which() != "torqueState":
+    lateral_state_name = lateral_state.which()
+    control_states[lateral_state_name] = control_states.get(lateral_state_name, 0) + 1
+    if lateral_state_name != "torqueState" or "carState" not in latest or "carControl" not in latest:
       continue
 
     torque_state = lateral_state.torqueState
@@ -730,7 +1003,34 @@ def _segment_samples(segment_source: RouteSource) -> tuple[list[FLMSample], car.
       roll_deg=roll_deg,
     ))
 
-  return samples, car_params, init_data
+  return samples, car_params, init_data, control_states
+
+
+def _segment_samples_with_timeout(segment_source: RouteSource, params: Params,
+                                  timeout_seconds: float = FLM_SEGMENT_TIMEOUT_SECONDS):
+  if (
+    timeout_seconds <= 0.0
+    or threading.current_thread() is not threading.main_thread()
+    or not hasattr(signal, "SIGALRM")
+    or not hasattr(signal, "setitimer")
+  ):
+    return _segment_samples(segment_source, params=params)
+
+  def handle_timeout(_signum, _frame):
+    raise FLMSegmentTimeout(
+      f"{segment_source.route} segment {segment_source.segment_num} exceeded the {timeout_seconds:.0f}-second read limit."
+    )
+
+  previous_handler = signal.getsignal(signal.SIGALRM)
+  signal.signal(signal.SIGALRM, handle_timeout)
+  previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+  try:
+    return _segment_samples(segment_source, params=params)
+  finally:
+    signal.setitimer(signal.ITIMER_REAL, 0.0)
+    signal.signal(signal.SIGALRM, previous_handler)
+    if previous_timer[0] > 0.0:
+      signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
 def _current_param_state(CP, params: Params) -> dict[str, Any]:
@@ -787,11 +1087,11 @@ def _nonlinear_torque_map(CP) -> dict[str, Any]:
     return {}
 
   try:
-    from opendbc.car.gm.interface import NON_LINEAR_TORQUE_PARAMS
+    from opendbc.car.gm.interface import NON_LINEAR_TORQUE_PARAM_ALIASES, get_nonlinear_torque_params
   except (ImportError, AttributeError):
     return {}
 
-  raw_params = NON_LINEAR_TORQUE_PARAMS.get(CP.carFingerprint)
+  raw_params = get_nonlinear_torque_params(CP.carFingerprint)
   if raw_params is None:
     return {}
 
@@ -810,6 +1110,7 @@ def _nonlinear_torque_map(CP) -> dict[str, Any]:
     "left": left,
     "right": right,
     "asymmetric": any(not math.isclose(left[idx], right[idx], abs_tol=1e-9) for idx in range(4)),
+    "sourceFingerprint": str(NON_LINEAR_TORQUE_PARAM_ALIASES.get(CP.carFingerprint, CP.carFingerprint)),
     "learnedByLiveTorque": False,
   }
 
@@ -1206,6 +1507,10 @@ def _primary_delta_from_summary(summary: dict[str, Any], capabilities: dict[str,
     }
 
   if bucket in ("understeer", "late_turn_in"):
+    if bucket == "understeer" and asymmetric_nonlinear_map and direction in ("left", "right") and supports_ff_gain:
+      adjustment = _vehicle_knob_adjustment(f"{rich_profile}.ff_gain_{side}", 0.025 * severity, current)
+      if adjustment is not None:
+        return adjustment
     if curvy_band and speed_band == "fast" and bucket == "late_turn_in" and supports_curvy_turn_in_speed:
       adjustment = _vehicle_knob_adjustment(f"{rich_profile}.curvy_turn_in_trim_speed_max", 1.6 * severity, current)
       if adjustment is not None:
@@ -1223,6 +1528,10 @@ def _primary_delta_from_summary(summary: dict[str, Any], capabilities: dict[str,
     return {"type": "generic_param", "paramKey": "SteerLatAccel", "current": current_value, "suggested": suggested_value, "delta": round(suggested_value - current_value, 4)}
 
   if bucket in ("oversteer", "early_turn_in"):
+    if bucket == "oversteer" and asymmetric_nonlinear_map and direction in ("left", "right") and supports_ff_gain:
+      adjustment = _vehicle_knob_adjustment(f"{rich_profile}.ff_gain_{side}", -0.025 * severity, current)
+      if adjustment is not None:
+        return adjustment
     if curvy_band and supports_curvy_turn_in_trim:
       adjustment = _vehicle_knob_adjustment(f"{rich_profile}.curvy_turn_in_trim_{side}", 0.018 * severity, current)
       if adjustment is not None:
@@ -1592,7 +1901,7 @@ def _bucket_tuning_family(bucket: str) -> str:
   return "other"
 
 
-def select_primary_tuning_path(summaries: list[dict[str, Any]], summary_stats: dict[str, Any]) -> dict[str, Any]:
+def _select_primary_tuning_path_unlocked(summaries: list[dict[str, Any]], summary_stats: dict[str, Any]) -> dict[str, Any]:
   actionable = [
     summary for summary in summaries
     if summary.get("bucket") not in ("model_limited", "angle_control_diagnostic")
@@ -1669,6 +1978,34 @@ def select_primary_tuning_path(summaries: list[dict[str, Any]], summary_stats: d
   }
 
 
+def select_primary_tuning_path(summaries: list[dict[str, Any]], summary_stats: dict[str, Any],
+                               cleanup_progress_locked: bool = False) -> dict[str, Any]:
+  decision = _select_primary_tuning_path_unlocked(summaries, summary_stats)
+  if not cleanup_progress_locked:
+    return decision
+
+  raw_primary_path = decision["primaryPathKey"]
+  if raw_primary_path == "baseline_fix":
+    return {
+      **decision,
+      "primaryPathKey": "cleanup_pass",
+      "alternatePathKey": "baseline_fix",
+      "reason": (
+        "This vehicle already progressed to Cleanup Pass. This route contains broader misses, but FLM will not automatically "
+        "reset a tune that already reached fine adjustment. Review Baseline Fix manually if the regression is real and repeatable."
+      ),
+      "rawPrimaryPathKey": raw_primary_path,
+      "automaticBaselineDemotionBlocked": True,
+      "cleanupProgressLocked": True,
+    }
+
+  return {
+    **decision,
+    "rawPrimaryPathKey": raw_primary_path,
+    "cleanupProgressLocked": True,
+  }
+
+
 def build_trial_profiles(report_id: str, suggestions: list[dict[str, Any]], feedback: dict[str, Any], capabilities: dict[str, Any],
                          path_key: str = "cleanup_pass", path_label: str = "Cleanup Pass") -> list[dict[str, Any]]:
   ignored = set(str(item) for item in feedback.get("ignoredDimensions", []))
@@ -1738,8 +2075,8 @@ def _add_parameters_start_here(capabilities: dict[str, Any], suggestions: list[d
 
 def build_recommendation_paths(report_id: str, summaries: list[dict[str, Any]], summary_stats: dict[str, Any],
                                capabilities: dict[str, Any], current: dict[str, Any],
-                               feedback: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-  decision = select_primary_tuning_path(summaries, summary_stats)
+                               feedback: dict[str, Any], cleanup_progress_locked: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+  decision = select_primary_tuning_path(summaries, summary_stats, cleanup_progress_locked)
   all_suggestions = {
     "baseline_fix": build_suggestions(summaries, capabilities, current, strategy="baseline"),
     "cleanup_pass": build_suggestions(summaries, capabilities, current, strategy="cleanup"),
@@ -1879,46 +2216,77 @@ def _render_report_html(report: dict[str, Any]) -> str:
   )
 
 
-def analyze_routes(route_names: list[str], footage_paths: list[str], feedback: dict[str, Any] | None = None, report_id: str | None = None) -> dict[str, Any]:
+def analyze_routes(route_names: list[str], footage_paths: list[str], feedback: dict[str, Any] | None = None,
+                   report_id: str | None = None, segment_ranges: dict[str, dict[str, int | None]] | None = None) -> dict[str, Any]:
   ensure_flm_workspace()
   params = Params(return_defaults=True)
+  _require_flm_offroad(params)
   report_id = report_id or f"flm-{int(time.time())}"
   feedback = feedback or {}
+  segment_ranges = normalize_segment_ranges(route_names, segment_ranges)
 
-  sources, warnings = resolve_route_sources(route_names, footage_paths)
+  sources, warnings = resolve_route_sources(route_names, footage_paths, segment_ranges)
   if not sources:
     raise RuntimeError("No local routes with qlogs or rlogs were found for the selected routes.")
 
   all_samples: list[FLMSample] = []
-  car_params = None
+  car_params_candidates = []
   init_data: dict[str, str] = {}
+  observed_control_states: dict[str, int] = {}
   used_qlog = False
   processed_segments = 0
+  skipped_segments = 0
   for idx, source in enumerate(sources, start=1):
+    _require_flm_offroad(params)
     _write_flm_status({
       "pid": os.getpid(),
       "startedAt": time.time(),
       "running": True,
       "state": "analyzing",
       "routes": route_names,
+      "segmentRanges": segment_ranges,
       "progress": idx - 1,
       "total": len(sources),
       "currentSegment": source.segment,
     })
-    segment_samples, segment_car_params, segment_init = _segment_samples(source)
-    if car_params is None and segment_car_params is not None:
-      car_params = segment_car_params
+    try:
+      segment_samples, segment_car_params, segment_init, segment_control_states = _segment_samples_with_timeout(source, params)
+    except FLMAnalysisCancelled:
+      raise
+    except FLMSegmentTimeout as error:
+      warnings.append(str(error) + " The segment was skipped.")
+      skipped_segments += 1
+      continue
+    except Exception as error:
+      warnings.append(
+        f"{source.route} segment {source.segment_num} could not be read ({type(error).__name__}). The segment was skipped."
+      )
+      skipped_segments += 1
+      continue
+    _require_flm_offroad(params)
+    if segment_car_params is not None:
+      car_params_candidates.append(segment_car_params)
     if segment_init and not init_data:
       init_data = segment_init
+    for state_name, count in segment_control_states.items():
+      observed_control_states[state_name] = observed_control_states.get(state_name, 0) + count
     if source.used_qlog:
       used_qlog = True
     all_samples.extend(segment_samples)
     processed_segments += 1
 
-  if car_params is None:
+  if not car_params_candidates:
     raise RuntimeError("No carParams were found in the selected routes.")
 
-  torque_control = car_params.lateralTuning.which() == "torque"
+  _require_flm_offroad(params)
+  car_params = car_params_candidates[-1]
+  control_path, control_path_source = _effective_control_path(car_params, observed_control_states)
+  matching_car_params = [candidate for candidate in car_params_candidates if _car_params_control_path(candidate) == control_path]
+  if matching_car_params:
+    car_params = matching_car_params[-1]
+  if control_path == "torque":
+    car_params = _effective_torque_car_params(car_params)
+  torque_control = control_path == "torque"
   hyundai_canfd = bool(getattr(car_params, "flags", 0) & HyundaiFlags.CANFD)
   capabilities = get_flm_capabilities(
     car_params.carFingerprint,
@@ -1930,19 +2298,56 @@ def analyze_routes(route_names: list[str], footage_paths: list[str], feedback: d
   capabilities["nonlinearTorqueMap"] = _nonlinear_torque_map(car_params)
   current_params = _current_param_state(car_params, params)
   stock_params = _stock_param_state(car_params, capabilities)
+  car_fingerprint = str(car_params.carFingerprint)
 
   if torque_control:
     raw_summaries, summary_stats = classify_torque_samples(all_samples)
     summaries = _resolve_conflicting_actionable_suggestions(raw_summaries)
-    paths_payload, path_decision = build_recommendation_paths(report_id, summaries, summary_stats, capabilities, current_params, feedback)
+    cleanup_progress_locked = _cleanup_progress_locked(car_fingerprint)
+    paths_payload, path_decision = build_recommendation_paths(
+      report_id,
+      summaries,
+      summary_stats,
+      capabilities,
+      current_params,
+      feedback,
+      cleanup_progress_locked=cleanup_progress_locked,
+    )
     primary_path = next((path for path in paths_payload if path.get("isPrimary")), paths_payload[0] if paths_payload else {})
     suggestions = list(primary_path.get("suggestions", []))
     profiles = [profile for path in paths_payload for profile in path.get("profiles", [])]
   else:
-    summary_stats = {"sampleCount": len(all_samples), "qlogFallback": used_qlog}
+    force_torque_requested = init_data.get("ForceTorqueController", "").strip().lower() in ("1", "true", "yes", "on")
+    if control_path == "pid":
+      observed_behavior = "This route logged the PID lateral controller, so torque-specific FLM trial profiles do not apply to this drive."
+      likely_interpretation = (
+        "Force Torque Controller was stored, but this route still ran PID. "
+        + "That override is applied at startup; reboot and record a fresh route before analyzing it."
+        if force_torque_requested else
+        "This Honda uses torque steering commands, but the software controller in this route was PID. "
+        + "Enable Force Torque Controller, reboot, then record a fresh route."
+      )
+      primary_adjustment = "Run FLM again on a route that logs torqueState."
+      what_not_to_touch = "Do not apply torque-controller trial values to PID data."
+    elif control_path == "mixed":
+      observed_behavior = "The selected routes contain more than one lateral controller path."
+      likely_interpretation = "Torque, PID, or angle-controller samples were mixed together, so one tune cannot be inferred safely."
+      primary_adjustment = "Analyze routes from one controller configuration at a time."
+      what_not_to_touch = "Do not generate one torque profile from mixed controller data."
+    else:
+      observed_behavior = "This route logged an angle-control path, so torque-specific FLM trial profiles do not apply."
+      likely_interpretation = "A true angle-command path cannot be converted into torque control by the Force Torque Controller setting."
+      primary_adjustment = "Keep this route in diagnostic-only mode."
+      what_not_to_touch = "Do not write torque-controller override blobs for an angle-control path."
+
+    summary_stats = {
+      "sampleCount": len(all_samples),
+      "qlogFallback": used_qlog,
+      "observedLateralControlStates": observed_control_states,
+    }
     summaries = [{
-      "bucket": "angle_control_diagnostic",
-      "dimensionId": "angle_control_diagnostic:overall",
+      "bucket": "controller_path_diagnostic",
+      "dimensionId": "controller_path_diagnostic:overall",
       "direction": "center",
       "speedBand": "mixed",
       "count": 1,
@@ -1953,28 +2358,28 @@ def analyze_routes(route_names: list[str], footage_paths: list[str], feedback: d
       "plotData": {},
     }]
     suggestions = [{
-      "dimensionId": "angle_control_diagnostic:overall",
-      "bucket": "angle_control_diagnostic",
+      "dimensionId": "controller_path_diagnostic:overall",
+      "bucket": "controller_path_diagnostic",
       "evidence": summaries[0]["evidence"],
       "currentVsSuggested": None,
-      "observedBehavior": "This route is using an angle-control path, so the torque-specific FLM trial system stays in diagnostic mode.",
-      "likelyInterpretation": "You can still inspect lane behavior here, but torque-controller trial profiles do not apply.",
-      "primaryAdjustment": "Do not apply an FLM torque profile to this car.",
-      "whatNotToTouchYet": "Do not write torque-controller override blobs for an angle-control path.",
-      "ifThatWasWrong": "If the car later moves to torque control, re-run FLM on a fresh route.",
+      "observedBehavior": observed_behavior,
+      "likelyInterpretation": likely_interpretation,
+      "primaryAdjustment": primary_adjustment,
+      "whatNotToTouchYet": what_not_to_touch,
+      "ifThatWasWrong": "If the route actually ran torque control, verify it contains torqueState and re-run FLM on that fresh route.",
       "plotSvg": "",
       "plotData": {},
     }]
     path_decision = {
       "primaryPathKey": "cleanup_pass",
       "alternatePathKey": "baseline_fix",
-      "reason": "Angle-control diagnostic mode does not participate in the torque trial workflow.",
+      "reason": f"{control_path.title()} controller data does not participate in the torque trial workflow.",
       "baselineScore": 0,
     }
     paths_payload = [{
       "key": "cleanup_pass",
       "title": "Diagnostic Only",
-      "description": "This route is using an angle-control path, so torque-controller trial profiles do not apply.",
+      "description": observed_behavior,
       "whenToUse": "Use this report only for diagnostic review.",
       "alternateHint": "",
       "isPrimary": True,
@@ -1988,12 +2393,15 @@ def analyze_routes(route_names: list[str], footage_paths: list[str], feedback: d
     "reportId": report_id,
     "createdAt": time.time(),
     "routeNames": route_names,
+    "segmentRanges": segment_ranges,
     "warnings": warnings,
     "feedback": feedback,
     "car": {
-      "carFingerprint": str(car_params.carFingerprint),
+      "carFingerprint": car_fingerprint,
       "brand": str(getattr(car_params, "brand", "") or ""),
-      "controlPath": "torque" if torque_control else "angle",
+      "controlPath": control_path,
+      "controlPathSource": control_path_source,
+      "observedLateralControlStates": observed_control_states,
       "gitBranch": init_data.get("gitBranch", ""),
       "gitCommit": init_data.get("gitCommit", ""),
       "steerControlType": str(getattr(car_params, "steerControlType", car.CarParams.SteerControlType.torque)),
@@ -2004,6 +2412,7 @@ def analyze_routes(route_names: list[str], footage_paths: list[str], feedback: d
     "summary": {
       **summary_stats,
       "processedSegments": processed_segments,
+      "skippedSegments": skipped_segments,
       "usedQlogFallback": used_qlog,
     },
     "primaryPathKey": path_decision["primaryPathKey"],
@@ -2018,21 +2427,27 @@ def analyze_routes(route_names: list[str], footage_paths: list[str], feedback: d
     "addTheseParametersAndStartHere": _add_parameters_start_here(capabilities, suggestions, path_decision["primaryPathKey"]),
   }
 
+  _require_flm_offroad(params)
   paths = ensure_flm_workspace()
   html = _render_report_html(report)
+  _require_flm_offroad(params)
   report["htmlPath"] = str(paths["reports"] / f"{report_id}.html")
   report["jsonPath"] = str(paths["reports"] / f"{report_id}.json")
   (paths["reports"] / f"{report_id}.html").write_text(html, encoding="utf-8")
   _write_json(paths["reports"] / f"{report_id}.json", report)
   _write_json(paths["profiles"] / f"{report_id}.json", profiles)
+  if torque_control and path_decision["primaryPathKey"] == "cleanup_pass":
+    _record_cleanup_progress(car_fingerprint, report_id)
   _write_flm_status({
     "pid": os.getpid(),
     "startedAt": time.time(),
     "running": False,
     "state": "complete",
     "routes": route_names,
-    "progress": processed_segments,
-    "total": processed_segments,
+    "segmentRanges": segment_ranges,
+    "progress": len(sources),
+    "total": len(sources),
+    "skippedSegments": skipped_segments,
     "reportId": report_id,
   })
   return report
@@ -2068,6 +2483,8 @@ def select_report_path(report_id: str, path_key: str) -> dict[str, Any]:
   report.pop("html", None)
   (paths["reports"] / f"{report_id}.html").write_text(_render_report_html(report), encoding="utf-8")
   _write_json(paths["reports"] / f"{report_id}.json", report)
+  if path_key == "cleanup_pass" and report.get("car", {}).get("controlPath") == "torque":
+    _record_cleanup_progress(str(report.get("car", {}).get("carFingerprint", "")), report_id)
   return {
     "message": f"Using {selected_path.get('title', path_key)} for this report.",
     "report": load_report(report_id),
@@ -2208,6 +2625,11 @@ def clear_workspace() -> dict[str, Any]:
         path.unlink()
         removed.append(str(path))
 
+  progress_path = _progress_path()
+  if progress_path.is_file():
+    progress_path.unlink()
+    removed.append(str(progress_path))
+
   _clear_persistent_trial_baseline(params)
   _clear_flm_status()
 
@@ -2310,6 +2732,8 @@ def _apply_param_bundle(params: Params, bundle: dict[str, Any]) -> None:
       params.put(key, normalize_flm_overrides(value))
     elif kind == "string":
       params.put(key, str(value or ""))
+
+  Params(memory=True).put_bool("StarPilotTogglesUpdated", True)
 
 
 def _merge_flm_override_state(base: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
@@ -2453,6 +2877,9 @@ def apply_trial_profile(report_id: str, profile_id: str) -> dict[str, Any]:
   )
   bundle["FLMTrialApplied"] = True
   _apply_param_bundle(params, bundle)
+  if profile.get("pathKey") == "cleanup_pass":
+    report = _read_json(paths["reports"] / f"{report_id}.json", {})
+    _record_cleanup_progress(str(report.get("car", {}).get("carFingerprint", "")), report_id)
   return {
     "message": f"Applied {profile.get('label', 'FLM')} profile.",
     "profile": profile,
@@ -2494,6 +2921,7 @@ def accept_trial_as_baseline() -> dict[str, Any]:
   params.put_bool("FLMTrialApplied", False)
   params.put("FLMActiveProfileId", "")
   _clear_persistent_trial_baseline(params)
+  Params(memory=True).put_bool("StarPilotTogglesUpdated", True)
   for path in paths["snapshots"].glob("*.json"):
     path.unlink()
 
@@ -2551,6 +2979,7 @@ def run_worker(payload_json: str) -> None:
   payload = json.loads(payload_json)
   routes = [str(route) for route in payload.get("routes", [])]
   footage_paths = [str(path) for path in payload.get("footagePaths", [])]
+  segment_ranges = normalize_segment_ranges(routes, payload.get("segmentRanges", {}))
   ensure_flm_workspace()
   _write_flm_status({
     "pid": os.getpid(),
@@ -2558,20 +2987,40 @@ def run_worker(payload_json: str) -> None:
     "running": True,
     "state": "starting",
     "routes": routes,
+    "segmentRanges": segment_ranges,
     "progress": 0,
     "total": len(routes),
   })
+  threading.Thread(target=_watch_flm_worker_for_onroad, daemon=True).start()
   try:
-    report = analyze_routes(routes, footage_paths)
+    _require_flm_offroad()
+    report = analyze_routes(routes, footage_paths, segment_ranges=segment_ranges)
+    processed_segments = int(report.get("summary", {}).get("processedSegments", 0) or 0)
+    skipped_segments = int(report.get("summary", {}).get("skippedSegments", 0) or 0)
+    total_segments = processed_segments + skipped_segments
     _write_flm_status({
       "pid": os.getpid(),
       "startedAt": time.time(),
       "running": False,
       "state": "complete",
       "routes": routes,
-      "progress": len(routes),
-      "total": len(routes),
+      "segmentRanges": segment_ranges,
+      "progress": total_segments,
+      "total": total_segments,
+      "skippedSegments": skipped_segments,
       "reportId": report["reportId"],
+    })
+  except FLMAnalysisCancelled as error:
+    _write_flm_status({
+      "pid": 0,
+      "startedAt": time.time(),
+      "running": False,
+      "state": "cancelled_onroad",
+      "routes": routes,
+      "segmentRanges": segment_ranges,
+      "progress": 0,
+      "total": len(routes),
+      "error": str(error),
     })
   except Exception as error:
     _write_flm_status({
@@ -2580,6 +3029,7 @@ def run_worker(payload_json: str) -> None:
       "running": False,
       "state": "failed",
       "routes": routes,
+      "segmentRanges": segment_ranges,
       "progress": 0,
       "total": len(routes),
       "error": str(error),

@@ -11,6 +11,7 @@ const state = reactive({
   error: "",
   routes: [],
   selectedRoutes: [],
+  segmentRanges: {},
   truncatedRoutes: false,
   routeProgress: 0,
   routeTotal: 0,
@@ -40,6 +41,15 @@ function formatTimestamp(value) {
   const parsed = new Date(value)
   if (Number.isNaN(parsed.getTime())) return String(value)
   return parsed.toLocaleString()
+}
+
+function formatReportSegmentRanges(report) {
+  const ranges = report?.segmentRanges || {}
+  const entries = Object.entries(ranges)
+  if (!entries.length) return "Whole selected routes"
+  return entries
+    .map(([route, range]) => `${route}: ${range?.start ?? "first"}-${range?.end ?? "last"}`)
+    .join(", ")
 }
 
 function safeCount(value) {
@@ -326,8 +336,36 @@ function toggleRouteSelection(routeName) {
   state.selectedRoutes = [...current]
 }
 
+function setSegmentRange(routeName, key, value) {
+  const cleaned = String(value ?? "").replace(/[^\d]/g, "")
+  state.segmentRanges = {
+    ...state.segmentRanges,
+    [routeName]: {
+      ...(state.segmentRanges[routeName] || {}),
+      [key]: cleaned,
+    },
+  }
+}
+
+function selectedSegmentRanges() {
+  const ranges = {}
+  for (const routeName of state.selectedRoutes) {
+    const selected = state.segmentRanges[routeName] || {}
+    const start = String(selected.start ?? "").trim()
+    const end = String(selected.end ?? "").trim()
+    if (start || end) {
+      ranges[routeName] = {
+        start: start || null,
+        end: end || null,
+      }
+    }
+  }
+  return ranges
+}
+
 function clearSelections() {
   state.selectedRoutes = []
+  state.segmentRanges = {}
 }
 
 async function runAnalyze() {
@@ -337,7 +375,10 @@ async function runAnalyze() {
     const response = await fetch("/api/flm/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ routes: state.selectedRoutes }),
+      body: JSON.stringify({
+        routes: state.selectedRoutes,
+        segmentRanges: selectedSegmentRanges(),
+      }),
     })
     const payload = await response.json()
     if (!response.ok) throw new Error(payload.error || "Failed to start tuning analysis.")
@@ -587,19 +628,27 @@ function tuneComparisonRows() {
   if (!stock || !current) return []
 
   const trialGeneric = activeTrialProfile()?.genericParams || {}
-  const rows = [
+  const angleControl = state.report?.car?.controlPath === "angle"
+  const genericParams = angleControl ? [
+    ["Auto steer delay", "UseAutoSteerDelay"],
+    ["Steer delay", "SteerDelay"],
+    ["Steer ratio", "SteerRatio"],
+  ] : [
     ["Lat accel", "SteerLatAccel"],
     ["Friction", "SteerFriction"],
     ["Auto steer delay", "UseAutoSteerDelay"],
     ["Steer delay", "SteerDelay"],
     ["Steer ratio", "SteerRatio"],
     ["KP", "SteerKP"],
-  ].map(([label, key]) => ({
+  ]
+  const rows = genericParams.map(([label, key]) => ({
     key,
     label,
     stock: stock[key],
     current: Object.hasOwn(trialGeneric, key) ? trialGeneric[key] : current[key],
   }))
+
+  if (angleControl) return rows
 
   const overrides = mergedFlmOverrides()
   for (const [family, payload] of Object.entries(stock.FLMBaseFrictionThresholds || {})) {
@@ -635,21 +684,29 @@ function renderTuneComparison() {
   const rows = tuneComparisonRows()
   if (!rows.length) return ""
   const profile = activeTrialProfile()
+  const angleControl = state.report?.car?.controlPath === "angle"
   return html`
     <div class="flmCardSubsection flmTuneComparison">
       <div class="flmCardHeader">
         <div>
-          <h4>Stock vs Current FLM</h4>
+          <h4>${angleControl ? "Applicable Angle Settings" : "Stock vs Current FLM"}</h4>
           <p class="longManeuverMuted">
-            ${profile ? `Includes active trial: ${profile.pathLabel || "FLM"} / ${profile.label}` : "Current values captured when this route was analyzed."}
+            ${angleControl
+              ? "Current applicable values captured when this route was analyzed."
+              : profile
+                ? `Includes active trial: ${profile.pathLabel || "FLM"} / ${profile.label}`
+                : "Current values captured when this route was analyzed."}
           </p>
+          ${angleControl ? html`
+            <p class="longManeuverMuted">Torque-only lateral acceleration, friction, and KP values do not apply to this angle-control car.</p>
+          ` : ""}
         </div>
       </div>
       <div class="flmTuneComparisonTable">
         <div class="flmTuneComparisonHeader">Parameter</div>
         <div class="flmTuneComparisonHeader">Stock</div>
         <div class="flmTuneComparisonArrow"></div>
-        <div class="flmTuneComparisonHeader">FLM</div>
+        <div class="flmTuneComparisonHeader">${angleControl ? "Current" : "FLM"}</div>
         ${rows.map((row) => html`
           <div class="flmTuneComparisonLabel" title="${row.codeLabel || row.key}">${row.label}</div>
           <div>${formatTuneComparisonValue(row.stock)}</div>
@@ -1022,7 +1079,7 @@ export function Tuning() {
               <div>
                 <h3>Local Routes</h3>
                 <p class="longManeuverMuted">
-                  Pick up to 8 routes from the device. The analyzer prefers rlogs and falls back to qlogs when needed.
+                  Pick up to 8 routes from the device. Optionally limit each route to a segment range. The analyzer prefers rlogs and falls back to qlogs when needed.
                 </p>
               </div>
               <button class="longManeuverButton" @click="${clearSelections}">Clear</button>
@@ -1034,23 +1091,46 @@ export function Tuning() {
 
             <div class="flmRouteList">
               ${() => sortedRoutes().map((route) => html`
-                <div class="flmRouteRow">
-                  <label class="flmRouteItem">
-                    <input
-                      type="checkbox"
-                      checked="${() => state.selectedRoutes.includes(route.name)}"
-                      @change="${() => toggleRouteSelection(route.name)}" />
-                    <span>
-                      <strong>${route.timestampLabel}</strong>
-                      <small>${route.name}</small>
-                    </span>
-                  </label>
-                  ${() => connectRouteUrl(route.name) ? html`
-                    <a
-                      class="flmConnectLink"
-                      href="${connectRouteUrl(route.name)}"
-                      target="_blank"
-                      rel="noopener noreferrer">Connect</a>
+                <div class="flmRouteSelection">
+                  <div class="flmRouteRow">
+                    <label class="flmRouteItem">
+                      <input
+                        type="checkbox"
+                        checked="${() => state.selectedRoutes.includes(route.name)}"
+                        @change="${() => toggleRouteSelection(route.name)}" />
+                      <span>
+                        <strong>${route.timestampLabel}</strong>
+                        <small>${route.name}</small>
+                      </span>
+                    </label>
+                    ${() => connectRouteUrl(route.name) ? html`
+                      <a
+                        class="flmConnectLink"
+                        href="${connectRouteUrl(route.name)}"
+                        target="_blank"
+                        rel="noopener noreferrer">Connect</a>
+                    ` : ""}
+                  </div>
+                  ${() => state.selectedRoutes.includes(route.name) ? html`
+                    <div class="flmSegmentRange">
+                      <span>Segments</span>
+                      <input
+                        type="number"
+                        min="0"
+                        inputmode="numeric"
+                        placeholder="First"
+                        value="${() => state.segmentRanges[route.name]?.start || ""}"
+                        @input="${event => setSegmentRange(route.name, "start", event.target.value)}" />
+                      <span>to</span>
+                      <input
+                        type="number"
+                        min="0"
+                        inputmode="numeric"
+                        placeholder="Last"
+                        value="${() => state.segmentRanges[route.name]?.end || ""}"
+                        @input="${event => setSegmentRange(route.name, "end", event.target.value)}" />
+                      <small>Blank analyzes the whole route.</small>
+                    </div>
                   ` : ""}
                 </div>
               `)}
@@ -1117,7 +1197,9 @@ export function Tuning() {
               <p><strong>Path Choice:</strong> ${state.report.pathSelectionSource === "manual" ? "Manual override" : "Automatic"}</p>
               <p><strong>Nonlinear Torque Map:</strong> ${state.report.capabilities?.nonlinearTorqueMap?.type === "siglin" ? (state.report.capabilities.nonlinearTorqueMap.asymmetric ? "Asymmetric left/right siglin" : "Symmetric siglin") : "Not detected"}</p>
               <p><strong>Live Learner Refits Map:</strong> ${state.report.capabilities?.nonlinearTorqueMap?.type === "siglin" ? "No" : "Not applicable"}</p>
+              <p><strong>Segment Selection:</strong> ${formatReportSegmentRanges(state.report)}</p>
               <p><strong>Processed Segments:</strong> ${safeCount(state.report.summary?.processedSegments)}</p>
+              <p><strong>Skipped Segments:</strong> ${safeCount(state.report.summary?.skippedSegments)}</p>
               <p><strong>Driver-Override Samples Excluded:</strong> ${safeCount(state.report.summary?.excludedDriverOverrideSamples)}</p>
               <p><strong>qlog Fallback:</strong> ${state.report.summary?.usedQlogFallback ? "Yes" : "No"}</p>
               <p><strong>Samples:</strong> ${safeCount(state.report.summary?.sampleCount)}</p>

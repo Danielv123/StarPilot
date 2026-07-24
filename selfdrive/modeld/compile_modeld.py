@@ -4,6 +4,7 @@ import atexit
 import math
 import os
 import pickle
+import shutil
 import tempfile
 import time
 from collections import namedtuple
@@ -43,6 +44,8 @@ from tinygrad.device import Device
 from tinygrad.engine.jit import TinyJit
 from tinygrad.helpers import Context
 from tinygrad.tensor import Tensor
+from openpilot.selfdrive.modeld.helpers import dump_oob
+from openpilot.selfdrive.modeld.usbgpu_link import wait_usbgpu_link
 
 
 ARTIFACT_FORMAT_VERSION = 1
@@ -59,6 +62,7 @@ WARP_INPUTS = LEGACY_WARP_INPUTS
 SPLIT_POLICY_INPUTS = BASE_POLICY_INPUTS
 SUPERCOMBO_POLICY_INPUTS = BASE_POLICY_INPUTS
 WARP_DEV = os.getenv("WARP_DEV")
+OOB_PICKLE = False
 
 
 def _detect_desire_key(input_shapes):
@@ -451,7 +455,14 @@ def compile_jit(jit, make_random_inputs, input_keys, make_queues):
   print("capture + replay")
   test_values, test_buffers = random_inputs_run(jit, seed)
   print("pickle round trip")
-  jit = pickle.loads(pickle.dumps(jit))
+  if OOB_PICKLE:
+    with tempfile.TemporaryFile(dir=".") as artifact_file:
+      dump_oob(jit, artifact_file)
+      artifact_file.seek(0)
+      from openpilot.selfdrive.modeld.helpers import load_oob
+      jit = load_oob(artifact_file)
+  else:
+    jit = pickle.loads(pickle.dumps(jit))
   random_inputs_run(jit, seed, test_values, test_buffers, expect_match=True)
   random_inputs_run(jit, seed + 1, test_values, test_buffers, expect_match=False)
   return jit
@@ -462,13 +473,17 @@ def _parse_size(value):
   return int(width), int(height)
 
 
-def read_file_chunked_to_shm(path):
-  from openpilot.common.file_chunker import read_file_chunked
-  from openpilot.system.hardware.hw import Paths
+def read_file_chunked_to_disk(path):
+  from openpilot.common.file_chunker import open_file_chunked
 
-  with tempfile.NamedTemporaryFile(prefix="compile_modeld_", dir=Paths.shm_path(), delete=False) as output:
-    output.write(read_file_chunked(path))
-    temporary_path = output.name
+  temporary_path = f"{path}.unchunked"
+  try:
+    with open(temporary_path, "wb") as output, open_file_chunked(path) as source:
+      shutil.copyfileobj(source, output)
+  except Exception:
+    if os.path.exists(temporary_path):
+      os.remove(temporary_path)
+    raise
   atexit.register(lambda: os.path.exists(temporary_path) and os.remove(temporary_path))
   return temporary_path
 
@@ -486,6 +501,7 @@ def validate_metadata(metadata):
 
 
 def main():
+  global OOB_PICKLE
   from tinygrad.nn.onnx import OnnxRunner
 
   from openpilot.selfdrive.modeld.get_model_metadata import make_metadata_dict
@@ -498,6 +514,7 @@ def main():
   parser.add_argument("--frame-skip", type=int)
   parser.add_argument("--behavior-version")
   parser.add_argument("--output", required=True)
+  parser.add_argument("--out-of-band", action="store_true", help="Stream model weights outside pickle opcodes for large artifacts.")
   parser.add_argument("--vision-onnx")
   parser.add_argument("--policy-onnx")
   parser.add_argument("--off-policy-onnx")
@@ -510,6 +527,9 @@ def main():
     help="Where img/big_img history queues are updated. 'policy' is the newer faster ABI; 'warp' reproduces legacy v22 artifacts.",
   )
   args = parser.parse_args()
+  OOB_PICKLE = args.out_of_band
+  if "USB+AMD" in os.environ.get("DEV", ""):
+    wait_usbgpu_link()
 
   output = {
     "format_version": ARTIFACT_FORMAT_VERSION,
@@ -523,7 +543,7 @@ def main():
   if args.model_type == "supercombo":
     if not args.supercombo_onnx:
       parser.error("--supercombo-onnx is required for supercombo")
-    model_path = read_file_chunked_to_shm(args.supercombo_onnx)
+    model_path = read_file_chunked_to_disk(args.supercombo_onnx)
     model_runner = OnnxRunner(model_path)
     output["metadata"]["model"] = make_metadata_dict(model_path)
     validate_metadata(output["metadata"]["model"])
@@ -550,8 +570,8 @@ def main():
     if args.model_type == "vision_multi_policy" and not policy_paths:
       parser.error("vision_multi_policy requires at least one policy ONNX")
 
-    vision_path = read_file_chunked_to_shm(args.vision_onnx)
-    resolved_policy_paths = {key: read_file_chunked_to_shm(path) for key, path in policy_paths.items()}
+    vision_path = read_file_chunked_to_disk(args.vision_onnx)
+    resolved_policy_paths = {key: read_file_chunked_to_disk(path) for key, path in policy_paths.items()}
     vision_runner = OnnxRunner(vision_path)
     policy_runners = {key: OnnxRunner(path) for key, path in resolved_policy_paths.items()}
     output["metadata"]["vision"] = make_metadata_dict(vision_path)
@@ -619,7 +639,10 @@ def main():
     )
 
   with open(args.output, "wb") as artifact_file:
-    pickle.dump(output, artifact_file)
+    if args.out_of_band:
+      dump_oob(output, artifact_file)
+    else:
+      pickle.dump(output, artifact_file)
   print(f"Saved JITs to {args.output} ({os.path.getsize(args.output) / 1e6:.2f} MB)")
   return 0
 

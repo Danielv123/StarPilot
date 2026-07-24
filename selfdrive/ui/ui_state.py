@@ -10,10 +10,12 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.lib.prime_state import PrimeState
+from openpilot.system.hardware.usb import chestnut_present
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.hardware import HARDWARE, PC
 
 BACKLIGHT_OFFROAD = 65 if HARDWARE.get_device_type() == "mici" else 50
+USBGPU_POLL_INTERVAL = 1.0
 
 
 class UIStatus(Enum):
@@ -81,6 +83,10 @@ class UIState:
     self.is_metric: bool = self.params.get_bool("IsMetric")
     self.is_release = self.params.get_bool("IsReleaseBranch")
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
+    self.usbgpu: bool = chestnut_present()
+    self.usbgpu_compiled: bool = self.params.get_bool("UsbGpuCompiled")
+    self.usbgpu_active: bool = self.params.get_bool("UsbGpuActive")
+    self._usbgpu_update_time: float = 0.0
     self.started: bool = False
     self.ignition: bool = False
     self.recording_audio: bool = False
@@ -119,6 +125,12 @@ class UIState:
 
   def add_offroad_transition_callback(self, callback: Callable[[], None]):
     self._offroad_transition_callbacks.append(callback)
+
+  def remove_offroad_transition_callback(self, callback: Callable[[], None]):
+    try:
+      self._offroad_transition_callbacks.remove(callback)
+    except ValueError:
+      pass
 
   def add_engaged_transition_callback(self, callback: Callable[[], None]):
     self._engaged_transition_callbacks.append(callback)
@@ -176,6 +188,12 @@ class UIState:
 
     self.is_metric = self.params.get_bool("IsMetric")
     self.always_on_dm = self.params.get_bool("AlwaysOnDM")
+    now = time.monotonic()
+    if now - self._usbgpu_update_time >= USBGPU_POLL_INTERVAL:
+      self.usbgpu = chestnut_present()
+      self._usbgpu_update_time = now
+    self.usbgpu_compiled = self.params.get_bool("UsbGpuCompiled")
+    self.usbgpu_active = self.params.get_bool("UsbGpuActive")
     self.switchback_mode_enabled = self.params_memory.get_bool("SwitchbackModeEnabled") if self.started else False
     if self.sm.valid.get("starpilotCarState", False):
       starpilot_car_state = self.sm["starpilotCarState"]

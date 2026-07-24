@@ -90,6 +90,10 @@ class LatControlTorque(LatControl):
     self.is_silverado = CP.carFingerprint in SILVERADO_CARS
     self.is_gm = CP.brand == "gm"
     self.is_hkg_canfd_torque = CP.brand == "hyundai" and bool(CP.flags & HyundaiFlags.CANFD)
+    if self.is_ioniq_5:
+      # Light measured-response damping reduces unwind-to-center oscillation
+      # without changing the feedforward turn profile.
+      self.pid._k_d = [[0], [IONIQ_5_DAMPING_GAIN]]
     self.flm_surface_profile_key = get_flm_surface_profile_key(CP.carFingerprint, torque_control=True)
     if self.is_ioniq_6:
       self.low_speed_reset_threshold = min(self.low_speed_reset_threshold, IONIQ_6_LOW_SPEED_PID_RESET_SPEED)

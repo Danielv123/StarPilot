@@ -20,6 +20,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import (
   get_civic_bosch_modified_pid_output_scale,
 )
 from openpilot.selfdrive.controls.lib.latcontrol_vehicle_tunes import (
+  IONIQ_5_DAMPING_GAIN,
   clear_flm_runtime_overrides,
   get_flm_runtime_overrides,
   get_hkg_canfd_base_friction_threshold,
@@ -764,6 +765,7 @@ class TestLatControl:
 
     assert lac_log.active
     assert controller.torque_params.latAccelFactor == pytest.approx(CP.lateralTuning.torque.latAccelFactor * 1.36)
+    assert controller.pid.k_d == pytest.approx(IONIQ_5_DAMPING_GAIN)
 
   def test_ioniq_6_default_update_path(self):
     controller, VM, CS, params, starpilot_toggles = self._build_torque_controller(HYUNDAI.HYUNDAI_IONIQ_6)

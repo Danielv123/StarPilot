@@ -197,6 +197,16 @@ def test_trajectory_inventory_discovers_supported_rlog_encodings(tmp_path) -> No
   assert inventory["rlog_count"] == 3
 
 
+def test_trajectory_inventory_deduplicates_segment_encodings(tmp_path) -> None:
+  segment = tmp_path / "segment"
+  segment.mkdir()
+  for filename in ("rlog", "rlog.zst", "rlog.bz2"):
+    (segment / filename).write_bytes(b"fixture")
+  paths, inventory = neural_plant.trajectory_inventory(tmp_path)
+  assert [path.name for path in paths] == ["rlog"]
+  assert inventory["rlog_count"] == 1
+
+
 def test_search_profiles_use_distinct_report_paths(tmp_path) -> None:
   temporal = SimpleNamespace(output_dir=tmp_path, candidate_file=None, search_profile="temporal")
   architecture = SimpleNamespace(output_dir=tmp_path, candidate_file=None, search_profile="architecture")

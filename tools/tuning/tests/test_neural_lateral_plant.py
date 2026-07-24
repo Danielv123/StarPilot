@@ -9,6 +9,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from openpilot.tools.tuning import train_lateral_plant_model as plant_data
+from openpilot.tools.tuning import train_ioniq5_nnff_neural_plant as nnff_policy
 from openpilot.tools.tuning import train_neural_lateral_plant as neural_plant
 
 
@@ -385,3 +386,21 @@ def test_ensemble_artifact_round_trip(tmp_path) -> None:
   )
   assert all(model.training for model in differentiable_models)
   assert not any(parameter.requires_grad for model in differentiable_models for parameter in model.parameters())
+
+
+def test_nnff_policy_offsets_preserve_runtime_horizons() -> None:
+  assert nnff_policy.path_offsets(0.05) == (-6, -4, -2, 8, 14, 22, 32)
+  assert nnff_policy.path_offsets(0.01) == (-30, -20, -10, 40, 70, 110, 160)
+
+
+def test_nnff_policy_regime_sampler_balances_rare_turns() -> None:
+  desired = np.asarray([0.0] * 100 + [0.5] * 5 + [0.4] * 10 + [0.4] * 10 + [0.4] * 10)
+  jerk = np.asarray([0.0] * 100 + [0.8] * 5 + [0.2] * 10 + [-0.2] * 10 + [0.0] * 10)
+  speed = np.asarray([20.0] * 100 + [8.0] * 5 + [20.0] * 30)
+  regimes = nnff_policy.classify_regime(desired, jerk, speed)
+  selected = nnff_policy.balanced_indexes(regimes, 100, np.random.default_rng(7))
+  counts = {
+    name: int(np.count_nonzero(regimes[selected] == name))
+    for name in nnff_policy.REGIMES
+  }
+  assert counts == dict.fromkeys(nnff_policy.REGIMES, 20)

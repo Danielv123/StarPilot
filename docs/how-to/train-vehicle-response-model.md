@@ -153,11 +153,11 @@ The ignored output directory contains:
 - `training.json`: reviewable metrics without model tensors;
 - `current_trajectories.joblib`: the reusable full-rate extraction cache.
 
-The promoted model, training report, finalist definition, and definitive
-temporal/architecture/finalist search reports are checked in under
-`artifacts/tuning/neural_lateral_plant_20260723/`. Intermediate checkpoints
-and extraction caches remain ignored. The promoted `.pt` is stored as a
-normal Git blob; Git LFS is not used.
+The promoted model, training report, rejected-TCN report, finalist definition,
+and definitive temporal/architecture/finalist search reports are checked in
+under `artifacts/tuning/neural_lateral_plant_20260723/`. Intermediate
+checkpoints and extraction caches remain ignored. The promoted `.pt` is stored
+as a normal Git blob; Git LFS is not used.
 
 Downstream goal-based controller training should use the ensemble mean and
 penalize or reject commands with high member disagreement. The helper
@@ -235,12 +235,26 @@ same 0.5-second recursive training loss and 20,000-window evaluation:
 
 The full-budget result reversed the abbreviated screen: the TCN beat the
 Transformer and edged the compact GRU by `0.000372` (about 0.1%). The
-1,590,916-parameter TCN was therefore promoted to three-seed ensemble
-training. Its size was selected by the measured route-isolated search, not
-chosen as an arbitrary capacity target.
+1,590,916-parameter TCN therefore advanced to three-seed ensemble training.
+Its size was selected by the measured route-isolated search, not chosen as an
+arbitrary capacity target.
 
-The promoted ensemble has 1,590,916 parameters per member and 4,772,748
-parameters in total. The ensemble scored `0.364085` over 20,000 validation
-windows, a 4.2% improvement over the selected single-member finalist. It
-scored `0.427295` over 30,000 windows from the previously untouched holdout
-routes. The committed model is a 19,155,697-byte normal Git blob.
+The untouched-route acceptance gate rejected that promotion. For an
+apples-to-apples reference, the previous 100 Hz, three-second, 40,228-parameter
+GRU architecture was retrained through the corrected pipeline with the exact
+same cohorts and budget:
+
+| Three-member ensemble | Parameters per member | Validation | Untouched holdout |
+|---|---:|---:|---:|
+| 2.0 s TCN candidate | 1,590,916 | **0.364085** | 0.427295 |
+| Corrected 3.0 s GRU reference | 40,228 | 0.370714 | **0.407723** |
+
+The TCN improved validation by 1.8% but regressed 4.8% on the untouched
+routes. It was not promoted. The checked-in artifact is the corrected
+three-seed GRU reference, with 120,684 total parameters. The old committed
+artifact's `0.279085` validation and `0.339295` holdout figures were affected
+by the rollout leak, so they are not valid before/after baselines.
+
+The checked-in GRU ensemble scored `0.370714` over 20,000 validation windows
+and `0.407723` over 30,000 previously untouched holdout windows. Its model is
+a 530,913-byte normal Git blob.

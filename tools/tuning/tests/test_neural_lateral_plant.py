@@ -343,3 +343,9 @@ def test_ensemble_artifact_round_trip(tmp_path) -> None:
   assert payload["format_version"] == neural_plant.FORMAT_VERSION
   assert len(models) == 1
   assert stats["x_mean"].shape == (config.input_size,)
+
+  differentiable_models, _, _ = neural_plant.load_ensemble_artifact(
+    artifact_path, differentiable=True,
+  )
+  assert all(model.training for model in differentiable_models)
+  assert not any(parameter.requires_grad for model in differentiable_models for parameter in model.parameters())

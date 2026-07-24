@@ -306,7 +306,8 @@ def sampled_indexes(length: int, limit: int | None, seed: int) -> np.ndarray:
   return indexes
 
 
-def load_ensemble_artifact(path: Path, device: torch.device | str = "cpu") -> tuple[
+def load_ensemble_artifact(path: Path, device: torch.device | str = "cpu",
+                           differentiable: bool = False) -> tuple[
   list[nn.Module], dict[str, torch.Tensor], dict[str, Any]
 ]:
   payload = torch.load(path, map_location=device, weights_only=False)
@@ -317,7 +318,10 @@ def load_ensemble_artifact(path: Path, device: torch.device | str = "cpu") -> tu
   for state in payload["members"]:
     model = build_model(config).to(device)
     model.load_state_dict(state)
-    model.eval()
+    model.train(differentiable)
+    if differentiable:
+      for parameter in model.parameters():
+        parameter.requires_grad_(False)
     models.append(model)
   stats = tensor_stats(payload["normalization"], torch.device(device))
   return models, stats, payload

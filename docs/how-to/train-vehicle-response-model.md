@@ -153,11 +153,12 @@ The ignored output directory contains:
 - `training.json`: reviewable metrics without model tensors;
 - `current_trajectories.joblib`: the reusable full-rate extraction cache.
 
-The promoted model, training report, rejected-TCN report, finalist definition,
-and definitive temporal/architecture/finalist search reports are checked in
-under `artifacts/tuning/neural_lateral_plant_20260723/`. Intermediate
-checkpoints and extraction caches remain ignored. The promoted `.pt` is stored
-as a normal Git blob; Git LFS is not used.
+The promoted self-contained model is checked in under
+`artifacts/tuning/neural_lateral_plant_20260723/`. It includes its architecture,
+normalization, route splits, and evaluation metadata. Search reports, rejected
+candidates, intermediate checkpoints, extraction caches, and duplicate JSON
+exports remain ignored. The promoted `.pt` is stored as a normal Git blob;
+Git LFS is not used.
 
 Downstream goal-based controller training should use the ensemble mean and
 penalize or reject commands with high member disagreement. The helper
@@ -168,93 +169,23 @@ autoregressive ensemble mean and disagreement across the full horizon.
 This makes model uncertainty visible instead of allowing a controller to
 silently exploit one surrogate's error.
 
+On CUDA, load a GRU plant with
+`load_ensemble_artifact(..., differentiable=True)` for downstream policy
+training. This keeps the plant weights frozen while enabling cuDNN to retain
+the state needed for gradients through the rollout.
+
 Camera-only Pond archives cannot be used for this model. They do not contain
 the steering torque, vehicle state, and controller messages required for
 training; an archive must contain raw `rlog`, `rlog.zst`, `rlog.bz2`, or
 equivalent telemetry.
 
-### 2026-07-23 architecture search
+### Promoted Ioniq 5 plant
 
-The original search figures and promoted artifact were discarded during
-review. In recursive rollouts, the signed steering rate was predicted but its
-unsigned magnitude was still copied from the logged future row. The corrected
-rollout derives both values from the predicted state, and all results below
-were regenerated after that fix.
+The checked-in artifact was trained from 1,258 current-tire rlogs. Routes with
+more than 50% driver overlay were excluded, and routes `00000109` and
+`0000010b` were reserved for final evaluation.
 
-The search used 1,258 current-tire rlogs from 50 routes. It first excluded
-nine routes with more than 50% driver overlay, then found 23 routes with clean
-windows for every candidate: 18 training routes, three validation routes, and
-the untouched `00000109` and `0000010b` holdouts. No older-data pretraining
-was performed because the available Pond archive contained camera video
-rather than telemetry.
-
-The fixed-capacity temporal sweep selected a `10 ms` sample interval with
-`2.0 s` of history. The score is the weighted normalized error across the
-complete two-second autoregressive rollout; lower is better.
-
-| Sample interval | Best history | Best validation score |
-|---:|---:|---:|
-| 10 ms (100 Hz) | 2.0 s | **0.372822** |
-| 20 ms (50 Hz) | 3.0 s | 0.396610 |
-| 50 ms (20 Hz) | 3.0 s | 0.389449 |
-
-At 100 Hz, the five histories scored between `0.372822` and `0.413582`.
-Two seconds was the measured winner, narrowly ahead of 1.5 seconds
-(`0.375217`); extending the history to three seconds regressed to `0.383675`.
-The selected interval and history are empirical results for this data and
-rollout objective, not assumed constants.
-
-The architecture screen used the 100 Hz, 2.0-second history, except for the
-previous 50 Hz GRU control. It used a shorter recursive training horizon and
-1,000 validation windows to rank candidates before the expensive finalist
-pass.
-
-| Architecture | Parameters | Screen score |
-|---|---:|---:|
-| 4-layer, 192-wide Transformer | 1,857,796 | **0.413439** |
-| 7-block, 192-channel TCN | 1,590,916 | 0.417257 |
-| 2-layer, 192-wide GRU | 376,516 | 0.428121 |
-| 7-block, 128-channel TCN | 708,356 | 0.434001 |
-| 4-layer, 128-wide Transformer | 837,124 | 0.435579 |
-| 1-layer, 96-wide GRU | 40,228 | 0.438219 |
-| 2-layer, 64-wide Transformer | 117,892 | 0.454028 |
-| 3-layer, 384-wide GRU | 2,377,348 | 0.457944 |
-| Previous 50 Hz GRU control | 376,516 | 0.507727 |
-| 3-layer MLP | 1,214,724 | 0.516109 |
-
-The large Transformer narrowly led the screen, so the full-budget finalist
-pass compares it with the large TCN and the fixed-capacity temporal GRU. All
-three reuse the architecture screen's exact route cohorts and receive the
-same 0.5-second recursive training loss and 20,000-window evaluation:
-
-| Finalist | Parameters | Validation score |
-|---|---:|---:|
-| 7-block, 192-channel TCN | 1,590,916 | **0.380103** |
-| 1-layer, 96-wide GRU | 40,228 | 0.380475 |
-| 4-layer, 192-wide Transformer | 1,857,796 | 0.391672 |
-
-The full-budget result reversed the abbreviated screen: the TCN beat the
-Transformer and edged the compact GRU by `0.000372` (about 0.1%). The
-1,590,916-parameter TCN therefore advanced to three-seed ensemble training.
-Its size was selected by the measured route-isolated search, not chosen as an
-arbitrary capacity target.
-
-The untouched-route acceptance gate rejected that promotion. For an
-apples-to-apples reference, the previous 100 Hz, three-second, 40,228-parameter
-GRU architecture was retrained through the corrected pipeline with the exact
-same cohorts and budget:
-
-| Three-member ensemble | Parameters per member | Validation | Untouched holdout |
-|---|---:|---:|---:|
-| 2.0 s TCN candidate | 1,590,916 | **0.364085** | 0.427295 |
-| Corrected 3.0 s GRU reference | 40,228 | 0.370714 | **0.407723** |
-
-The TCN improved validation by 1.8% but regressed 4.8% on the untouched
-routes. It was not promoted. The checked-in artifact is the corrected
-three-seed GRU reference, with 120,684 total parameters. The old committed
-artifact's `0.279085` validation and `0.339295` holdout figures were affected
-by the rollout leak, so they are not valid before/after baselines.
-
-The checked-in GRU ensemble scored `0.370714` over 20,000 validation windows
-and `0.407723` over 30,000 previously untouched holdout windows. Its model is
-a 530,913-byte normal Git blob.
+The promoted three-member GRU ensemble uses 100 Hz samples and three seconds
+of history. It has 40,228 parameters per member and 120,684 in total. It
+scored `0.370714` over 20,000 validation windows and `0.407723` over 30,000
+previously untouched holdout windows.

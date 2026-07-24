@@ -472,6 +472,7 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
   intersection = sharp_turn_in & (speed < 8.0)
   unwind = turn_signal < -0.01
   steady = (~center) & torch.where(low_speed, curvature_rate.abs() < 0.005, jerk.abs() < 0.08)
+  steady_curve = steady & (curvature.abs() >= 0.003)
   signed_error = torch.sign(desired) * error
   inside = signed_error > 0.0
   weights = (
@@ -480,6 +481,7 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
     + 1.50 * turn_in.float()
     + 3.00 * sharp_turn_in.float()
     + 1.00 * unwind.float()
+    + 1.00 * steady_curve.float()
     + 0.75 * inside.float()
   )
   tracking = (
@@ -545,10 +547,15 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
   steady_bias_value = (
     (signed_error * steady.float()).sum() / steady.float().sum().clamp_min(1.0)
   )
+  steady_curve_inside_mse = (
+    (torch.relu(signed_error).square() * steady_curve.float()).sum()
+    / steady_curve.float().sum().clamp_min(1.0)
+  )
   inside_bias = (
     torch.relu(turn_in_bias_value).square()
     + 2.0 * torch.relu(unwind_bias_value).square()
     + torch.relu(steady_bias_value).square()
+    + 2.0 * steady_curve_inside_mse
   )
   loss = (
     tracking
@@ -568,6 +575,9 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
   def bias(mask: torch.Tensor) -> float:
     return float(signed_error[mask].mean().detach().cpu()) if mask.any() else 0.0
 
+  def command_rms(mask: torch.Tensor) -> float:
+    return float(torch.sqrt(commands[mask].square().mean()).detach().cpu()) if mask.any() else 0.0
+
   return loss, {
     "loss": float(loss.detach().cpu()),
     "tracking": float(tracking.detach().cpu()),
@@ -578,6 +588,12 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
     "unwind_rmse": rmse(unwind),
     "unwind_bias": bias(unwind),
     "steady_rmse": rmse(steady),
+    "steady_bias": bias(steady),
+    "steady_curve_rmse": rmse(steady_curve),
+    "steady_curve_bias": bias(steady_curve),
+    "steady_curve_inside_rmse": float(
+      torch.sqrt(steady_curve_inside_mse).detach().cpu()
+    ),
     "center_rmse": rmse(center),
     "low_speed_angle_rmse_deg": float(
       torch.sqrt(angle_error[low_speed_blend > 0.0].square().mean()).detach().cpu()
@@ -588,6 +604,7 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
     "low_speed_rate_rmse_deg_s": float(
       torch.sqrt(rate_error[low_speed_blend > 0.0].square().mean()).detach().cpu()
     ) if (low_speed_blend > 0.0).any() else 0.0,
+    "intersection_command_rms": command_rms(intersection),
     "angle_tracking": float(angle_tracking.detach().cpu()),
     "rate_tracking": float(rate_tracking.detach().cpu()),
     "slew": float(slew.detach().cpu()),
@@ -642,17 +659,19 @@ def evaluate_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
 
 
 def train_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
-                 policy_mean: torch.Tensor, policy_std: torch.Tensor,
-                 train_windows: PolicyWindows, validation_windows: PolicyWindows,
-                 args: argparse.Namespace, offsets: tuple[int, ...],
-                 sample_period_s: float) -> tuple[dict[str, Any], dict[str, Any]]:
+                  policy_mean: torch.Tensor, policy_std: torch.Tensor,
+                  train_windows: PolicyWindows, validation_windows: PolicyWindows,
+                  args: argparse.Namespace, offsets: tuple[int, ...],
+                  sample_period_s: float,
+                  baseline_policy: legacy.FluxPolicy | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+  baseline_policy = baseline_policy or policy
   initial = evaluate_policy(
-    policy, plant, policy_mean, policy_std, validation_windows,
+    baseline_policy, plant, policy_mean, policy_std, validation_windows,
     args, offsets, sample_period_s, args.random_state + 2, 0.0,
   )
   optimizer = torch.optim.AdamW(policy.parameters(), lr=args.policy_learning_rate, weight_decay=2e-5)
   rng = np.random.default_rng(args.random_state)
-  best_state = copy.deepcopy(policy.state_dict())
+  best_state = copy.deepcopy(baseline_policy.state_dict())
   best_loss = initial["loss"]
   best_metrics = dict(initial)
   patience = 0
@@ -705,6 +724,10 @@ def train_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
       <= initial["intersection_angle_rmse_deg"] * (1.0 - args.min_intersection_angle_improvement)
       and validation["low_speed_rate_rmse_deg_s"]
       <= initial["low_speed_rate_rmse_deg_s"] * (1.0 + args.max_low_speed_rate_regression)
+      and validation["steady_curve_inside_rmse"]
+      <= initial["steady_curve_inside_rmse"] * (1.0 + args.max_steady_curve_inside_regression)
+      and abs(validation["steady_curve_bias"])
+      <= abs(initial["steady_curve_bias"]) * (1.0 - args.min_steady_curve_bias_improvement)
     )
     if constrained and validation["loss"] < best_loss - 2e-5:
       best_loss = validation["loss"]
@@ -776,6 +799,11 @@ def main() -> None:
     help="Optional low-speed specialist blended in below 8 m/s and used fully below 5 m/s.",
   )
   parser.add_argument("--initial-model", type=Path, default=DEFAULT_INITIAL_MODEL)
+  parser.add_argument(
+    "--baseline-model",
+    type=Path,
+    help="Optional release baseline evaluated independently from the policy initialization.",
+  )
   parser.add_argument("--log-root", type=Path, default=DEFAULT_LOG_ROOT)
   parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
   parser.add_argument("--model-output", type=Path, default=DEFAULT_MODEL_OUTPUT)
@@ -812,6 +840,8 @@ def main() -> None:
   parser.add_argument("--max-inside-bias-increase", type=float, default=0.01)
   parser.add_argument("--min-intersection-angle-improvement", type=float, default=0.01)
   parser.add_argument("--max-low-speed-rate-regression", type=float, default=0.02)
+  parser.add_argument("--max-steady-curve-inside-regression", type=float, default=0.02)
+  parser.add_argument("--min-steady-curve-bias-improvement", type=float, default=0.01)
   parser.add_argument(
     "--hidden-sizes",
     type=int,
@@ -913,13 +943,32 @@ def main() -> None:
     legacy.distill_policy(source.cpu(), policy.cpu(), args.random_state)
     policy = policy.to(args.torch_device)
 
+  baseline_policy = copy.deepcopy(policy)
+  if args.baseline_model is not None:
+    baseline_payload = json.loads(args.baseline_model.read_text(encoding="utf-8"))
+    baseline_hidden_sizes = tuple(
+      len(next(value for key, value in layer.items() if key.endswith("_b")))
+      for layer in baseline_payload["layers"][:-1]
+    )
+    if (
+      int(baseline_payload["input_size"]) != len(INPUT_VARS)
+      or baseline_hidden_sizes != policy_hidden_sizes
+    ):
+      raise SystemExit("The baseline model must match the candidate input size and architecture.")
+    baseline_policy = legacy.FluxPolicy(policy_hidden_sizes, len(INPUT_VARS)).to(args.torch_device)
+    legacy.initialize_policy(
+      baseline_policy, baseline_payload, policy_mean_np, policy_std_np,
+    )
+    baseline_policy.eval()
+
   holdout_initial = evaluate_policy(
-    policy, plant, policy_mean, policy_std, holdout_windows,
+    baseline_policy, plant, policy_mean, policy_std, holdout_windows,
     args, offsets, sample_period_s, args.random_state + 3, 0.0,
   )
   validation_report, policy_fit = train_policy(
     policy, plant, policy_mean, policy_std,
     train_windows, validation_windows, args, offsets, sample_period_s,
+    baseline_policy,
   )
   holdout_optimized = evaluate_policy(
     policy, plant, policy_mean, policy_std, holdout_windows,
@@ -941,6 +990,12 @@ def main() -> None:
     <= holdout_initial["intersection_angle_rmse_deg"] * (1.0 - args.min_intersection_angle_improvement)
     and holdout_optimized["low_speed_rate_rmse_deg_s"]
     <= holdout_initial["low_speed_rate_rmse_deg_s"] * (1.0 + args.max_low_speed_rate_regression)
+    and holdout_optimized["steady_curve_inside_rmse"]
+    <= holdout_initial["steady_curve_inside_rmse"]
+    * (1.0 + args.max_steady_curve_inside_regression)
+    and abs(holdout_optimized["steady_curve_bias"])
+    <= abs(holdout_initial["steady_curve_bias"])
+    * (1.0 - args.min_steady_curve_bias_improvement)
   )
   report = {
     "method": (
@@ -949,9 +1004,10 @@ def main() -> None:
       else "goal_based_speed_conditioned_plant"
     ),
     "plant_artifact": str(args.plant_model),
-    "low_speed_plant_artifact": (
-      str(args.low_speed_plant_model) if args.low_speed_plant_model is not None else None
-    ),
+      "low_speed_plant_artifact": (
+        str(args.low_speed_plant_model) if args.low_speed_plant_model is not None else None
+      ),
+      "baseline_model": str(args.baseline_model) if args.baseline_model is not None else None,
     "plant_config": plant_payload["config"],
     "accepted": accepted,
     "data": {
@@ -990,6 +1046,8 @@ def main() -> None:
       "max_inside_bias_increase": args.max_inside_bias_increase,
       "min_intersection_angle_improvement": args.min_intersection_angle_improvement,
       "max_low_speed_rate_regression": args.max_low_speed_rate_regression,
+      "max_steady_curve_inside_regression": args.max_steady_curve_inside_regression,
+      "min_steady_curve_bias_improvement": args.min_steady_curve_bias_improvement,
       "command_rate_limit_per_s": args.command_rate_limit_per_s,
     },
     "validation": validation_report,

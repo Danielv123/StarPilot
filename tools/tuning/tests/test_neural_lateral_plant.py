@@ -393,6 +393,27 @@ def test_nnff_policy_offsets_preserve_runtime_horizons() -> None:
   assert nnff_policy.path_offsets(0.01) == (-30, -20, -10, 40, 70, 110, 160)
 
 
+def test_nnff_policy_export_matches_runtime_schema() -> None:
+  report = {
+    "validation": {"optimized": {"rmse": 0.1}},
+    "data": {
+      "train_windows": 100,
+      "validation_windows": 20,
+      "holdout_windows": 30,
+    },
+  }
+  policy = nnff_policy.legacy.FluxPolicy((4,))
+  payload = nnff_policy.export_policy(
+    policy,
+    np.zeros(len(nnff_policy.INPUT_VARS)),
+    np.ones(len(nnff_policy.INPUT_VARS)),
+    report,
+  )
+  assert payload["input_size"] == len(nnff_policy.INPUT_VARS)
+  assert payload["output_size"] == 1
+  assert payload["input_vars"] == list(nnff_policy.INPUT_VARS)
+
+
 def test_nnff_policy_regime_sampler_balances_rare_turns() -> None:
   desired = np.asarray([0.0] * 100 + [0.5] * 5 + [0.4] * 10 + [0.4] * 10 + [0.4] * 10)
   jerk = np.asarray([0.0] * 100 + [0.8] * 5 + [0.2] * 10 + [-0.2] * 10 + [0.0] * 10)

@@ -48,7 +48,7 @@ DEFAULT_HOLDOUTS = ("00000109", "0000010b")
 EVALUATION_BATCH_SIZE = 4096
 SEQUENCE_EVALUATION_BATCH_SIZE = 512
 SPEED_BUCKETS_MPS = ((0.5, 3.0), (3.0, 5.0), (5.0, 8.0), (8.0, 15.0), (15.0, math.inf))
-LOW_SPEED_STATE_WEIGHTS = (0.25, 3.0, 2.0, 0.5)
+LOW_SPEED_STATE_WEIGHTS = (1.0, 3.0, 2.0, 2.0)
 HIGH_SPEED_STATE_WEIGHTS = (3.0, 1.0, 1.5, 0.5)
 
 
@@ -80,6 +80,49 @@ class ModelConfig:
   @property
   def input_size(self) -> int:
     return self.history_steps * len(plant_data.BASE_FEATURES)
+
+
+@dataclass(frozen=True)
+class ResidualGateConfig:
+  low_speed_full_below_mps: float = 3.0
+  low_speed_off_above_mps: float = 5.0
+  maneuver_angle_on_deg: float = 2.0
+  maneuver_angle_full_deg: float = 8.0
+  maneuver_rate_on_deg_s: float = 5.0
+  maneuver_rate_full_deg_s: float = 25.0
+  maneuver_speed_on_below_mps: float = 5.0
+  maneuver_speed_full_below_mps: float = 8.0
+  maneuver_speed_full_above_mps: float = 15.0
+  maneuver_speed_off_above_mps: float = 20.0
+  residual_max_normalized_delta: float = 0.5
+  low_speed_state_mask: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0)
+  maneuver_state_mask: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0)
+
+  def __post_init__(self) -> None:
+    if self.low_speed_off_above_mps <= self.low_speed_full_below_mps:
+      raise ValueError("Low-speed gate thresholds must increase.")
+    if self.maneuver_angle_full_deg <= self.maneuver_angle_on_deg:
+      raise ValueError("Maneuver angle thresholds must increase.")
+    if self.maneuver_rate_full_deg_s <= self.maneuver_rate_on_deg_s:
+      raise ValueError("Maneuver rate thresholds must increase.")
+    speed_thresholds = (
+      self.maneuver_speed_on_below_mps,
+      self.maneuver_speed_full_below_mps,
+      self.maneuver_speed_full_above_mps,
+      self.maneuver_speed_off_above_mps,
+    )
+    if any(
+      right <= left
+      for left, right in zip(speed_thresholds, speed_thresholds[1:], strict=False)
+    ):
+      raise ValueError("Maneuver speed thresholds must increase.")
+    expected_states = len(plant_data.STATE_FEATURES)
+    if len(self.low_speed_state_mask) != expected_states:
+      raise ValueError("Low-speed state mask has the wrong length.")
+    if len(self.maneuver_state_mask) != expected_states:
+      raise ValueError("Maneuver state mask has the wrong length.")
+    if self.residual_max_normalized_delta <= 0.0:
+      raise ValueError("Residual output bound must be positive.")
 
 
 INITIAL_CANDIDATES = (
@@ -285,6 +328,80 @@ class TransformerPlant(nn.Module):
     return self.head(self.output_norm(encoded[:, -1]))
 
 
+class CompactResidualPlant(nn.Module):
+  def __init__(self, config: ModelConfig, output_size: int):
+    super().__init__()
+    candidate_lags = (0, 1, 5, 10, 25, 50, 100, 200, config.history_steps - 1)
+    self.history_steps = config.history_steps
+    self.feature_count = len(plant_data.BASE_FEATURES)
+    self.lags = tuple(sorted({
+      min(config.history_steps - 1, max(0, lag))
+      for lag in candidate_lags
+    }))
+    input_size = len(self.lags) * self.feature_count
+    self.network = nn.Sequential(
+      nn.Linear(input_size, 64),
+      nn.SiLU(),
+      nn.Linear(64, output_size),
+    )
+
+  def forward(self, values: torch.Tensor) -> torch.Tensor:
+    sequence = values.reshape((-1, self.history_steps, self.feature_count))
+    return self.network(sequence[:, self.lags].flatten(1))
+
+
+class SpeedGatedResidualPlant(nn.Module):
+  def __init__(self, config: ModelConfig, gate: ResidualGateConfig):
+    super().__init__()
+    self.base = build_model(config)
+    output_size = len(plant_data.STATE_FEATURES)
+    self.low_speed_residual = CompactResidualPlant(config, output_size)
+    self.maneuver_residual = CompactResidualPlant(config, output_size)
+    self.gate = gate
+    for parameter in self.base.parameters():
+      parameter.requires_grad_(False)
+    self._zero_residual_output(self.low_speed_residual)
+    self._zero_residual_output(self.maneuver_residual)
+    self.base.eval()
+
+  @staticmethod
+  def _zero_residual_output(model: nn.Module) -> None:
+    heads = [module for module in model.modules() if isinstance(module, nn.Linear)]
+    if not heads:
+      raise ValueError("Residual plant has no linear output layer.")
+    nn.init.zeros_(heads[-1].weight)
+    nn.init.zeros_(heads[-1].bias)
+
+  def predict_delta(self, history: torch.Tensor,
+                    stats: dict[str, torch.Tensor]) -> torch.Tensor:
+    normalized = (history.flatten(1) - stats["x_mean"]) / stats["x_std"]
+    base_delta = self.base(normalized) * stats["y_std"] + stats["y_mean"]
+    low_speed_gate, maneuver_gate = residual_expert_gates(history, self.gate)
+    low_speed_mask = torch.as_tensor(
+      self.gate.low_speed_state_mask, dtype=normalized.dtype, device=normalized.device,
+    )
+    maneuver_mask = torch.as_tensor(
+      self.gate.maneuver_state_mask, dtype=normalized.dtype, device=normalized.device,
+    )
+    low_speed_delta = (
+      torch.tanh(self.low_speed_residual(normalized))
+      * self.gate.residual_max_normalized_delta
+      * stats["y_std"]
+      * low_speed_mask
+    )
+    maneuver_delta = (
+      torch.tanh(self.maneuver_residual(normalized))
+      * self.gate.residual_max_normalized_delta
+      * stats["y_std"]
+      * maneuver_mask
+    )
+    return (
+      base_delta
+      + low_speed_gate[:, None] * low_speed_delta
+      + maneuver_gate[:, None] * maneuver_delta
+    )
+
+
 def build_model(config: ModelConfig) -> nn.Module:
   if config.family == "mlp":
     return MLPPlant(config, len(plant_data.STATE_FEATURES))
@@ -338,12 +455,153 @@ def speed_stratified_indexes(speeds: np.ndarray, size: int,
   return result
 
 
+def speed_stratified_evaluation_indexes(speeds: np.ndarray, size: int,
+                                        rng: np.random.Generator) -> np.ndarray:
+  size = min(size, len(speeds))
+  buckets = speed_bucket_indexes(speeds)
+  present = [index for index in range(len(SPEED_BUCKETS_MPS)) if np.any(buckets == index)]
+  if not present:
+    raise ValueError("No speed buckets are present.")
+  quota, remainder = divmod(size, len(present))
+  selected: list[np.ndarray] = []
+  for order, bucket in enumerate(present):
+    candidates = np.flatnonzero(buckets == bucket)
+    count = min(len(candidates), quota + (1 if order < remainder else 0))
+    selected.append(rng.choice(candidates, count, replace=False))
+  result = np.concatenate(selected)
+  if len(result) < size:
+    remaining = np.setdiff1d(np.arange(len(speeds)), result, assume_unique=False)
+    result = np.concatenate((
+      result,
+      rng.choice(remaining, size - len(result), replace=False),
+    ))
+  rng.shuffle(result)
+  return result
+
+
 def speed_conditioned_state_weights(speed: torch.Tensor) -> torch.Tensor:
   low = torch.as_tensor(LOW_SPEED_STATE_WEIGHTS, dtype=speed.dtype, device=speed.device)
   high = torch.as_tensor(HIGH_SPEED_STATE_WEIGHTS, dtype=speed.dtype, device=speed.device)
   low_blend = torch.clamp((8.0 - speed) / 7.5, 0.0, 1.0)[..., None]
   weights = low_blend * low + (1.0 - low_blend) * high
   return weights / weights.mean(dim=-1, keepdim=True).clamp_min(1e-6)
+
+
+def linear_gate(values: torch.Tensor, on: float, full: float) -> torch.Tensor:
+  if full <= on:
+    raise ValueError("Gate full threshold must exceed its on threshold.")
+  return torch.clamp((values - on) / (full - on), 0.0, 1.0)
+
+
+def residual_expert_gates(history: torch.Tensor,
+                          gate: ResidualGateConfig) -> tuple[torch.Tensor, torch.Tensor]:
+  speed = history[:, 0, V_EGO_INDEX]
+  angle = history[:, 0, STATE_INDEXES[1]].abs()
+  signed_rate = history[:, 0, STATE_INDEXES[SIGNED_STEERING_RATE_STATE_INDEX]].abs()
+  low_speed = torch.clamp(
+    (gate.low_speed_off_above_mps - speed)
+    / (gate.low_speed_off_above_mps - gate.low_speed_full_below_mps),
+    0.0,
+    1.0,
+  )
+  maneuver = torch.maximum(
+    linear_gate(angle, gate.maneuver_angle_on_deg, gate.maneuver_angle_full_deg),
+    linear_gate(signed_rate, gate.maneuver_rate_on_deg_s, gate.maneuver_rate_full_deg_s),
+  )
+  maneuver_speed = torch.minimum(
+    linear_gate(
+      speed,
+      gate.maneuver_speed_on_below_mps,
+      gate.maneuver_speed_full_below_mps,
+    ),
+    torch.clamp(
+      (gate.maneuver_speed_off_above_mps - speed)
+      / (
+        gate.maneuver_speed_off_above_mps
+        - gate.maneuver_speed_full_above_mps
+      ),
+      0.0,
+      1.0,
+    ),
+  )
+  return low_speed, maneuver * maneuver_speed
+
+
+def residual_activity_gate(history: torch.Tensor,
+                           gate: ResidualGateConfig) -> torch.Tensor:
+  low_speed, maneuver = residual_expert_gates(history, gate)
+  return torch.maximum(low_speed, maneuver)
+
+
+def residual_stratified_indexes(history: np.ndarray, size: int,
+                                gate: ResidualGateConfig, expert: str,
+                                rng: np.random.Generator) -> np.ndarray:
+  speed = history[:, 0, V_EGO_INDEX]
+  speed_buckets = speed_bucket_indexes(speed)
+  angle = np.abs(history[:, 0, STATE_INDEXES[1]])
+  signed_rate = np.abs(history[:, 0, STATE_INDEXES[SIGNED_STEERING_RATE_STATE_INDEX]])
+  active = (
+    (speed < gate.low_speed_off_above_mps)
+    | (angle > gate.maneuver_angle_on_deg)
+    | (signed_rate > gate.maneuver_rate_on_deg_s)
+  ).astype(np.int8)
+  groups = speed_buckets * 2 + active
+  eligible = np.ones(len(history), dtype=bool)
+  if expert == "low_speed":
+    eligible = speed < gate.low_speed_off_above_mps
+  elif expert == "maneuver":
+    eligible = (
+      (speed > gate.maneuver_speed_on_below_mps)
+      & (speed < gate.maneuver_speed_off_above_mps)
+      & (
+        (angle > gate.maneuver_angle_on_deg)
+        | (signed_rate > gate.maneuver_rate_on_deg_s)
+      )
+    )
+  elif expert != "both":
+    raise ValueError(f"Unsupported residual expert: {expert}")
+  present = [group for group in np.unique(groups[eligible]) if group >= 0]
+  quota, remainder = divmod(size, len(present))
+  selected: list[np.ndarray] = []
+  for order, group in enumerate(present):
+    candidates = np.flatnonzero((groups == group) & eligible)
+    count = quota + (1 if order < remainder else 0)
+    selected.append(rng.choice(candidates, count, replace=len(candidates) < count))
+  result = np.concatenate(selected)
+  rng.shuffle(result)
+  return result
+
+
+def residual_validation_coverage(windows: WindowBatch, expert: str,
+                                 gate: ResidualGateConfig) -> dict[str, int]:
+  speed = windows.history[:, 0, V_EGO_INDEX]
+  angle = np.abs(windows.history[:, 0, STATE_INDEXES[1]])
+  signed_rate = np.abs(
+    windows.history[:, 0, STATE_INDEXES[SIGNED_STEERING_RATE_STATE_INDEX]],
+  )
+  coverage = {
+    f"{lower:g}-{'inf' if math.isinf(upper) else f'{upper:g}'}mps": int(np.sum(
+      (speed >= lower) & (speed < upper),
+    ))
+    for lower, upper in SPEED_BUCKETS_MPS
+  }
+  coverage["maneuver_8-15mps"] = int(np.sum(
+    (speed >= 8.0) & (speed < 15.0)
+    & (
+      (angle > gate.maneuver_angle_on_deg)
+      | (signed_rate > gate.maneuver_rate_on_deg_s)
+    ),
+  ))
+  if expert in ("low_speed", "both") and coverage["0.5-3mps"] == 0:
+    raise ValueError(
+      "Low-speed residual validation has no eligible 0.5-3 m/s windows. " +
+      "Choose a route split with actual standstill/intersection coverage.",
+    )
+  if expert in ("maneuver", "both") and coverage["maneuver_8-15mps"] == 0:
+    raise ValueError(
+      "Maneuver residual validation has no eligible 8-15 m/s turn windows.",
+    )
+  return coverage
 
 
 def load_ensemble_artifact(path: Path, device: torch.device | str = "cpu",
@@ -356,7 +614,12 @@ def load_ensemble_artifact(path: Path, device: torch.device | str = "cpu",
   config = ModelConfig(**payload["config"])
   models: list[nn.Module] = []
   for state in payload["members"]:
-    model = build_model(config).to(device)
+    if payload.get("model_type") == "neural_speed_gated_residual_lateral_plant_ensemble":
+      model = SpeedGatedResidualPlant(
+        config, ResidualGateConfig(**payload["residual_gate"]),
+      ).to(device)
+    else:
+      model = build_model(config).to(device)
     model.load_state_dict(state)
     model.train(differentiable)
     if differentiable:
@@ -526,7 +789,8 @@ def sampled_source_keys(source_keys: set[tuple[int, int]], cap: int | None,
 
 def build_windows(trajectories: list[plant_data.Trajectory], routes: set[str],
                   config: ModelConfig, rollout_steps: int, cap: int | None,
-                  seed: int, source_keys: set[tuple[int, int]] | None = None) -> WindowBatch:
+                  seed: int, source_keys: set[tuple[int, int]] | None = None,
+                  sample_with_replacement: bool = True) -> WindowBatch:
   candidates: list[tuple[int, int]] = []
   prepared: dict[int, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
   for trajectory_index, trajectory in enumerate(trajectories):
@@ -550,7 +814,11 @@ def build_windows(trajectories: list[plant_data.Trajectory], routes: set[str],
       prepared[trajectory_index][1]["v_ego"][source]
       for trajectory_index, source in candidates
     ])
-    selected = speed_stratified_indexes(candidate_speeds, cap, rng)
+    selected = (
+      speed_stratified_indexes(candidate_speeds, cap, rng)
+      if sample_with_replacement
+      else speed_stratified_evaluation_indexes(candidate_speeds, cap, rng)
+    )
     candidates = [candidates[index] for index in selected]
 
   feature_names = list(plant_data.BASE_FEATURES)
@@ -620,6 +888,8 @@ def tensor_stats(stats: dict[str, np.ndarray], device: torch.device) -> dict[str
 
 def predict_delta(model: nn.Module, history: torch.Tensor,
                   stats: dict[str, torch.Tensor]) -> torch.Tensor:
+  if isinstance(model, SpeedGatedResidualPlant):
+    return model.predict_delta(history, stats)
   flat = history.flatten(1)
   normalized = (flat - stats["x_mean"]) / stats["x_std"]
   return model(normalized) * stats["y_std"] + stats["y_mean"]
@@ -658,12 +928,45 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
                  seed: int, epochs: int, patience: int, batch_size: int,
                  learning_rate: float, rollout_train_steps: int,
                  steps_per_epoch: int, device: torch.device,
-                 initial_state: dict[str, torch.Tensor] | None = None) -> tuple[nn.Module, dict[str, Any]]:
+                 initial_state: dict[str, torch.Tensor] | None = None,
+                 residual_gate: ResidualGateConfig | None = None,
+                 residual_expert: str = "both",
+                 preservation_weight: float = 1.0,
+                 max_mid_speed_regression: float = 0.03,
+                 max_high_speed_regression: float = 0.01) -> tuple[nn.Module, dict[str, Any]]:
   torch.manual_seed(seed)
-  model = build_model(config).to(device)
-  if initial_state is not None:
+  if residual_gate is not None:
+    if initial_state is None:
+      raise ValueError("Gated residual training requires an initial model.")
+    model = SpeedGatedResidualPlant(config, residual_gate).to(device)
+    if any(name.startswith("base.") for name in initial_state):
+      model.load_state_dict(initial_state)
+    else:
+      model.base.load_state_dict(initial_state)
+    if residual_expert == "low_speed":
+      for parameter in model.maneuver_residual.parameters():
+        parameter.requires_grad_(False)
+    elif residual_expert == "maneuver":
+      for parameter in model.low_speed_residual.parameters():
+        parameter.requires_grad_(False)
+    elif residual_expert != "both":
+      raise ValueError(f"Unsupported residual expert: {residual_expert}")
+  else:
+    model = build_model(config).to(device)
+  if initial_state is not None and residual_gate is None:
     model.load_state_dict(initial_state)
-  optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=2e-5)
+  teacher: nn.Module | None = None
+  if initial_state is not None and residual_gate is None and preservation_weight > 0.0:
+    teacher = build_model(config).to(device)
+    teacher.load_state_dict(initial_state)
+    teacher.eval()
+    for parameter in teacher.parameters():
+      parameter.requires_grad_(False)
+  optimizer = torch.optim.AdamW(
+    [parameter for parameter in model.parameters() if parameter.requires_grad],
+    lr=learning_rate,
+    weight_decay=2e-5,
+  )
   stats_t = tensor_stats(stats, device)
   rng = np.random.default_rng(seed)
   best_state = copy.deepcopy(model.state_dict())
@@ -671,7 +974,7 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
   history_report: list[dict[str, float]] = []
   started = perf_counter()
 
-  validation_indexes = speed_stratified_indexes(
+  validation_indexes = speed_stratified_evaluation_indexes(
     validation_windows.history[:, 0, V_EGO_INDEX],
     min(len(validation_windows), 5000),
     np.random.default_rng(seed + 10_000),
@@ -679,11 +982,26 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
   validation_limit = len(validation_indexes)
   validation_steps = min(rollout_train_steps, validation_windows.target_states.shape[1])
 
-  def validation_loss() -> float:
+  def validation_metrics() -> dict[str, Any]:
     model.eval()
     validation_squared_error = 0.0
     validation_values = 0
-    validation_batch = evaluation_batch_size(config)
+    bucket_squared_error = torch.zeros(
+      (len(SPEED_BUCKETS_MPS), len(plant_data.STATE_FEATURES)),
+      dtype=torch.float64,
+      device=device,
+    )
+    bucket_values = torch.zeros(len(SPEED_BUCKETS_MPS), dtype=torch.float64, device=device)
+    cruise_squared_error = torch.zeros_like(bucket_squared_error)
+    cruise_values = torch.zeros_like(bucket_values)
+    maneuver_squared_error = torch.zeros(
+      len(plant_data.STATE_FEATURES), dtype=torch.float64, device=device,
+    )
+    maneuver_values = torch.zeros((), dtype=torch.float64, device=device)
+    validation_batch = min(
+      evaluation_batch_size(config),
+      128 if residual_gate is not None else evaluation_batch_size(config),
+    )
     with torch.no_grad():
       for start in range(0, validation_limit, validation_batch):
         indexes = validation_indexes[start:start + validation_batch]
@@ -701,10 +1019,62 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
         )
         validation_squared_error += float(torch.sum(validation_error ** 2 * validation_weights).cpu())
         validation_values += validation_error.numel()
-    return validation_squared_error / validation_values
+        validation_speed = val_future[:, :validation_steps, V_EGO_INDEX]
+        cruise_mask = torch.ones_like(validation_speed, dtype=torch.bool)
+        maneuver_mask = torch.zeros_like(validation_speed, dtype=torch.bool)
+        if residual_gate is not None:
+          validation_angle = val_future[:, :validation_steps, STATE_INDEXES[1]].abs()
+          validation_rate = val_future[
+            :, :validation_steps, STATE_INDEXES[SIGNED_STEERING_RATE_STATE_INDEX]
+          ].abs()
+          cruise_mask = (
+            (validation_speed >= residual_gate.low_speed_off_above_mps)
+            & (validation_angle <= residual_gate.maneuver_angle_on_deg)
+            & (validation_rate <= residual_gate.maneuver_rate_on_deg_s)
+          )
+          maneuver_mask = (
+            (validation_speed >= 8.0) & (validation_speed < 15.0)
+            & (
+              (validation_angle > residual_gate.maneuver_angle_on_deg)
+              | (validation_rate > residual_gate.maneuver_rate_on_deg_s)
+            )
+          )
+          if maneuver_mask.any():
+            maneuver_squared_error += (validation_error[maneuver_mask] ** 2).sum(dim=0)
+            maneuver_values += maneuver_mask.sum()
+        for bucket_index, (lower, upper) in enumerate(SPEED_BUCKETS_MPS):
+          mask = (validation_speed >= lower) & (validation_speed < upper)
+          if mask.any():
+            bucket_squared_error[bucket_index] += (validation_error[mask] ** 2).sum(dim=0)
+            bucket_values[bucket_index] += mask.sum()
+          cruise_bucket_mask = mask & cruise_mask
+          if cruise_bucket_mask.any():
+            cruise_squared_error[bucket_index] += (
+              validation_error[cruise_bucket_mask] ** 2
+            ).sum(dim=0)
+            cruise_values[bucket_index] += cruise_bucket_mask.sum()
+    bucket_rmse = torch.sqrt(
+      bucket_squared_error / bucket_values[:, None].clamp_min(1.0),
+    ).cpu().numpy()
+    return {
+      "loss": validation_squared_error / validation_values,
+      "bucket_normalized_rmse": bucket_rmse.tolist(),
+      "cruise_bucket_normalized_rmse": torch.sqrt(
+        cruise_squared_error / cruise_values[:, None].clamp_min(1.0),
+      ).cpu().numpy().tolist(),
+      "cruise_bucket_values": cruise_values.cpu().numpy().tolist(),
+      "maneuver_8_15_normalized_rmse": torch.sqrt(
+        maneuver_squared_error / maneuver_values.clamp_min(1.0),
+      ).cpu().numpy().tolist(),
+      "maneuver_8_15_values": float(maneuver_values.cpu()),
+    }
 
-  best_loss = validation_loss()
+  initial_validation = validation_metrics()
+  best_loss = float(initial_validation["loss"])
   initial_validation_loss = best_loss
+  initial_bucket_rmse = np.asarray(initial_validation["bucket_normalized_rmse"])
+  initial_cruise_rmse = np.asarray(initial_validation["cruise_bucket_normalized_rmse"])
+  initial_maneuver_rmse = np.asarray(initial_validation["maneuver_8_15_normalized_rmse"])
   print(
     f"{config.name} seed={seed} initial_validation={best_loss:.6f}",
     flush=True,
@@ -714,11 +1084,20 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
     model.train()
     losses: list[float] = []
     for _ in range(steps_per_epoch):
-      indexes = speed_stratified_indexes(
-        train_windows.history[:, 0, V_EGO_INDEX],
-        min(batch_size, len(train_windows)),
-        rng,
-      )
+      if residual_gate is not None:
+        indexes = residual_stratified_indexes(
+          train_windows.history,
+          min(batch_size, len(train_windows)),
+          residual_gate,
+          residual_expert,
+          rng,
+        )
+      else:
+        indexes = speed_stratified_indexes(
+          train_windows.history[:, 0, V_EGO_INDEX],
+          min(batch_size, len(train_windows)),
+          rng,
+        )
       batch_history = torch.as_tensor(train_windows.history[indexes], device=device)
       batch_future = torch.as_tensor(train_windows.future_base[indexes], device=device)
       batch_targets = torch.as_tensor(train_windows.target_states[indexes], device=device)
@@ -737,25 +1116,90 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
         .sum()
         / step_weights.sum()
       )
+      preservation_loss = torch.zeros((), dtype=loss.dtype, device=device)
+      if teacher is not None:
+        with torch.no_grad():
+          teacher_prediction = rollout(
+            teacher, batch_history.clone(), batch_future, stats_t, steps,
+          )
+        teacher_error = (predicted - teacher_prediction) / stats_t["state_std"]
+        speed = batch_future[:, :steps, V_EGO_INDEX]
+        preservation_scale = torch.clamp((speed - 5.0) / 3.0, 0.0, 1.0)
+        preservation_loss = (
+          F.smooth_l1_loss(
+            teacher_error,
+            torch.zeros_like(teacher_error),
+            beta=0.10,
+            reduction="none",
+          )
+          * preservation_scale[..., None]
+        ).sum() / (
+          preservation_scale.sum().clamp_min(1.0) * teacher_error.shape[-1]
+        )
+        loss = loss + preservation_weight * preservation_loss
       optimizer.zero_grad(set_to_none=True)
       loss.backward()
       torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
       optimizer.step()
       losses.append(float(loss.detach().cpu()))
 
-    current_validation_loss = validation_loss()
+    current_validation = validation_metrics()
+    current_validation_loss = float(current_validation["loss"])
+    current_bucket_rmse = np.asarray(current_validation["bucket_normalized_rmse"])
+    current_cruise_rmse = np.asarray(current_validation["cruise_bucket_normalized_rmse"])
+    current_maneuver_rmse = np.asarray(current_validation["maneuver_8_15_normalized_rmse"])
+    maneuver_weights = np.asarray(HIGH_SPEED_STATE_WEIGHTS)
+    current_maneuver_score = float(np.average(
+      current_maneuver_rmse, weights=maneuver_weights,
+    ))
+    cruise_max_ratio = float(np.max(
+      current_cruise_rmse[2:]
+      / np.maximum(initial_cruise_rmse[2:], 1e-6)
+    ))
+    preserved = True
+    if initial_state is not None:
+      for bucket_index, tolerance in (
+        (2, max_mid_speed_regression),
+        (3, max_high_speed_regression),
+        (4, max_high_speed_regression),
+      ):
+        reference_rmse = (
+          initial_cruise_rmse[bucket_index]
+          if residual_gate is not None
+          else initial_bucket_rmse[bucket_index]
+        )
+        candidate_rmse = (
+          current_cruise_rmse[bucket_index]
+          if residual_gate is not None
+          else current_bucket_rmse[bucket_index]
+        )
+        preserved &= bool(np.all(
+          candidate_rmse <= reference_rmse * (1.0 + tolerance) + 1e-4
+        ))
+      if residual_gate is not None:
+        preserved &= bool(
+          current_maneuver_score
+          <= np.average(initial_maneuver_rmse, weights=maneuver_weights)
+          * (1.0 + max_high_speed_regression)
+          + 1e-4
+        )
     train_loss = float(np.mean(losses))
     history_report.append({
       "epoch": epoch,
       "train_loss": train_loss,
       "validation_loss": current_validation_loss,
+      "preserved": preserved,
+      "maneuver_8_15_score": current_maneuver_score,
+      "cruise_max_ratio": cruise_max_ratio,
     })
     print(
       f"{config.name} seed={seed} epoch={epoch:03d} " +
-      f"train={train_loss:.6f} validation={current_validation_loss:.6f}",
+      f"train={train_loss:.6f} validation={current_validation_loss:.6f} " +
+      f"maneuver={current_maneuver_score:.6f} cruise_ratio={cruise_max_ratio:.4f} " +
+      f"preserved={preserved}",
       flush=True,
     )
-    if current_validation_loss < best_loss - 1e-6:
+    if preserved and current_validation_loss < best_loss - 1e-6:
       best_loss = current_validation_loss
       best_state = copy.deepcopy(model.state_dict())
       stale_epochs = 0
@@ -771,6 +1215,13 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
     "epochs": len(history_report),
     "best_validation_loss": best_loss,
     "initial_validation_loss": initial_validation_loss,
+    "initial_validation_speed_buckets": initial_validation["bucket_normalized_rmse"],
+    "initial_validation_cruise_speed_buckets": (
+      initial_validation["cruise_bucket_normalized_rmse"]
+    ),
+    "initial_validation_maneuver_8_15": (
+      initial_validation["maneuver_8_15_normalized_rmse"]
+    ),
     "fit_seconds": perf_counter() - started,
     "rollout_train_steps": validation_steps,
     "rollout_train_seconds": validation_steps * config.sample_period_s,
@@ -778,8 +1229,8 @@ def train_member(config: ModelConfig, train_windows: WindowBatch,
   }
 
 
-def normalized_speed_metrics(normalized_error: np.ndarray,
-                             source_speed: np.ndarray) -> dict[str, Any]:
+def normalized_speed_metrics(normalized_error: np.ndarray, source_speed: np.ndarray,
+                             state_std: np.ndarray) -> dict[str, Any]:
   buckets = speed_bucket_indexes(source_speed)
   metrics: dict[str, Any] = {}
   for index, (lower, upper) in enumerate(SPEED_BUCKETS_MPS):
@@ -787,6 +1238,7 @@ def normalized_speed_metrics(normalized_error: np.ndarray,
     if not np.any(mask):
       continue
     normalized_rmse = np.sqrt(np.mean(normalized_error[mask] ** 2, axis=(0, 1)))
+    absolute_rmse = normalized_rmse * state_std
     blend_speed = float(np.median(source_speed[mask]))
     low_blend = float(np.clip((8.0 - blend_speed) / 7.5, 0.0, 1.0))
     state_weights = (
@@ -801,6 +1253,49 @@ def normalized_speed_metrics(normalized_error: np.ndarray,
         name: float(normalized_rmse[state_index])
         for state_index, name in enumerate(plant_data.STATE_FEATURES)
       },
+      "absolute_rmse": {
+        name: float(absolute_rmse[state_index])
+        for state_index, name in enumerate(plant_data.STATE_FEATURES)
+      },
+    }
+  return metrics
+
+
+def normalized_regime_metrics(normalized_error: np.ndarray, history: np.ndarray,
+                              state_std: np.ndarray) -> dict[str, Any]:
+  speed = history[:, 0, V_EGO_INDEX]
+  angle = history[:, 0, STATE_INDEXES[1]]
+  signed_rate = history[:, 0, STATE_INDEXES[SIGNED_STEERING_RATE_STATE_INDEX]]
+  regimes = {
+    "low_speed_below_5mps": speed < 5.0,
+    "turn_8-15mps": (
+      (speed >= 8.0) & (speed < 15.0)
+      & ((np.abs(angle) > 2.0) | (np.abs(signed_rate) > 5.0))
+    ),
+    "unwind_8-15mps": (
+      (speed >= 8.0) & (speed < 15.0)
+      & (angle * signed_rate < 0.0) & (np.abs(signed_rate) > 5.0)
+    ),
+    "ordinary_cruise_above_5mps": (
+      (speed >= 5.0) & (np.abs(angle) <= 2.0) & (np.abs(signed_rate) <= 5.0)
+    ),
+  }
+  metrics: dict[str, Any] = {}
+  for name, mask in regimes.items():
+    if not np.any(mask):
+      continue
+    normalized_rmse = np.sqrt(np.mean(normalized_error[mask] ** 2, axis=(0, 1)))
+    absolute_rmse = normalized_rmse * state_std
+    metrics[name] = {
+      "windows": int(np.count_nonzero(mask)),
+      "normalized_rmse": {
+        state_name: float(normalized_rmse[state_index])
+        for state_index, state_name in enumerate(plant_data.STATE_FEATURES)
+      },
+      "absolute_rmse": {
+        state_name: float(absolute_rmse[state_index])
+        for state_index, state_name in enumerate(plant_data.STATE_FEATURES)
+      },
     }
   return metrics
 
@@ -808,7 +1303,7 @@ def normalized_speed_metrics(normalized_error: np.ndarray,
 def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.ndarray],
                    config: ModelConfig, max_windows: int | None, device: torch.device,
                    seed: int) -> dict[str, Any]:
-  indexes = speed_stratified_indexes(
+  indexes = speed_stratified_evaluation_indexes(
     windows.history[:, 0, V_EGO_INDEX],
     min(len(windows), max_windows) if max_windows is not None else len(windows),
     np.random.default_rng(seed),
@@ -816,7 +1311,10 @@ def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.n
   targets = windows.target_states[indexes]
   stats_t = tensor_stats(stats, device)
   predictions: list[np.ndarray] = []
-  batch_size = evaluation_batch_size(config)
+  batch_size = min(
+    evaluation_batch_size(config),
+    128 if isinstance(model, SpeedGatedResidualPlant) else evaluation_batch_size(config),
+  )
   with torch.no_grad():
     for start in range(0, len(indexes), batch_size):
       batch_indexes = indexes[start:start + batch_size]
@@ -853,6 +1351,7 @@ def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.n
   speed_metrics = normalized_speed_metrics(
     normalized,
     windows.history[indexes, 0, V_EGO_INDEX],
+    stats["state_std"],
   )
   return {
     "windows": len(indexes),
@@ -862,6 +1361,9 @@ def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.n
       for index, name in enumerate(plant_data.STATE_FEATURES)
     },
     "speed_buckets": speed_metrics,
+    "regimes": normalized_regime_metrics(
+      normalized, windows.history[indexes], stats["state_std"],
+    ),
     "horizons": horizons,
   }
 
@@ -869,7 +1371,7 @@ def evaluate_model(model: nn.Module, windows: WindowBatch, stats: dict[str, np.n
 def evaluate_ensemble(models: list[nn.Module], windows: WindowBatch,
                       stats: dict[str, np.ndarray], config: ModelConfig,
                       max_windows: int | None, device: torch.device, seed: int) -> dict[str, Any]:
-  indexes = speed_stratified_indexes(
+  indexes = speed_stratified_evaluation_indexes(
     windows.history[:, 0, V_EGO_INDEX],
     min(len(windows), max_windows) if max_windows is not None else len(windows),
     np.random.default_rng(seed),
@@ -878,7 +1380,11 @@ def evaluate_ensemble(models: list[nn.Module], windows: WindowBatch,
   stats_t = tensor_stats(stats, device)
   prediction_batches: list[np.ndarray] = []
   disagreement_batches: list[np.ndarray] = []
-  batch_size = evaluation_batch_size(config)
+  batch_size = min(
+    evaluation_batch_size(config),
+    128 if any(isinstance(model, SpeedGatedResidualPlant) for model in models)
+    else evaluation_batch_size(config),
+  )
   with torch.no_grad():
     for start in range(0, len(indexes), batch_size):
       batch_indexes = indexes[start:start + batch_size]
@@ -910,6 +1416,10 @@ def evaluate_ensemble(models: list[nn.Module], windows: WindowBatch,
     "speed_buckets": normalized_speed_metrics(
       normalized,
       windows.history[indexes, 0, V_EGO_INDEX],
+      stats["state_std"],
+    ),
+    "regimes": normalized_regime_metrics(
+      normalized, windows.history[indexes], stats["state_std"],
     ),
     "mean_normalized_disagreement": {
       name: float(np.mean(normalized_disagreement[..., index]))
@@ -1011,6 +1521,36 @@ def common_parser() -> argparse.ArgumentParser:
   parser.add_argument("--batch-size", type=int, default=512)
   parser.add_argument("--steps-per-epoch", type=int, default=120)
   parser.add_argument("--learning-rate", type=float, default=6e-4)
+  parser.add_argument("--gated-residual", action="store_true")
+  parser.add_argument(
+    "--residual-expert",
+    choices=("low_speed", "maneuver", "both"),
+    default="both",
+  )
+  parser.add_argument("--low-speed-full-below-mps", type=float, default=3.0)
+  parser.add_argument("--low-speed-off-above-mps", type=float, default=5.0)
+  parser.add_argument("--maneuver-angle-on-deg", type=float, default=2.0)
+  parser.add_argument("--maneuver-angle-full-deg", type=float, default=8.0)
+  parser.add_argument("--maneuver-rate-on-deg-s", type=float, default=5.0)
+  parser.add_argument("--maneuver-rate-full-deg-s", type=float, default=25.0)
+  parser.add_argument("--maneuver-speed-on-below-mps", type=float, default=5.0)
+  parser.add_argument("--maneuver-speed-full-below-mps", type=float, default=8.0)
+  parser.add_argument("--maneuver-speed-full-above-mps", type=float, default=15.0)
+  parser.add_argument("--maneuver-speed-off-above-mps", type=float, default=20.0)
+  parser.add_argument("--residual-max-normalized-delta", type=float, default=0.5)
+  parser.add_argument(
+    "--low-speed-residual-state",
+    action="append",
+    choices=plant_data.STATE_FEATURES,
+  )
+  parser.add_argument(
+    "--maneuver-residual-state",
+    action="append",
+    choices=plant_data.STATE_FEATURES,
+  )
+  parser.add_argument("--preservation-weight", type=float, default=1.0)
+  parser.add_argument("--max-mid-speed-regression", type=float, default=0.03)
+  parser.add_argument("--max-high-speed-regression", type=float, default=0.01)
   parser.add_argument("--random-state", type=int, default=23)
   parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
   return parser
@@ -1077,8 +1617,10 @@ def effective_rollout_train_steps(requested_seconds: float, config: ModelConfig,
 def split_from_report(path: Path, usable_routes: set[str],
                       inventory: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
   report = json.loads(path.read_text(encoding="utf-8"))
-  data = report["data"]
-  report_inventory = data["current"]
+  data = report.get("data", report)
+  report_inventory = data.get("current", data.get("current_data"))
+  if report_inventory is None:
+    raise ValueError("Split report does not contain a data inventory.")
   for key in ("rlog_count", "rlog_bytes", "newest_mtime_ns"):
     if report_inventory.get(key) != inventory.get(key):
       raise ValueError(f"Split report data inventory differs at {key}.")
@@ -1145,6 +1687,7 @@ def run_search(args: argparse.Namespace) -> None:
     validation_windows = build_windows(
       trajectories, validation_routes, candidate, rollout_steps,
       None, args.random_state + 1, shared_validation_sources,
+      sample_with_replacement=False,
     )
     stats = normalization(train_windows)
     rollout_train_steps = effective_rollout_train_steps(
@@ -1223,14 +1766,37 @@ def run_train(args: argparse.Namespace) -> None:
   validation_windows = build_windows(
     trajectories, validation_routes, config, rollout_steps,
     args.max_validation_windows, args.random_state + 1,
+    sample_with_replacement=False,
   )
   holdout_windows = build_windows(
     trajectories, holdout_routes, config, rollout_steps,
     args.max_holdout_windows, args.random_state + 2,
+    sample_with_replacement=False,
   )
+  validation_coverage: dict[str, int] | None = None
+  if args.gated_residual:
+    validation_coverage = residual_validation_coverage(
+      validation_windows,
+      args.residual_expert,
+      ResidualGateConfig(
+        low_speed_full_below_mps=args.low_speed_full_below_mps,
+        low_speed_off_above_mps=args.low_speed_off_above_mps,
+        maneuver_angle_on_deg=args.maneuver_angle_on_deg,
+        maneuver_angle_full_deg=args.maneuver_angle_full_deg,
+        maneuver_rate_on_deg_s=args.maneuver_rate_on_deg_s,
+        maneuver_rate_full_deg_s=args.maneuver_rate_full_deg_s,
+        maneuver_speed_on_below_mps=args.maneuver_speed_on_below_mps,
+        maneuver_speed_full_below_mps=args.maneuver_speed_full_below_mps,
+        maneuver_speed_full_above_mps=args.maneuver_speed_full_above_mps,
+        maneuver_speed_off_above_mps=args.maneuver_speed_off_above_mps,
+        residual_max_normalized_delta=args.residual_max_normalized_delta,
+      ),
+    )
   initial_payload: dict[str, Any] | None = None
   if args.initial_model is not None:
     initial_payload = torch.load(args.initial_model, map_location="cpu", weights_only=False)
+  if args.gated_residual and initial_payload is None:
+    raise ValueError("--gated-residual requires --initial-model.")
   stats = (
     initial_payload["normalization"]
     if initial_payload is not None
@@ -1243,6 +1809,27 @@ def run_train(args: argparse.Namespace) -> None:
   models: list[nn.Module] = []
   member_reports: list[dict[str, Any]] = []
   ensemble_seeds = args.ensemble_seed or [23, 41, 71]
+  residual_gate = ResidualGateConfig(
+    low_speed_full_below_mps=args.low_speed_full_below_mps,
+    low_speed_off_above_mps=args.low_speed_off_above_mps,
+    maneuver_angle_on_deg=args.maneuver_angle_on_deg,
+    maneuver_angle_full_deg=args.maneuver_angle_full_deg,
+    maneuver_rate_on_deg_s=args.maneuver_rate_on_deg_s,
+    maneuver_rate_full_deg_s=args.maneuver_rate_full_deg_s,
+    maneuver_speed_on_below_mps=args.maneuver_speed_on_below_mps,
+    maneuver_speed_full_below_mps=args.maneuver_speed_full_below_mps,
+    maneuver_speed_full_above_mps=args.maneuver_speed_full_above_mps,
+    maneuver_speed_off_above_mps=args.maneuver_speed_off_above_mps,
+    residual_max_normalized_delta=args.residual_max_normalized_delta,
+    low_speed_state_mask=tuple(
+      float(name in (args.low_speed_residual_state or plant_data.STATE_FEATURES))
+      for name in plant_data.STATE_FEATURES
+    ),
+    maneuver_state_mask=tuple(
+      float(name in (args.maneuver_residual_state or plant_data.STATE_FEATURES))
+      for name in plant_data.STATE_FEATURES
+    ),
+  ) if args.gated_residual else None
   initial_states: list[dict[str, torch.Tensor]] = []
   if initial_payload is not None:
     initial_config = ModelConfig(**initial_payload["config"])
@@ -1261,6 +1848,11 @@ def run_train(args: argparse.Namespace) -> None:
       seed, args.epochs, args.patience, args.batch_size,
       args.learning_rate, rollout_train_steps, args.steps_per_epoch, device,
       initial_state=initial_states[member_index % len(initial_states)] if initial_states else None,
+      residual_gate=residual_gate,
+      residual_expert=args.residual_expert,
+      preservation_weight=args.preservation_weight,
+      max_mid_speed_regression=args.max_mid_speed_regression,
+      max_high_speed_regression=args.max_high_speed_regression,
     )
     validation = evaluate_model(
       model, validation_windows, stats, config,
@@ -1279,7 +1871,11 @@ def run_train(args: argparse.Namespace) -> None:
   )
   artifact = {
     "format_version": FORMAT_VERSION,
-    "model_type": "neural_controller_independent_lateral_plant_ensemble",
+    "model_type": (
+      "neural_speed_gated_residual_lateral_plant_ensemble"
+      if residual_gate is not None
+      else "neural_controller_independent_lateral_plant_ensemble"
+    ),
     "config": asdict(config),
     "feature_names": list(plant_data.BASE_FEATURES),
     "state_feature_names": list(plant_data.STATE_FEATURES),
@@ -1303,6 +1899,7 @@ def run_train(args: argparse.Namespace) -> None:
       "train_windows": len(train_windows),
       "validation_windows": len(validation_windows),
       "holdout_windows": len(holdout_windows),
+      "residual_validation_coverage": validation_coverage,
       "member_reports": member_reports,
       "ensemble_validation": ensemble_validation,
       "ensemble_holdout": ensemble_holdout,
@@ -1314,9 +1911,15 @@ def run_train(args: argparse.Namespace) -> None:
         "rollout_training_seconds": rollout_train_steps * config.sample_period_s,
         "rollout_training_steps": rollout_train_steps,
         "rollout_validation_seconds": args.rollout_seconds,
+        "preservation_weight": args.preservation_weight,
+        "residual_expert": args.residual_expert if residual_gate is not None else None,
+        "max_mid_speed_regression": args.max_mid_speed_regression,
+        "max_high_speed_regression": args.max_high_speed_regression,
       },
     },
   }
+  if residual_gate is not None:
+    artifact["residual_gate"] = asdict(residual_gate)
   args.output_dir.mkdir(parents=True, exist_ok=True)
   model_path = args.output_dir / "neural_lateral_plant.pt"
   report_path = args.output_dir / "training.json"
@@ -1329,6 +1932,8 @@ def run_train(args: argparse.Namespace) -> None:
     "feature_names": artifact["feature_names"],
     "state_feature_names": artifact["state_feature_names"],
   })
+  if residual_gate is not None:
+    report["residual_gate"] = artifact["residual_gate"]
   report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
   print(json.dumps({
     "config": artifact["config"],

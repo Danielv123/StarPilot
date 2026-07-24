@@ -388,6 +388,114 @@ def test_ensemble_artifact_round_trip(tmp_path) -> None:
   assert not any(parameter.requires_grad for model in differentiable_models for parameter in model.parameters())
 
 
+def test_residual_gate_covers_low_speed_and_active_maneuvers() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16,))
+  gate = neural_plant.ResidualGateConfig()
+  history = torch.zeros((4, config.history_steps, len(plant_data.BASE_FEATURES)))
+  speed_index = plant_data.BASE_FEATURES.index("v_ego")
+  angle_index = plant_data.BASE_FEATURES.index("steering_angle_deg")
+  rate_index = plant_data.BASE_FEATURES.index("signed_steering_rate_deg_s")
+  history[:, 0, speed_index] = torch.tensor([2.0, 10.0, 10.0, 10.0])
+  history[2, 0, angle_index] = gate.maneuver_angle_full_deg
+  history[3, 0, rate_index] = gate.maneuver_rate_full_deg_s
+
+  activity = neural_plant.residual_activity_gate(history, gate)
+
+  assert torch.allclose(activity, torch.tensor([1.0, 0.0, 1.0, 1.0]))
+
+
+def test_residual_expert_sampler_keeps_training_regimes_separate() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16,))
+  gate = neural_plant.ResidualGateConfig()
+  history = np.zeros((6, config.history_steps, len(plant_data.BASE_FEATURES)), dtype=np.float32)
+  speed_index = plant_data.BASE_FEATURES.index("v_ego")
+  angle_index = plant_data.BASE_FEATURES.index("steering_angle_deg")
+  history[:, 0, speed_index] = (1.0, 4.0, 6.0, 10.0, 12.0, 20.0)
+  history[3:5, 0, angle_index] = 10.0
+  rng = np.random.default_rng(7)
+
+  low_indexes = neural_plant.residual_stratified_indexes(
+    history, 20, gate, "low_speed", rng,
+  )
+  maneuver_indexes = neural_plant.residual_stratified_indexes(
+    history, 20, gate, "maneuver", rng,
+  )
+
+  assert np.all(history[low_indexes, 0, speed_index] < gate.low_speed_off_above_mps)
+  assert set(maneuver_indexes) <= {3, 4}
+
+
+def test_zero_initialized_residual_matches_base_and_round_trips(tmp_path) -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16,))
+  gate = neural_plant.ResidualGateConfig()
+  model = neural_plant.SpeedGatedResidualPlant(config, gate)
+  feature_count = len(plant_data.BASE_FEATURES)
+  state_count = len(plant_data.STATE_FEATURES)
+  stats = {
+    "x_mean": torch.zeros(config.input_size),
+    "x_std": torch.ones(config.input_size),
+    "y_mean": torch.arange(state_count, dtype=torch.float32),
+    "y_std": torch.ones(state_count),
+    "state_std": torch.ones(state_count),
+  }
+  history = torch.randn((3, config.history_steps, feature_count))
+  history[:, 0, plant_data.BASE_FEATURES.index("v_ego")] = 2.0
+  expected = neural_plant.predict_delta(model.base, history, stats)
+  assert torch.allclose(neural_plant.predict_delta(model, history, stats), expected)
+
+  artifact = {
+    "format_version": neural_plant.FORMAT_VERSION,
+    "model_type": "neural_speed_gated_residual_lateral_plant_ensemble",
+    "config": {
+      "name": config.name,
+      "family": config.family,
+      "sample_step": config.sample_step,
+      "history_steps": config.history_steps,
+      "hidden_sizes": config.hidden_sizes,
+    },
+    "residual_gate": {
+      "low_speed_full_below_mps": gate.low_speed_full_below_mps,
+      "low_speed_off_above_mps": gate.low_speed_off_above_mps,
+      "maneuver_angle_on_deg": gate.maneuver_angle_on_deg,
+      "maneuver_angle_full_deg": gate.maneuver_angle_full_deg,
+      "maneuver_rate_on_deg_s": gate.maneuver_rate_on_deg_s,
+      "maneuver_rate_full_deg_s": gate.maneuver_rate_full_deg_s,
+    },
+    "normalization": {
+      name: value.numpy()
+      for name, value in stats.items()
+    },
+    "members": [neural_plant.state_dict_cpu(model)],
+  }
+  artifact_path = tmp_path / "residual_plant.pt"
+  torch.save(artifact, artifact_path)
+  models, loaded_stats, _ = neural_plant.load_ensemble_artifact(artifact_path)
+  actual = neural_plant.predict_delta(models[0], history, loaded_stats)
+  assert torch.allclose(actual, expected)
+
+
+def test_regime_metrics_separate_unwind_from_ordinary_cruise() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16,))
+  feature_count = len(plant_data.BASE_FEATURES)
+  state_count = len(plant_data.STATE_FEATURES)
+  history = np.zeros((3, config.history_steps, feature_count), dtype=np.float32)
+  speed_index = plant_data.BASE_FEATURES.index("v_ego")
+  angle_index = plant_data.BASE_FEATURES.index("steering_angle_deg")
+  rate_index = plant_data.BASE_FEATURES.index("signed_steering_rate_deg_s")
+  history[:, 0, speed_index] = (2.0, 11.0, 11.0)
+  history[1, 0, angle_index] = 8.0
+  history[1, 0, rate_index] = -10.0
+  normalized_error = np.ones((3, 5, state_count), dtype=np.float32)
+
+  metrics = neural_plant.normalized_regime_metrics(
+    normalized_error, history, np.ones(state_count, dtype=np.float32),
+  )
+
+  assert metrics["low_speed_below_5mps"]["windows"] == 1
+  assert metrics["unwind_8-15mps"]["windows"] == 1
+  assert metrics["ordinary_cruise_above_5mps"]["windows"] == 1
+
+
 def test_nnff_policy_offsets_preserve_runtime_horizons() -> None:
   assert nnff_policy.path_offsets(0.05) == (-6, -4, -2, 8, 14, 22, 32)
   assert nnff_policy.path_offsets(0.01) == (-30, -20, -10, 40, 70, 110, 160)
@@ -456,6 +564,15 @@ def test_speed_sampler_balances_available_buckets() -> None:
   selected = neural_plant.speed_stratified_indexes(speeds, 100, np.random.default_rng(3))
   counts = np.bincount(neural_plant.speed_bucket_indexes(speeds[selected]), minlength=5)
   assert counts.tolist() == [20, 20, 20, 20, 20]
+
+
+def test_evaluation_speed_sampler_never_duplicates_sparse_buckets() -> None:
+  speeds = np.asarray([1.0, 4.0, 10.0, 10.0, 10.0, 20.0])
+  selected = neural_plant.speed_stratified_evaluation_indexes(
+    speeds, len(speeds), np.random.default_rng(3),
+  )
+  assert len(selected) == len(speeds)
+  assert len(np.unique(selected)) == len(selected)
 
 
 def test_low_speed_curvature_identifies_intersection_turn_in() -> None:

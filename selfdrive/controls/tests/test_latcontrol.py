@@ -21,6 +21,8 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import (
 )
 from openpilot.selfdrive.controls.lib.latcontrol_vehicle_tunes import (
   IONIQ_5_DAMPING_GAIN,
+  IONIQ_5_REVERSAL_DAMPING_GAIN,
+  IONIQ_5_REVERSAL_DAMPING_HOLD_SECONDS,
   clear_flm_runtime_overrides,
   get_flm_runtime_overrides,
   get_hkg_canfd_base_friction_threshold,
@@ -766,6 +768,29 @@ class TestLatControl:
     assert lac_log.active
     assert controller.torque_params.latAccelFactor == pytest.approx(CP.lateralTuning.torque.latAccelFactor * 1.36)
     assert controller.pid.k_d == pytest.approx(IONIQ_5_DAMPING_GAIN)
+
+  def test_ioniq_5_reduces_damping_only_after_turn_exit_rate_reversal(self):
+    controller, _, _, _, _ = self._build_torque_controller(HYUNDAI.HYUNDAI_IONIQ_5)
+    measurement_rate = 2.0
+
+    smooth_error_rate = controller._ioniq_5_damping_error_rate(
+      measurement_rate, 0.5, -1.0, 11.0, 2.0, False,
+    )
+    assert smooth_error_rate == pytest.approx(-measurement_rate)
+
+    reversal_error_rate = controller._ioniq_5_damping_error_rate(
+      measurement_rate, 0.5, -1.0, 11.0, -2.0, False,
+    )
+    assert reversal_error_rate == pytest.approx(
+      -measurement_rate * IONIQ_5_REVERSAL_DAMPING_GAIN / IONIQ_5_DAMPING_GAIN,
+    )
+
+    hold_steps = round(IONIQ_5_REVERSAL_DAMPING_HOLD_SECONDS / DT_CTRL)
+    for _ in range(hold_steps + 1):
+      recovered_error_rate = controller._ioniq_5_damping_error_rate(
+        measurement_rate, 0.2, 0.0, 11.0, -2.0, False,
+      )
+    assert recovered_error_rate == pytest.approx(-measurement_rate)
 
   def test_ioniq_6_default_update_path(self):
     controller, VM, CS, params, starpilot_toggles = self._build_torque_controller(HYUNDAI.HYUNDAI_IONIQ_6)

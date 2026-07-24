@@ -78,9 +78,27 @@ class NeuralEnsemblePredictor:
 
 class DampedClosedLoopEvaluator(legacy.ClosedLoopEvaluator):
   def __init__(self, model: Any, batch: legacy.RolloutBatch, sample_period_s: float,
-               wobble_weight: float, damping_gain: float):
+               wobble_weight: float, damping_gain: float,
+               turn_exit_damping_gain: float | None = None,
+               turn_exit_damping_gain_right: float | None = None,
+               reversal_damping_gain: float | None = None,
+               reversal_hold_seconds: float = 0.40,
+               steering_rate_feedback_gain: float = 0.0):
     super().__init__(model, batch, sample_period_s, wobble_weight)
     self.damping_gain = damping_gain
+    self.turn_exit_damping_gain = (
+      damping_gain if turn_exit_damping_gain is None else turn_exit_damping_gain
+    )
+    self.turn_exit_damping_gain_right = (
+      self.turn_exit_damping_gain
+      if turn_exit_damping_gain_right is None else turn_exit_damping_gain_right
+    )
+    self.reversal_damping_gain = (
+      self.turn_exit_damping_gain
+      if reversal_damping_gain is None else reversal_damping_gain
+    )
+    self.reversal_hold_seconds = reversal_hold_seconds
+    self.steering_rate_feedback_gain = steering_rate_feedback_gain
 
   def rollout_many(self, tunes: list[tune_math.Tune]) -> list[legacy.RolloutTrace]:
     candidate_count = len(tunes)
@@ -91,12 +109,19 @@ class DampedClosedLoopEvaluator(legacy.ClosedLoopEvaluator):
     command_deltas = []
     commands = []
     states = []
+    turn_exit_remaining = np.zeros(candidate_count * window_count, dtype=np.int32)
+    turn_exit_side = np.ones(candidate_count * window_count, dtype=np.float64)
+    turn_exit_lookback_steps = max(1, int(round(0.75 / self.dt)))
+    reversal_remaining = np.zeros(candidate_count * window_count, dtype=np.int32)
+    reversal_hold_steps = max(1, int(round(self.reversal_hold_seconds / self.dt)))
     for step in range(self.batch.desired.shape[1]):
       desired = np.tile(self.batch.desired[:, step].astype(np.float64), candidate_count)
       jerk = np.tile(self.batch.jerk[:, step].astype(np.float64), candidate_count)
       speed = np.tile(self.batch.v_ego[:, step].astype(np.float64), candidate_count)
       actual = history[:, 0, self.base_index["actual_lateral_accel"]].astype(np.float64)
       previous_actual = history[:, 1, self.base_index["actual_lateral_accel"]].astype(np.float64)
+      steering_rate = history[:, 0, self.base_index["signed_steering_rate_deg_s"]].astype(np.float64)
+      previous_steering_rate = history[:, 1, self.base_index["signed_steering_rate_deg_s"]].astype(np.float64)
       measurement_rate = np.clip((actual - previous_actual) / self.dt, -2.5, 2.5)
       kp = np.interp(speed, legacy.KP_SPEEDS, legacy.KP_VALUES)
       low_speed_factor = (
@@ -106,7 +131,41 @@ class DampedClosedLoopEvaluator(legacy.ClosedLoopEvaluator):
       error_lsf = error * (1.0 + low_speed_factor / np.maximum(kp, 1e-3))
       p = kp * error_lsf
       integral += legacy.KI * self.dt * error_lsf
-      d = -self.damping_gain * measurement_rate
+      unwind = (
+        (speed >= 8.0) & (speed < 15.0)
+        & (np.abs(desired) >= 0.12)
+        & (desired * jerk < -0.01)
+      )
+      turn_exit_remaining = np.maximum(turn_exit_remaining - 1, 0)
+      turn_exit_remaining[unwind] = turn_exit_lookback_steps
+      turn_exit_side[unwind] = np.sign(desired[unwind])
+      turn_exit = (
+        (speed >= 8.0) & (speed < 15.0)
+        & (unwind | ((turn_exit_remaining > 0) & (np.abs(desired) < 0.35)))
+      )
+      rate_reversal = (
+        turn_exit
+        & (steering_rate * previous_steering_rate < 0.0)
+        & (np.minimum(np.abs(steering_rate), np.abs(previous_steering_rate)) >= 0.5)
+      )
+      reversal_remaining = np.maximum(reversal_remaining - 1, 0)
+      reversal_remaining[rate_reversal] = reversal_hold_steps
+      reversal_recovery = turn_exit & (reversal_remaining > 0)
+      turn_exit_gain = np.where(
+        turn_exit_side >= 0.0,
+        self.turn_exit_damping_gain,
+        self.turn_exit_damping_gain_right,
+      )
+      effective_damping_gain = np.where(
+        turn_exit, turn_exit_gain, self.damping_gain,
+      )
+      effective_damping_gain = np.where(
+        reversal_recovery, self.reversal_damping_gain, effective_damping_gain,
+      )
+      d = -effective_damping_gain * measurement_rate
+      steering_rate_feedback = np.where(
+        reversal_recovery, self.steering_rate_feedback_gain * steering_rate, 0.0,
+      )
       controller_output = np.empty_like(desired)
       for candidate_index, tune in enumerate(tunes):
         candidate = slice(candidate_index * window_count, (candidate_index + 1) * window_count)
@@ -114,7 +173,10 @@ class DampedClosedLoopEvaluator(legacy.ClosedLoopEvaluator):
           tune, desired[candidate], jerk[candidate], speed[candidate], error_lsf[candidate],
         )
         controller_output[candidate] = np.clip(
-          -(p[candidate] + integral[candidate] + d[candidate] + feedforward) / factor,
+          -(
+            p[candidate] + integral[candidate] + d[candidate]
+            + steering_rate_feedback[candidate] + feedforward
+          ) / factor,
           -1.0, 1.0,
         )
       limiter_gap = np.tile(
@@ -239,6 +301,21 @@ def path_safe(candidate: dict[str, Any], baseline: dict[str, Any],
   )
 
 
+def turn_exit_safe(candidate: dict[str, Any], baseline: dict[str, Any],
+                   max_score_regression: float,
+                   max_reversal_regression: float) -> bool:
+  candidate_wobble = candidate["wobble"]
+  baseline_wobble = baseline["wobble"]
+  return (
+    candidate_wobble["turn_exit_score"]
+    <= baseline_wobble["turn_exit_score"] * (1.0 + max_score_regression)
+    and candidate_wobble["turn_exit_rate_reversal_rms_deg_s"]
+    <= baseline_wobble["turn_exit_rate_reversal_rms_deg_s"] * (1.0 + max_reversal_regression)
+    and candidate_wobble["turn_exit_steering_rate_rms_deg_s"]
+    <= baseline_wobble["turn_exit_steering_rate_rms_deg_s"] * 1.01
+  )
+
+
 def evaluate_with_uncertainty(evaluator: legacy.ClosedLoopEvaluator,
                               predictor: NeuralEnsemblePredictor,
                               tune: tune_math.Tune) -> dict[str, Any]:
@@ -276,7 +353,17 @@ def main() -> None:
   parser.add_argument("--max-path-regression", type=float, default=0.01)
   parser.add_argument("--max-acceptance-regression", type=float, default=0.02)
   parser.add_argument("--max-disagreement-regression", type=float, default=0.10)
+  parser.add_argument("--max-objective-regression", type=float, default=0.0001)
+  parser.add_argument("--max-turn-exit-score-regression", type=float, default=0.0001)
+  parser.add_argument("--max-turn-exit-reversal-regression", type=float, default=-0.0005)
+  parser.add_argument("--baseline-damping-gain", type=float, default=0.02)
   parser.add_argument("--damping-gain", type=float, action="append", default=[])
+  parser.add_argument("--turn-exit-damping-gain", type=float, action="append", default=[])
+  parser.add_argument("--turn-exit-damping-gain-right", type=float, action="append", default=[])
+  parser.add_argument("--reversal-damping-gain", type=float, action="append", default=[])
+  parser.add_argument("--reversal-hold-seconds", type=float, action="append", default=[])
+  parser.add_argument("--steering-rate-feedback-gain", type=float, action="append", default=[])
+  parser.add_argument("--skip-tune-search", action="store_true")
   parser.add_argument("--device", default="cuda")
   parser.add_argument("--random-state", type=int, default=23)
   args = parser.parse_args()
@@ -287,7 +374,17 @@ def main() -> None:
   if not args.acceptance_route_prefix:
     args.acceptance_route_prefix = ["00000109", "0000010b"]
   if not args.damping_gain:
-    args.damping_gain = [0.0, 0.01, 0.02, 0.04, 0.08]
+    args.damping_gain = [args.baseline_damping_gain]
+  if not args.turn_exit_damping_gain:
+    args.turn_exit_damping_gain = [args.baseline_damping_gain]
+  if not args.turn_exit_damping_gain_right:
+    args.turn_exit_damping_gain_right = args.turn_exit_damping_gain
+  if not args.reversal_damping_gain:
+    args.reversal_damping_gain = [0.015, 0.0175, args.baseline_damping_gain]
+  if not args.reversal_hold_seconds:
+    args.reversal_hold_seconds = [0.40, 0.60, 0.80]
+  if not args.steering_rate_feedback_gain:
+    args.steering_rate_feedback_gain = [0.0]
   if args.device.startswith("cuda") and not torch.cuda.is_available():
     raise SystemExit("CUDA was requested but is unavailable.")
 
@@ -325,18 +422,24 @@ def main() -> None:
   print(window_summary, flush=True)
 
   baseline_tune = legacy.current_tune(None)
-  search_evaluator = legacy.ClosedLoopEvaluator(
+  search_evaluator = DampedClosedLoopEvaluator(
     predictor, search_batch, config.sample_period_s, args.wobble_weight,
-  )
-  _, history = legacy.optimize(
-    search_evaluator, baseline_tune, args.max_path_regression,
+    args.baseline_damping_gain,
   )
   search_baseline = search_evaluator.evaluate(baseline_tune)
-  validation_evaluator = legacy.ClosedLoopEvaluator(
+  validation_evaluator = DampedClosedLoopEvaluator(
     predictor, validation_batch, config.sample_period_s, args.wobble_weight,
+    args.baseline_damping_gain,
   )
   validation_baseline = validation_evaluator.evaluate(baseline_tune)
-  candidates = unique_candidates(history, args.validation_candidates)
+  if args.skip_tune_search:
+    history: list[dict[str, Any]] = []
+    candidates: list[tune_math.Tune] = []
+  else:
+    _, history = legacy.optimize(
+      search_evaluator, baseline_tune, args.max_path_regression,
+    )
+    candidates = unique_candidates(history, args.validation_candidates)
   candidate_search_results = evaluate_many_chunked(search_evaluator, candidates)
   validation_results = evaluate_many_chunked(validation_evaluator, candidates)
   eligible = [
@@ -361,8 +464,9 @@ def main() -> None:
     selected_search = search_baseline
     selected_validation = validation_baseline
 
-  acceptance_evaluator = legacy.ClosedLoopEvaluator(
+  acceptance_evaluator = DampedClosedLoopEvaluator(
     predictor, acceptance_batch, config.sample_period_s, args.wobble_weight,
+    args.baseline_damping_gain,
   )
   acceptance_baseline = evaluate_with_uncertainty(
     acceptance_evaluator, predictor, baseline_tune,
@@ -373,51 +477,137 @@ def main() -> None:
   ):
     selected = replace(baseline_tune, name="neural_plant_damping_base")
   damping_results: list[dict[str, Any]] = []
-  damping_candidates: list[tuple[float, dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+  damping_candidates: list[
+    tuple[float, float, float, float, float, float, dict[str, Any], dict[str, Any], dict[str, Any]]
+  ] = []
   for gain in sorted(set(args.damping_gain)):
-    damped_search_evaluator = DampedClosedLoopEvaluator(
-      predictor, search_batch, config.sample_period_s, args.wobble_weight, gain,
-    )
-    damped_validation_evaluator = DampedClosedLoopEvaluator(
-      predictor, validation_batch, config.sample_period_s, args.wobble_weight, gain,
-    )
-    damped_acceptance_evaluator = DampedClosedLoopEvaluator(
-      predictor, acceptance_batch, config.sample_period_s, args.wobble_weight, gain,
-    )
-    search_result = damped_search_evaluator.evaluate(selected)
-    validation_result = damped_validation_evaluator.evaluate(selected)
-    acceptance_result = damped_acceptance_evaluator.evaluate(selected)
-    safe = (
-      path_safe(search_result, search_baseline, args.max_path_regression)
-      and path_safe(validation_result, validation_baseline, args.max_path_regression)
-      and path_safe(acceptance_result, acceptance_baseline, args.max_acceptance_regression)
-    )
-    damping_results.append({
-      "gain": gain,
-      "safe": safe,
-      "search": search_result,
-      "validation": validation_result,
-      "acceptance": acceptance_result,
-    })
-    if safe:
-      damping_candidates.append((gain, search_result, validation_result, acceptance_result))
+    for turn_exit_gain in sorted(set(args.turn_exit_damping_gain)):
+      for turn_exit_gain_right in sorted(set(args.turn_exit_damping_gain_right)):
+        for reversal_gain in sorted(set(args.reversal_damping_gain)):
+          for reversal_hold_seconds in sorted(set(args.reversal_hold_seconds)):
+            for steering_rate_feedback_gain in sorted(set(args.steering_rate_feedback_gain)):
+              damped_search_evaluator = DampedClosedLoopEvaluator(
+                predictor, search_batch, config.sample_period_s, args.wobble_weight,
+                gain, turn_exit_gain, turn_exit_gain_right, reversal_gain,
+                reversal_hold_seconds, steering_rate_feedback_gain,
+              )
+              damped_validation_evaluator = DampedClosedLoopEvaluator(
+                predictor, validation_batch, config.sample_period_s, args.wobble_weight,
+                gain, turn_exit_gain, turn_exit_gain_right, reversal_gain,
+                reversal_hold_seconds, steering_rate_feedback_gain,
+              )
+              damped_acceptance_evaluator = DampedClosedLoopEvaluator(
+                predictor, acceptance_batch, config.sample_period_s, args.wobble_weight,
+                gain, turn_exit_gain, turn_exit_gain_right, reversal_gain,
+                reversal_hold_seconds, steering_rate_feedback_gain,
+              )
+              search_result = damped_search_evaluator.evaluate(selected)
+              validation_result = damped_validation_evaluator.evaluate(selected)
+              acceptance_result = damped_acceptance_evaluator.evaluate(selected)
+              safe = (
+                path_safe(search_result, search_baseline, args.max_path_regression)
+                and path_safe(validation_result, validation_baseline, args.max_path_regression)
+                and path_safe(acceptance_result, acceptance_baseline, args.max_acceptance_regression)
+                and turn_exit_safe(
+                  search_result, search_baseline,
+                  args.max_turn_exit_score_regression,
+                  args.max_turn_exit_reversal_regression,
+                )
+                and turn_exit_safe(
+                  validation_result, validation_baseline,
+                  args.max_turn_exit_score_regression,
+                  args.max_turn_exit_reversal_regression,
+                )
+                and turn_exit_safe(
+                  acceptance_result, acceptance_baseline,
+                  args.max_turn_exit_score_regression,
+                  args.max_turn_exit_reversal_regression,
+                )
+              )
+              damping_results.append({
+                "gain": gain,
+                "turn_exit_gain": turn_exit_gain,
+                "turn_exit_gain_right": turn_exit_gain_right,
+                "reversal_gain": reversal_gain,
+                "reversal_hold_seconds": reversal_hold_seconds,
+                "steering_rate_feedback_gain": steering_rate_feedback_gain,
+                "safe": safe,
+                "search": search_result,
+                "validation": validation_result,
+                "acceptance": acceptance_result,
+              })
+              current_schedule = (
+                gain == args.baseline_damping_gain
+                and turn_exit_gain == args.baseline_damping_gain
+                and turn_exit_gain_right == args.baseline_damping_gain
+                and reversal_gain == args.baseline_damping_gain
+                and steering_rate_feedback_gain == 0.0
+              )
+              if safe or current_schedule:
+                damping_candidates.append((
+                  gain, turn_exit_gain, turn_exit_gain_right, reversal_gain,
+                  reversal_hold_seconds, steering_rate_feedback_gain,
+                  search_result, validation_result, acceptance_result,
+                ))
   if not damping_candidates:
-    raise RuntimeError("No damping gain preserved all phase-level path gates.")
-  damping_gain, selected_search, selected_validation, _ = min(
-    damping_candidates, key=lambda item: item[2]["objective"],
+    raise RuntimeError("No damping schedule preserved path and turn-exit guardrails.")
+  def candidate_key(
+    item: tuple[float, float, float, float, float, float, dict[str, Any], dict[str, Any], dict[str, Any]],
+  ) -> tuple[float, float]:
+    split_results = item[6:]
+    split_baselines = (search_baseline, validation_baseline, acceptance_baseline)
+    worst_reversal_ratio = max(
+      result["wobble"]["turn_exit_rate_reversal_rms_deg_s"]
+      / max(baseline["wobble"]["turn_exit_rate_reversal_rms_deg_s"], 1e-9)
+      for result, baseline in zip(split_results, split_baselines, strict=True)
+    )
+    return worst_reversal_ratio, item[7]["objective"]
+
+  (
+    damping_gain,
+    turn_exit_damping_gain,
+    turn_exit_damping_gain_right,
+    reversal_damping_gain,
+    reversal_hold_seconds,
+    steering_rate_feedback_gain,
+    selected_search,
+    selected_validation,
+    _,
+  ) = min(
+    damping_candidates, key=candidate_key,
   )
   final_acceptance_evaluator = DampedClosedLoopEvaluator(
-    predictor, acceptance_batch, config.sample_period_s, args.wobble_weight, damping_gain,
+    predictor, acceptance_batch, config.sample_period_s, args.wobble_weight,
+    damping_gain, turn_exit_damping_gain, turn_exit_damping_gain_right,
+    reversal_damping_gain, reversal_hold_seconds, steering_rate_feedback_gain,
   )
   acceptance_selected = evaluate_with_uncertainty(
     final_acceptance_evaluator, predictor, selected,
   )
   accepted = (
-    selected_validation["objective"] < validation_baseline["objective"]
+    selected_search["objective"]
+    <= search_baseline["objective"] * (1.0 + args.max_objective_regression)
+    and selected_validation["objective"]
+    <= validation_baseline["objective"] * (1.0 + args.max_objective_regression)
     and path_safe(selected_validation, validation_baseline, args.max_path_regression)
     and path_safe(acceptance_selected, acceptance_baseline, args.max_acceptance_regression)
+    and turn_exit_safe(
+      selected_search, search_baseline,
+      args.max_turn_exit_score_regression,
+      args.max_turn_exit_reversal_regression,
+    )
+    and turn_exit_safe(
+      selected_validation, validation_baseline,
+      args.max_turn_exit_score_regression,
+      args.max_turn_exit_reversal_regression,
+    )
+    and turn_exit_safe(
+      acceptance_selected, acceptance_baseline,
+      args.max_turn_exit_score_regression,
+      args.max_turn_exit_reversal_regression,
+    )
     and acceptance_selected["objective"]
-    <= acceptance_baseline["objective"] * (1.0 + args.max_acceptance_regression)
+    <= acceptance_baseline["objective"] * (1.0 + args.max_objective_regression)
     and acceptance_selected["plant_disagreement"]["p95"]
     <= acceptance_baseline["plant_disagreement"]["p95"] * (1.0 + args.max_disagreement_regression)
   )
@@ -440,9 +630,23 @@ def main() -> None:
       "max_path_regression": args.max_path_regression,
       "max_acceptance_regression": args.max_acceptance_regression,
       "max_disagreement_regression": args.max_disagreement_regression,
+      "max_objective_regression": args.max_objective_regression,
+      "max_turn_exit_score_regression": args.max_turn_exit_score_regression,
+      "max_turn_exit_reversal_regression": args.max_turn_exit_reversal_regression,
     },
     "accepted": accepted,
-    "recommended_damping_gain": damping_gain if accepted else 0.0,
+    "recommended_damping_gain": damping_gain if accepted else args.baseline_damping_gain,
+    "recommended_turn_exit_damping_gain": (
+      turn_exit_damping_gain if accepted else args.baseline_damping_gain
+    ),
+    "recommended_turn_exit_damping_gain_right": (
+      turn_exit_damping_gain_right if accepted else args.baseline_damping_gain
+    ),
+    "recommended_reversal_damping_gain": (
+      reversal_damping_gain if accepted else args.baseline_damping_gain
+    ),
+    "recommended_reversal_hold_seconds": reversal_hold_seconds,
+    "recommended_steering_rate_feedback_gain": steering_rate_feedback_gain if accepted else 0.0,
     "damping_search": damping_results,
     "search": {
       "current": search_baseline,
@@ -468,6 +672,11 @@ def main() -> None:
     "acceptance": report["acceptance"],
     "recommended_tune": report["recommended_tune"],
     "recommended_damping_gain": report["recommended_damping_gain"],
+    "recommended_turn_exit_damping_gain": report["recommended_turn_exit_damping_gain"],
+    "recommended_turn_exit_damping_gain_right": report["recommended_turn_exit_damping_gain_right"],
+    "recommended_reversal_damping_gain": report["recommended_reversal_damping_gain"],
+    "recommended_reversal_hold_seconds": report["recommended_reversal_hold_seconds"],
+    "recommended_steering_rate_feedback_gain": report["recommended_steering_rate_feedback_gain"],
   }, indent=2), flush=True)
   print(f"report: {args.output}", flush=True)
   if not accepted:

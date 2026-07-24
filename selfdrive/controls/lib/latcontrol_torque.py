@@ -67,6 +67,10 @@ class LatControlTorque(LatControl):
     self.prev_steering_pressed = False
     self.debug_counter = 0
     self.prev_desired_lateral_accel = 0.0
+    self.previous_steering_angle_deg = None
+    self.previous_signed_steering_rate_deg_s = 0.0
+    self.ioniq_5_turn_exit_timer = 0.0
+    self.ioniq_5_reversal_damping_timer = 0.0
 
     self.is_bolt = CP.carFingerprint in BOLT_CARS
     self.is_bolt_2022_2023 = CP.carFingerprint in BOLT_2022_2023_CARS
@@ -159,6 +163,52 @@ class LatControlTorque(LatControl):
     self.pid.set_limits(self.lateral_accel_from_torque(self.steer_max, self.torque_params),
                         self.lateral_accel_from_torque(-self.steer_max, self.torque_params))
 
+  def _ioniq_5_damping_error_rate(self, measurement_rate, setpoint, desired_lateral_jerk,
+                                  v_ego, signed_steering_rate_deg_s, steering_pressed):
+    if steering_pressed:
+      self.ioniq_5_turn_exit_timer = 0.0
+      self.ioniq_5_reversal_damping_timer = 0.0
+      self.previous_signed_steering_rate_deg_s = signed_steering_rate_deg_s
+      return -measurement_rate
+
+    speed_in_range = IONIQ_5_TURN_EXIT_MIN_SPEED <= v_ego < IONIQ_5_TURN_EXIT_MAX_SPEED
+    unwind = (
+      speed_in_range
+      and abs(setpoint) >= IONIQ_5_TURN_EXIT_MIN_LAT_ACCEL
+      and setpoint * desired_lateral_jerk < IONIQ_5_TURN_EXIT_JERK_PRODUCT_THRESHOLD
+    )
+    self.ioniq_5_turn_exit_timer = max(self.ioniq_5_turn_exit_timer - self.dt, 0.0)
+    if unwind:
+      self.ioniq_5_turn_exit_timer = IONIQ_5_TURN_EXIT_HOLD_SECONDS
+    turn_exit = (
+      speed_in_range
+      and (
+        unwind
+        or (
+          self.ioniq_5_turn_exit_timer > 0.0
+          and abs(setpoint) < IONIQ_5_TURN_EXIT_NEAR_CENTER_LAT_ACCEL
+        )
+      )
+    )
+    rate_reversal = (
+      turn_exit
+      and signed_steering_rate_deg_s * self.previous_signed_steering_rate_deg_s < 0.0
+      and min(
+        abs(signed_steering_rate_deg_s),
+        abs(self.previous_signed_steering_rate_deg_s),
+      ) >= IONIQ_5_REVERSAL_MIN_STEERING_RATE
+    )
+    self.ioniq_5_reversal_damping_timer = max(
+      self.ioniq_5_reversal_damping_timer - self.dt, 0.0,
+    )
+    if rate_reversal:
+      self.ioniq_5_reversal_damping_timer = IONIQ_5_REVERSAL_DAMPING_HOLD_SECONDS
+    self.previous_signed_steering_rate_deg_s = signed_steering_rate_deg_s
+
+    if turn_exit and self.ioniq_5_reversal_damping_timer > 0.0:
+      return -measurement_rate * IONIQ_5_REVERSAL_DAMPING_GAIN / IONIQ_5_DAMPING_GAIN
+    return -measurement_rate
+
   def update(self, active, CS, VM, params, steer_limited_by_safety, desired_curvature, curvature_limited, lat_delay, calibrated_pose, model_data, starpilot_toggles):
     pid_log = log.ControlsState.LateralTorqueState.new_message()
     pid_log.version = VERSION
@@ -175,6 +225,10 @@ class LatControlTorque(LatControl):
       self.lat_accel_request_buffer = deque([0.] * self.lat_accel_request_buffer_len, maxlen=self.lat_accel_request_buffer_len)
       self.prev_desired_lateral_accel = 0.0
       self.ioniq_6_directional_taper_filter.x = 1.0
+      self.previous_steering_angle_deg = CS.steeringAngleDeg
+      self.previous_signed_steering_rate_deg_s = 0.0
+      self.ioniq_5_turn_exit_timer = 0.0
+      self.ioniq_5_reversal_damping_timer = 0.0
     else:
       if self.prev_steering_pressed and not CS.steeringPressed:
         self.pid.i *= self.steer_release_i_decay
@@ -202,6 +256,11 @@ class LatControlTorque(LatControl):
       measurement_rate = self.measurement_rate_filter.update((measurement - self.previous_measurement) / self.dt)
       measurement_rate = np.clip(measurement_rate, -MAX_LAT_JERK_UP, MAX_LAT_JERK_UP)
       self.previous_measurement = measurement
+      signed_steering_rate_deg_s = (
+        0.0 if self.previous_steering_angle_deg is None
+        else (CS.steeringAngleDeg - self.previous_steering_angle_deg) / self.dt
+      )
+      self.previous_steering_angle_deg = CS.steeringAngleDeg
 
       low_speed_factor = (np.interp(CS.vEgo, LOW_SPEED_X, LOW_SPEED_Y) / max(CS.vEgo, MIN_SPEED)) ** 2
       current_kp = np.interp(CS.vEgo, self.pid._k_p[0], self.pid._k_p[1])
@@ -360,7 +419,16 @@ class LatControlTorque(LatControl):
         self.pid.reset()
       freeze_integrator = (steer_limited_by_safety or CS.steeringPressed or
                            CS.vEgo < self.low_speed_reset_threshold or unwind_detected)
-      output_lataccel = self.pid.update(pid_log.error, error_rate=-measurement_rate, speed=CS.vEgo, feedforward=ff, freeze_integrator=freeze_integrator)
+      damping_error_rate = -measurement_rate
+      if ioniq_5_active:
+        damping_error_rate = self._ioniq_5_damping_error_rate(
+          measurement_rate, setpoint, desired_lateral_jerk, CS.vEgo,
+          signed_steering_rate_deg_s, CS.steeringPressed,
+        )
+      output_lataccel = self.pid.update(
+        pid_log.error, error_rate=damping_error_rate, speed=CS.vEgo,
+        feedforward=ff, freeze_integrator=freeze_integrator,
+      )
       output_torque = self.torque_from_lateral_accel(output_lataccel, self.torque_params)
       if self.is_bolt_2017:
         output_torque *= get_bolt_2017_torque_scale(setpoint, desired_lateral_jerk, CS.vEgo)

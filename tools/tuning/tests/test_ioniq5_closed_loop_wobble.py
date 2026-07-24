@@ -58,6 +58,27 @@ def test_wobble_score_penalizes_alternating_closed_loop_motion():
   assert wobbling["quiet_steering_accel_rms_deg_s2"] > smooth["quiet_steering_accel_rms_deg_s2"]
 
 
+def test_wobble_score_penalizes_rate_reversals_while_exiting_a_turn():
+  evaluator = make_evaluator()
+  evaluator.batch.v_ego[:] = 11.0
+  evaluator.batch.target_desired[:] = np.asarray([[0.8, 0.7, 0.55, 0.4, 0.28, 0.18, 0.08, 0.02]])
+  evaluator.batch.target_jerk[:] = -0.5
+  smooth = evaluator.wobble_metrics(
+    make_trace([0.20, 0.18, 0.15, 0.12, 0.09, 0.06, 0.03, 0.0],
+               [20.0, 15.0, 10.0, 6.0, 3.0, 1.0, 0.0, 0.0]),
+  )
+  wobbling = evaluator.wobble_metrics(
+    make_trace([0.20, -0.18, 0.16, -0.14, 0.12, -0.10, 0.08, -0.06],
+               [20.0, -18.0, 16.0, -14.0, 12.0, -10.0, 8.0, -6.0]),
+  )
+  assert smooth["turn_exit_samples"] == 8
+  assert smooth["turn_exit_left_samples"] == 8
+  assert smooth["turn_exit_right_samples"] == 0
+  assert wobbling["turn_exit_score"] > smooth["turn_exit_score"] * 2.0
+  assert wobbling["turn_exit_rate_reversal_rms_deg_s"] > 0.0
+  assert smooth["turn_exit_rate_reversal_rms_deg_s"] == 0.0
+
+
 def test_route_prefix_selection_is_exact_and_repeatable():
   routes = ["00000102--abc", "00000105--def", "00000106--ghi"]
   assert closed_loop.routes_matching_prefixes(routes, ["00000102", "00000106"]) == {routes[0], routes[2]}

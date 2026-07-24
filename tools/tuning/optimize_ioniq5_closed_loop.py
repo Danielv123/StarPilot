@@ -243,14 +243,35 @@ class ClosedLoopEvaluator:
   def wobble_metrics(self, trace: RolloutTrace) -> dict[str, float]:
     desired = self.batch.target_desired
     jerk = self.batch.target_jerk
+    speed = self.batch.v_ego
     center = np.abs(desired) < 0.08
     steady = (np.abs(desired) >= 0.08) & (np.abs(jerk) < 0.08)
     quiet = center | steady
+    unwind = (
+      (speed >= 8.0) & (speed < 15.0)
+      & (np.abs(desired) >= 0.12)
+      & (desired * jerk < -0.01)
+    )
+    lookback_steps = max(1, round(0.75 / self.dt))
+    recent_unwind = np.zeros_like(unwind)
+    for step in range(unwind.shape[1]):
+      start = max(0, step - lookback_steps)
+      recent_unwind[:, step] = np.any(unwind[:, start:step + 1], axis=1)
+    turn_exit = (
+      (speed >= 8.0) & (speed < 15.0)
+      & (unwind | (recent_unwind & (np.abs(desired) < 0.35)))
+    )
 
     rate_index = plant_data.STATE_FEATURES.index("signed_steering_rate_deg_s")
     steering_rate = trace.states[:, :, rate_index]
     initial_rate = self.batch.history[:, 0, self.base_index["signed_steering_rate_deg_s"]]
-    steering_accel = np.diff(np.column_stack((initial_rate, steering_rate)), axis=1) / self.dt
+    previous_rate = np.column_stack((initial_rate, steering_rate[:, :-1]))
+    steering_accel = (steering_rate - previous_rate) / self.dt
+    rate_reversal = np.where(
+      previous_rate * steering_rate < 0.0,
+      np.minimum(np.abs(previous_rate), np.abs(steering_rate)),
+      0.0,
+    )
     initial_command = self.batch.history[:, 0, self.base_index["applied_torque"]]
     command_slew = np.diff(np.column_stack((initial_command, trace.commands)), axis=1) / self.dt
 
@@ -258,22 +279,60 @@ class ClosedLoopEvaluator:
     steady_rate_rms = self._rms(steering_rate, steady)
     quiet_steering_accel_rms = self._rms(steering_accel, quiet)
     quiet_command_slew_rms = self._rms(command_slew, quiet)
+    turn_exit_rate_rms = self._rms(steering_rate, turn_exit)
+    turn_exit_steering_accel_rms = self._rms(steering_accel, turn_exit)
+    turn_exit_command_slew_rms = self._rms(command_slew, turn_exit)
+    turn_exit_rate_reversal_rms = self._rms(rate_reversal, turn_exit)
+    turn_exit_left = turn_exit & (desired > 0.0)
+    turn_exit_right = turn_exit & (desired < 0.0)
+    turn_exit_8_11 = turn_exit & (speed < 11.0)
+    turn_exit_11_15 = turn_exit & (speed >= 11.0)
     # Dimensionless combination calibrated to the observed Ioniq 5 ranges. Keeping the
     # components visible makes it possible to retune the weighting from measured drives.
-    wobble_score = (
+    quiet_score = (
       0.35 * center_rate_rms / 10.0
       + 0.35 * steady_rate_rms / 10.0
       + 0.15 * quiet_steering_accel_rms / 200.0
       + 0.15 * quiet_command_slew_rms / 2.5
     )
+    turn_exit_score = (
+      0.35 * turn_exit_rate_rms / 12.0
+      + 0.25 * turn_exit_steering_accel_rms / 200.0
+      + 0.20 * turn_exit_command_slew_rms / 2.5
+      + 0.20 * turn_exit_rate_reversal_rms / 8.0
+    )
+    wobble_score = quiet_score + 0.60 * turn_exit_score
     return {
       "score": float(wobble_score),
+      "quiet_score": float(quiet_score),
+      "turn_exit_score": float(turn_exit_score),
+      "turn_exit_samples": int(np.count_nonzero(turn_exit)),
       "center_steering_rate_rms_deg_s": center_rate_rms,
       "steady_steering_rate_rms_deg_s": steady_rate_rms,
       "quiet_steering_accel_rms_deg_s2": quiet_steering_accel_rms,
       "quiet_command_slew_rms_per_s": quiet_command_slew_rms,
       "quiet_steering_rate_p95_deg_s": float(np.percentile(np.abs(steering_rate[quiet]), 95)) if np.any(quiet) else 0.0,
       "quiet_command_slew_p95_per_s": float(np.percentile(np.abs(command_slew[quiet]), 95)) if np.any(quiet) else 0.0,
+      "turn_exit_steering_rate_rms_deg_s": turn_exit_rate_rms,
+      "turn_exit_steering_accel_rms_deg_s2": turn_exit_steering_accel_rms,
+      "turn_exit_command_slew_rms_per_s": turn_exit_command_slew_rms,
+      "turn_exit_rate_reversal_rms_deg_s": turn_exit_rate_reversal_rms,
+      "turn_exit_left_samples": int(np.count_nonzero(turn_exit_left)),
+      "turn_exit_left_steering_rate_rms_deg_s": self._rms(steering_rate, turn_exit_left),
+      "turn_exit_left_rate_reversal_rms_deg_s": self._rms(rate_reversal, turn_exit_left),
+      "turn_exit_right_samples": int(np.count_nonzero(turn_exit_right)),
+      "turn_exit_right_steering_rate_rms_deg_s": self._rms(steering_rate, turn_exit_right),
+      "turn_exit_right_rate_reversal_rms_deg_s": self._rms(rate_reversal, turn_exit_right),
+      "turn_exit_8_11_samples": int(np.count_nonzero(turn_exit_8_11)),
+      "turn_exit_8_11_steering_rate_rms_deg_s": self._rms(steering_rate, turn_exit_8_11),
+      "turn_exit_8_11_rate_reversal_rms_deg_s": self._rms(rate_reversal, turn_exit_8_11),
+      "turn_exit_11_15_samples": int(np.count_nonzero(turn_exit_11_15)),
+      "turn_exit_11_15_steering_rate_rms_deg_s": self._rms(steering_rate, turn_exit_11_15),
+      "turn_exit_11_15_rate_reversal_rms_deg_s": self._rms(rate_reversal, turn_exit_11_15),
+      "turn_exit_steering_rate_p95_deg_s": (
+        float(np.percentile(np.abs(steering_rate[turn_exit]), 95))
+        if np.any(turn_exit) else 0.0
+      ),
     }
 
   def evaluate_trace(self, tune: tune_math.Tune, trace: RolloutTrace) -> dict[str, Any]:

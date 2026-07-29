@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from time import perf_counter
 from uuid import uuid4
 
 from comma_companion.db import isoformat
@@ -655,3 +656,75 @@ def test_catalog_metadata_and_dashboard_aggregates_are_global(
   assert snapshot["storage_capacity_bytes"] > 0
   assert snapshot["storage_used_bytes"] >= 0
   assert snapshot["storage_free_bytes"] >= 0
+
+
+def test_cached_catalog_request_does_not_recompute_drive_readiness(
+  admin_client,
+) -> None:
+  database = admin_client.app.state.database
+  now = isoformat()
+  with database.transaction(immediate=True) as connection:
+    object_sha = _object(connection, b"shared", "catalog-performance")
+    for drive_number in range(20):
+      drive_id = f"cached-drive-{drive_number:02d}"
+      connection.execute(
+        """
+        INSERT INTO drives(
+          id, device_id, route_name, started_at, created_at
+        ) VALUES (?, 'device-one', ?, ?, ?)
+        """,
+        (
+          drive_id,
+          f"cached-route-{drive_number:02d}",
+          f"2026-07-{drive_number + 1:02d}T12:00:00Z",
+          now,
+        ),
+      )
+      segment_ids = []
+      for segment_number in range(5):
+        segment_id = f"{drive_id}-segment-{segment_number}"
+        segment_ids.append(segment_id)
+        connection.execute(
+          """
+          INSERT INTO segments(id, drive_id, number, created_at)
+          VALUES (?, ?, ?, ?)
+          """,
+          (segment_id, drive_id, segment_number, now),
+        )
+      for artifact_number in range(50):
+        connection.execute(
+          """
+          INSERT INTO artifacts(
+            id, device_id, drive_id, segment_id, object_sha256,
+            kind, relative_path, storage_path, size, status, created_at
+          ) VALUES (
+            ?, 'device-one', ?, ?, ?, 'other', ?, 'objects/catalog', 6,
+            'stored', ?
+          )
+          """,
+          (
+            f"{drive_id}-artifact-{artifact_number}",
+            drive_id,
+            segment_ids[artifact_number % len(segment_ids)],
+            object_sha,
+            f"{drive_id}/{artifact_number}.bin",
+            now,
+          ),
+        )
+
+  primed = admin_client.get("/api/v1/drives?limit=50")
+  assert primed.status_code == 200, primed.text
+  assert primed.json()["total"] == 20
+
+  started = perf_counter()
+  cached = admin_client.get("/api/v1/drives?limit=50")
+  elapsed = perf_counter() - started
+
+  assert cached.status_code == 200, cached.text
+  assert cached.json()["total"] == 20
+  assert elapsed < 1.0
+  cache_count = database.query_one(
+    "SELECT COUNT(*) AS count FROM drive_catalog_cache",
+  )
+  assert cache_count is not None
+  assert cache_count["count"] == 20

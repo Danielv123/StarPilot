@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import getpass
 import hashlib
 import json
@@ -9,8 +10,8 @@ import secrets
 import shutil
 import sqlite3
 import sys
-from collections.abc import Iterator
-from contextlib import asynccontextmanager
+from collections.abc import Iterator, Mapping
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import median
@@ -83,7 +84,7 @@ def _error_content(
   }
 
 
-def _readiness(row: sqlite3.Row) -> str:
+def _readiness(row: Mapping[str, Any] | sqlite3.Row) -> str:
   if row["failed_artifact_count"] or row["failed_media_job_count"]:
     return "failed"
   if row["partial_artifact_count"]:
@@ -877,6 +878,175 @@ def _drive_catalog_sql(where: str, *, readiness: bool) -> str:
   return f"SELECT * FROM ({computed}) WHERE computed_readiness = ?"
 
 
+def _refresh_drive_catalog_entry(
+  database: Database,
+  drive_id: str,
+  dirty_version: int,
+) -> bool:
+  row = database.query_one(
+    f"{DRIVE_SELECT} WHERE d.id = ? GROUP BY d.id",
+    (drive_id,),
+  )
+  with database.transaction(immediate=True) as connection:
+    if row is None:
+      connection.execute(
+        "DELETE FROM drive_catalog_cache WHERE drive_id = ?",
+        (drive_id,),
+      )
+    else:
+      payload = {
+        key: row[key]
+        for key in row.keys()
+        if key not in {
+          "id",
+          "device_id",
+          "route_name",
+          "started_at",
+          "ended_at",
+          "duration_us",
+          "telemetry_ready",
+          "route_state",
+          "created_at",
+        }
+      }
+      connection.execute(
+        """
+        INSERT INTO drive_catalog_cache(
+          drive_id, payload_json, computed_readiness, refreshed_at
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(drive_id) DO UPDATE SET
+          payload_json = excluded.payload_json,
+          computed_readiness = excluded.computed_readiness,
+          refreshed_at = excluded.refreshed_at
+        """,
+        (
+          drive_id,
+          json.dumps(payload, separators=(",", ":"), sort_keys=True),
+          _readiness(row),
+          isoformat(),
+        ),
+      )
+    deleted = connection.execute(
+      """
+      DELETE FROM drive_catalog_dirty
+      WHERE drive_id = ? AND version = ?
+      """,
+      (drive_id, dirty_version),
+    ).rowcount
+  return bool(deleted)
+
+
+def _refresh_dirty_drive_catalog(
+  database: Database,
+  *,
+  limit: int = 25,
+) -> int:
+  dirty_rows = database.query_all(
+    """
+    SELECT drive_id, version
+    FROM drive_catalog_dirty
+    ORDER BY dirtied_at, drive_id
+    LIMIT ?
+    """,
+    (limit,),
+  )
+  refreshed = 0
+  for row in dirty_rows:
+    if _refresh_drive_catalog_entry(
+      database,
+      row["drive_id"],
+      row["version"],
+    ):
+      refreshed += 1
+  return refreshed
+
+
+def _prime_drive_catalog(database: Database) -> None:
+  database.execute(
+    """
+    INSERT OR IGNORE INTO drive_catalog_dirty(
+      drive_id, version, dirtied_at
+    )
+    SELECT drive.id, 1, ?
+    FROM drives drive
+    LEFT JOIN drive_catalog_cache cache ON cache.drive_id = drive.id
+    WHERE cache.drive_id IS NULL
+    """,
+    (isoformat(),),
+  )
+  while _refresh_dirty_drive_catalog(database):
+    pass
+
+
+def _refresh_uncached_drive_catalog(database: Database) -> None:
+  uncached = database.query_all(
+    """
+    SELECT dirty.drive_id, dirty.version
+    FROM drive_catalog_dirty dirty
+    LEFT JOIN drive_catalog_cache cache ON cache.drive_id = dirty.drive_id
+    WHERE cache.drive_id IS NULL
+    ORDER BY dirty.dirtied_at, dirty.drive_id
+    LIMIT 500
+    """,
+  )
+  for row in uncached:
+    _refresh_drive_catalog_entry(
+      database,
+      row["drive_id"],
+      row["version"],
+    )
+
+
+async def _maintain_drive_catalog(database: Database) -> None:
+  while True:
+    refreshed = await asyncio.to_thread(
+      _refresh_dirty_drive_catalog,
+      database,
+    )
+    await asyncio.sleep(0 if refreshed else 0.25)
+
+
+def _cached_drive_catalog_sql(
+  where: str,
+  *,
+  readiness: bool,
+) -> str:
+  clauses = []
+  if where:
+    clauses.append(where.removeprefix("WHERE ").strip())
+  if readiness:
+    clauses.append("cache.computed_readiness = ?")
+  cached_where = (
+    f"WHERE {' AND '.join(f'({clause})' for clause in clauses)}"
+    if clauses
+    else ""
+  )
+  return f"""
+    SELECT
+      d.id, d.device_id, d.route_name, d.started_at, d.ended_at,
+      d.duration_us, d.telemetry_ready, d.route_state, d.created_at,
+      cache.payload_json, cache.computed_readiness
+    FROM drives d
+    JOIN drive_catalog_cache cache ON cache.drive_id = d.id
+    {cached_where}
+  """
+
+
+def _hydrate_cached_drive_row(
+  row: sqlite3.Row,
+) -> dict[str, Any]:
+  hydrated = {
+    key: row[key]
+    for key in row.keys()
+    if key != "payload_json"
+  }
+  payload = json.loads(row["payload_json"])
+  if not isinstance(payload, dict):
+    raise RuntimeError("drive catalog cache payload must be an object")
+  hydrated.update(payload)
+  return hydrated
+
+
 def _artifact_view(row: sqlite3.Row) -> dict[str, Any]:
   return {
     "id": row["id"],
@@ -1260,9 +1430,9 @@ def _dashboard(request: Request) -> dict[str, Any]:
     (online_after,),
   )
   readiness_rows = database.query_all(
-    f"""
+    """
     SELECT computed_readiness AS state, COUNT(*) AS count
-    FROM ({_drive_catalog_sql("", readiness=False)})
+    FROM drive_catalog_cache
     GROUP BY computed_readiness
     """,
   )
@@ -1564,7 +1734,7 @@ def list_drives(
     clauses.append("d.device_id = ?")
     parameters.append(device_id)
   where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-  catalog_sql = _drive_catalog_sql(
+  catalog_sql = _cached_drive_catalog_sql(
     where,
     readiness=readiness is not None,
   )
@@ -1573,6 +1743,7 @@ def list_drives(
     *([readiness] if readiness else []),
   ]
   database = request.app.state.database
+  _refresh_uncached_drive_catalog(database)
   summary = database.query_one(
     f"""
     WITH filtered AS (
@@ -1613,7 +1784,7 @@ def list_drives(
     catalog_parameters,
   )
   assert summary is not None
-  rows = database.query_all(
+  cached_rows = database.query_all(
     f"""
     {catalog_sql}
     ORDER BY COALESCE(started_at, created_at) DESC, id DESC
@@ -1621,6 +1792,7 @@ def list_drives(
     """,
     [*catalog_parameters, limit, offset],
   )
+  rows = [_hydrate_cached_drive_row(row) for row in cached_rows]
   metadata = _drive_metadata(
     database,
     [row["id"] for row in rows],
@@ -2938,6 +3110,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.settings = resolved
     application.state.auth = auth_service
     bootstrap_configured_devices(application)
+    await asyncio.to_thread(_prime_drive_catalog, database)
+    catalog_maintenance = asyncio.create_task(
+      _maintain_drive_catalog(database),
+      name="drive-catalog-maintenance",
+    )
     database.execute(
       """
       UPDATE admin_sessions
@@ -2946,8 +3123,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
       """,
       (isoformat(), isoformat()),
     )
-    yield
-    database.checkpoint()
+    try:
+      yield
+    finally:
+      catalog_maintenance.cancel()
+      with suppress(asyncio.CancelledError):
+        await catalog_maintenance
+      database.checkpoint()
 
   application = FastAPI(
     title="Comma Companion API",

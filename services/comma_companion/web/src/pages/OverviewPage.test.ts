@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { InboundStatus } from '../api/types'
-import { instantaneousSpeed, sparklinePath } from './OverviewPage'
+import {
+  ACTIVE_PIPELINE_POLL_INTERVAL_MS,
+  instantaneousSpeed,
+  sparklinePath,
+} from './OverviewPage'
 
 function inbound(overrides: Partial<InboundStatus> = {}): InboundStatus {
   return {
@@ -16,6 +20,10 @@ function inbound(overrides: Partial<InboundStatus> = {}): InboundStatus {
 }
 
 describe('overview inbound telemetry', () => {
+  it('refreshes active upload rows once per second', () => {
+    expect(ACTIVE_PIPELINE_POLL_INTERVAL_MS).toBe(1_000)
+  })
+
   it('derives a one-second bandwidth sample from received-byte deltas', () => {
     expect(instantaneousSpeed(
       inbound(),

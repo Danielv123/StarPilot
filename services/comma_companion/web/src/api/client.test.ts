@@ -595,6 +595,67 @@ describe('catalog pagination and dashboard totals', () => {
 })
 
 describe('upload finalization state', () => {
+  it('loads receiving and finalizing rows for the active pipeline', async () => {
+    const response = (body: unknown) => new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+    const rawUpload = {
+      device_id: 'comma-1',
+      route_name: 'route-1',
+      segment_number: 0,
+      artifact_type: 'video',
+      camera: 'road',
+      offset: 50,
+      length: 100,
+      durable: false,
+      error: null,
+      created_at: '2026-01-01T00:00:00Z',
+      bytes_per_second: 10,
+    }
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('state=receiving')) {
+        return response({
+          items: [{
+            ...rawUpload,
+            id: 'uploading-1',
+            upload_id: 'uploading-1',
+            relative_path: 'route/0/ecamera.hevc',
+            status: 'receiving',
+            updated_at: '2026-01-01T00:00:01Z',
+          }],
+          total: 1,
+        })
+      }
+      if (url.endsWith('state=finalizing')) {
+        return response({
+          items: [{
+            ...rawUpload,
+            id: 'verifying-1',
+            upload_id: 'verifying-1',
+            relative_path: 'route/0/dcamera.hevc',
+            status: 'finalizing',
+            updated_at: '2026-01-01T00:00:02Z',
+          }],
+          total: 1,
+        })
+      }
+      throw new Error(`Unexpected request ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      await expect(api.activeUploads()).resolves.toMatchObject([
+        { id: 'verifying-1', state: 'verifying' },
+        { id: 'uploading-1', state: 'uploading' },
+      ])
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('maps the durable-finalization phase to the verifying UI state', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       items: [{

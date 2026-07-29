@@ -28,6 +28,7 @@ import { useVisibilityPolling } from '../hooks/useVisibilityPolling'
 import { formatBitrate, formatBytes, formatEta, percent } from '../utils'
 
 const SPEED_HISTORY_LENGTH = 60
+export const ACTIVE_PIPELINE_POLL_INTERVAL_MS = 1_000
 
 export function instantaneousSpeed(
   previous: InboundStatus | undefined,
@@ -72,10 +73,16 @@ function SpeedSparkline({ values }: { values: number[] }) {
 export default function OverviewPage() {
   const state = useApi(() => api.overview(), [])
   const inboundState = useApi(() => api.inbound(), [])
+  const activeUploadsState = useApi(() => api.activeUploads(), [])
   const previousInbound = useRef<InboundStatus | undefined>(undefined)
   const [speedHistory, setSpeedHistory] = useState<number[]>([])
   useVisibilityPolling(state.refresh, state.failureCount, 30_000)
   useVisibilityPolling(inboundState.refresh, inboundState.failureCount, 1_000)
+  useVisibilityPolling(
+    activeUploadsState.refresh,
+    activeUploadsState.failureCount,
+    ACTIVE_PIPELINE_POLL_INTERVAL_MS,
+  )
 
   useEffect(() => {
     const inbound = inboundState.data
@@ -90,6 +97,7 @@ export default function OverviewPage() {
   const overview = state.data
   if (!overview) return null
   const inbound = inboundState.data
+  const activeUploads = activeUploadsState.data ?? overview.active_uploads
   const uploadBps = inbound?.upload_bps ?? overview.upload_bps
   const pendingUploadBytes = inbound?.pending_upload_bytes ?? overview.pending_upload_bytes
   const etaSeconds = uploadBps > 0 ? pendingUploadBytes / uploadBps : undefined
@@ -173,7 +181,7 @@ export default function OverviewPage() {
             <div>
               <RadioTower size={18} />
               <span>Device transfer</span>
-              <strong>{overview.active_uploads.filter((item) => item.state === 'uploading').length} active</strong>
+              <strong>{activeUploads.filter((item) => item.state === 'uploading').length} active</strong>
             </div>
             <i />
             <div>
@@ -183,8 +191,8 @@ export default function OverviewPage() {
             </div>
           </div>
           <div className="upload-list">
-            {overview.active_uploads.length ? (
-              overview.active_uploads.slice(0, 4).map((upload) => <UploadRow upload={upload} key={upload.id} />)
+            {activeUploads.length ? (
+              activeUploads.slice(0, 4).map((upload) => <UploadRow upload={upload} key={upload.id} />)
             ) : (
               <div className="inline-empty">Nothing is transferring. The archive is caught up.</div>
             )}

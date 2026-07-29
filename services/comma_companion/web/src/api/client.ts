@@ -1263,6 +1263,16 @@ async function loadUploadPage(
   }
 }
 
+async function loadActiveUploads(): Promise<Upload[]> {
+  const [receivingUploads, finalizingUploads] = await Promise.all([
+    loadUploadPage('uploading', 8, 0),
+    loadUploadPage('verifying', 8, 0),
+  ])
+  return [...receivingUploads.items, ...finalizingUploads.items]
+    .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
+    .slice(0, 8)
+}
+
 function readinessCounts(raw: Record<string, number>): DriveCatalogPage['summary']['by_readiness'] {
   return {
     importing: raw.importing ?? 0,
@@ -1315,10 +1325,9 @@ export const api = {
   },
   async overview(): Promise<Overview> {
     if (demoMode) return (await loadDemoApi()).overview()
-    const [raw, receivingUploads, finalizingUploads, drives] = await Promise.all([
+    const [raw, activeUploads, drives] = await Promise.all([
       request<RawDashboard>('/dashboard'),
-      loadUploadPage('uploading', 8, 0),
-      loadUploadPage('verifying', 8, 0),
+      loadActiveUploads(),
       loadDrives(undefined, undefined, 6, 0),
     ])
     const workerActive =
@@ -1380,9 +1389,7 @@ export const api = {
         },
         { id: 'ingest', label: 'Ingest', state: raw.upload.failed_uploads ? 'warning' : raw.upload.active_uploads ? 'running' : 'healthy', detail: `${raw.upload.active_uploads} active`, updated_at: raw.generated_at },
       ],
-      active_uploads: [...receivingUploads.items, ...finalizingUploads.items]
-        .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
-        .slice(0, 8),
+      active_uploads: activeUploads,
       recent_drives: drives.items,
     }
   },
@@ -1448,6 +1455,13 @@ export const api = {
   async uploads(state?: Upload['state']): Promise<Upload[]> {
     const uploads = demoMode ? await (await loadDemoApi()).uploads() : await loadUploads(state)
     return state ? uploads.filter((upload) => upload.state === state) : uploads
+  },
+  async activeUploads(): Promise<Upload[]> {
+    if (!demoMode) return loadActiveUploads()
+    return (await (await loadDemoApi()).uploads())
+      .filter((upload) => upload.state === 'uploading' || upload.state === 'verifying')
+      .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
+      .slice(0, 8)
   },
   async uploadPage(
     state?: Upload['state'],

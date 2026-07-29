@@ -158,20 +158,6 @@ DRIVE_SELECT = """
   SELECT
     d.id, d.device_id, d.route_name, d.started_at, d.ended_at,
     d.duration_us, d.telemetry_ready, d.route_state, d.created_at,
-    (
-      SELECT COALESCE(SUM(MIN(upload.offset, upload.declared_size)), 0)
-      FROM uploads upload
-      WHERE upload.device_id = d.device_id
-        AND upload.route_name = d.route_name
-        AND upload.status != 'canceled'
-    ) AS backup_bytes_received,
-    (
-      SELECT COALESCE(SUM(upload.declared_size), 0)
-      FROM uploads upload
-      WHERE upload.device_id = d.device_id
-        AND upload.route_name = d.route_name
-        AND upload.status != 'canceled'
-    ) AS backup_bytes_expected,
     COUNT(DISTINCT s.id) AS segment_count,
     COUNT(DISTINCT a.id) AS artifact_count,
     COUNT(DISTINCT CASE WHEN a.status = 'failed' THEN a.id END)
@@ -201,31 +187,6 @@ DRIVE_SELECT = """
         AND a.segment_id IS NOT NULL
       THEN a.segment_id || ':' || COALESCE(a.camera, a.kind)
     END) AS ready_media_pair_count,
-    (
-      SELECT COUNT(DISTINCT
-        pruned_source.segment_id || ':' ||
-        COALESCE(pruned_source.camera, pruned_source.kind)
-      )
-      FROM artifacts pruned_source
-      JOIN objects pruned_object
-        ON pruned_object.sha256 = pruned_source.object_sha256
-      WHERE pruned_source.drive_id = d.id
-        AND pruned_source.source_artifact_id IS NULL
-        AND pruned_source.segment_id IS NOT NULL
-        AND pruned_source.kind IN (
-          'fcamera', 'ecamera', 'dcamera', 'qcamera',
-          'road', 'wideRoad', 'driver', 'video'
-        )
-        AND pruned_object.storage_state = 'pruned'
-        AND EXISTS (
-          SELECT 1
-          FROM artifacts pruned_derived
-          WHERE pruned_derived.source_artifact_id = pruned_source.id
-            AND pruned_derived.kind = 'derived_video'
-            AND LOWER(pruned_derived.codec) = 'av1'
-            AND pruned_derived.status = 'ready'
-        )
-    ) AS pruned_media_count,
     (
       SELECT COUNT(*)
       FROM segments ready_segment
@@ -781,13 +742,87 @@ def _drive_metadata(
   return metadata
 
 
+def _drive_progress(
+  database: Database,
+  drive_ids: list[str],
+) -> dict[str, dict[str, int]]:
+  progress = {
+    drive_id: {
+      "backup_bytes_received": 0,
+      "backup_bytes_expected": 0,
+      "pruned_media": 0,
+    }
+    for drive_id in drive_ids
+  }
+  if not drive_ids:
+    return progress
+  placeholders = ",".join("?" for _ in drive_ids)
+  upload_rows = database.query_all(
+    f"""
+    SELECT
+      drive.id AS drive_id,
+      COALESCE(SUM(MIN(upload.offset, upload.declared_size)), 0)
+        AS backup_bytes_received,
+      COALESCE(SUM(upload.declared_size), 0)
+        AS backup_bytes_expected
+    FROM drives drive
+    JOIN uploads upload
+      ON upload.device_id = drive.device_id
+      AND upload.route_name = drive.route_name
+      AND upload.status != 'canceled'
+    WHERE drive.id IN ({placeholders})
+    GROUP BY drive.id
+    """,
+    drive_ids,
+  )
+  for row in upload_rows:
+    progress[row["drive_id"]].update(
+      {
+        "backup_bytes_received": row["backup_bytes_received"],
+        "backup_bytes_expected": row["backup_bytes_expected"],
+      },
+    )
+  pruned_rows = database.query_all(
+    f"""
+    SELECT
+      source.drive_id,
+      COUNT(DISTINCT
+        source.segment_id || ':' || COALESCE(source.camera, source.kind)
+      ) AS pruned_media
+    FROM artifacts source
+    JOIN objects source_object
+      ON source_object.sha256 = source.object_sha256
+      AND source_object.storage_state = 'pruned'
+    JOIN artifacts derived
+      ON derived.source_artifact_id = source.id
+      AND derived.kind = 'derived_video'
+      AND LOWER(derived.codec) = 'av1'
+      AND derived.status = 'ready'
+    WHERE source.drive_id IN ({placeholders})
+      AND source.source_artifact_id IS NULL
+      AND source.segment_id IS NOT NULL
+      AND source.kind IN (
+        'fcamera', 'ecamera', 'dcamera', 'qcamera',
+        'road', 'wideRoad', 'driver', 'video'
+      )
+    GROUP BY source.drive_id
+    """,
+    drive_ids,
+  )
+  for row in pruned_rows:
+    progress[row["drive_id"]]["pruned_media"] = row["pruned_media"]
+  return progress
+
+
 def _drive_view(
   row: sqlite3.Row,
   metadata: dict[str, Any] | None = None,
+  progress: dict[str, int] | None = None,
   *,
   raw_video_pruning_required: bool = False,
 ) -> dict[str, Any]:
   catalog = metadata or {}
+  drive_progress = progress or {}
   inventory_present = row["inventory_id"] is not None
   expected_media = row["inventory_expected_media_count"] if inventory_present else row["expected_media_count"]
   ready_media = row["inventory_ready_media_count"] if inventory_present else row["ready_media_pair_count"]
@@ -807,10 +842,10 @@ def _drive_view(
       expected_media - ready_media,
     ),
     "failed_media": row["failed_media_job_count"],
-    "pruned_media": row["pruned_media_count"],
+    "pruned_media": drive_progress.get("pruned_media", 0),
     "raw_video_pruning_required": raw_video_pruning_required,
-    "backup_bytes_received": row["backup_bytes_received"],
-    "backup_bytes_expected": row["backup_bytes_expected"],
+    "backup_bytes_received": drive_progress.get("backup_bytes_received", 0),
+    "backup_bytes_expected": drive_progress.get("backup_bytes_expected", 0),
     "artifact_count": row["artifact_count"],
     "telemetry_ready": bool(row["telemetry_ready"]),
     "readiness": _readiness(row),
@@ -1590,11 +1625,16 @@ def list_drives(
     database,
     [row["id"] for row in rows],
   )
+  progress = _drive_progress(
+    database,
+    [row["id"] for row in rows],
+  )
   return {
     "items": [
       _drive_view(
         row,
         metadata.get(row["id"]),
+        progress.get(row["id"]),
         raw_video_pruning_required=not request.app.state.settings.retain_raw_video,
       )
       for row in rows
@@ -1649,9 +1689,14 @@ def _get_drive_detail(request: Request, drive_id: str) -> dict[str, Any]:
     request.app.state.database,
     [drive_id],
   )
+  progress = _drive_progress(
+    request.app.state.database,
+    [drive_id],
+  )
   detail = _drive_view(
     row,
     metadata.get(drive_id),
+    progress.get(drive_id),
     raw_video_pruning_required=not request.app.state.settings.retain_raw_video,
   )
   route_inventory = latest_inventory_view(

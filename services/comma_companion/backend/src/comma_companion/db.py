@@ -379,6 +379,8 @@ ON uploads(device_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_uploads_device_file
 ON uploads(device_id, file_id, created_at DESC)
 WHERE file_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_uploads_device_route
+ON uploads(device_id, route_name, status);
 CREATE INDEX IF NOT EXISTS idx_upload_chunks_received
 ON upload_chunks(received_at);
 CREATE INDEX IF NOT EXISTS idx_drives_device_started
@@ -387,6 +389,9 @@ CREATE INDEX IF NOT EXISTS idx_segments_drive_number
 ON segments(drive_id, number);
 CREATE INDEX IF NOT EXISTS idx_artifacts_drive_segment
 ON artifacts(drive_id, segment_id, kind);
+CREATE INDEX IF NOT EXISTS idx_artifacts_source_kind_status
+ON artifacts(source_artifact_id, kind, status)
+WHERE source_artifact_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_commands_device_state
 ON commands(device_id, state, issued_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_state_priority

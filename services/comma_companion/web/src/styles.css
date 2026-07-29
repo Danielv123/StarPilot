@@ -769,11 +769,45 @@ svg {
 }
 
 .metric {
+  position: relative;
+  overflow: hidden;
   min-width: 0;
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
+}
+
+.metric > :not(.metric-background) {
+  position: relative;
+  z-index: 1;
+}
+
+.metric-background {
+  position: absolute;
+  z-index: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 62%;
+  pointer-events: none;
+}
+
+.metric-sparkline {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.metric-sparkline-area {
+  fill: rgba(72, 144, 199, 0.09);
+}
+
+.metric-sparkline-line {
+  fill: none;
+  stroke: rgba(83, 164, 224, 0.34);
+  stroke-width: 1.25;
+  vector-effect: non-scaling-stroke;
 }
 
 .metric-topline {

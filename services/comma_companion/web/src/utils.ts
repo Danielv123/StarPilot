@@ -45,6 +45,18 @@ export function formatBitrate(bytesPerSecond?: number | null): string {
   return `${Math.round(bits)} bit/s`
 }
 
+export function formatEta(seconds?: number | null): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—'
+  if (seconds < 60) return '<1 min'
+  const totalMinutes = Math.ceil(seconds / 60)
+  const days = Math.floor(totalMinutes / (24 * 60))
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60)
+  const minutes = totalMinutes % 60
+  if (days > 0) return `${days}d ${hours}h`
+  if (hours > 0) return `${hours}h ${minutes.toString().padStart(2, '0')}m`
+  return `${minutes} min`
+}
+
 export function formatDurationUs(value?: number | null, precise = false): string {
   if (value == null || !Number.isFinite(value)) return '—'
   const totalSeconds = Math.max(0, value / 1_000_000)

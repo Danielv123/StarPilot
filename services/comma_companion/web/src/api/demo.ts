@@ -7,6 +7,7 @@ import type {
   DriveCatalogPage,
   DriveDetail,
   DriveSeries,
+  InboundStatus,
   Job,
   ModelSummary,
   MediaManifest,
@@ -500,6 +501,20 @@ function runDemoSimulation(request: SimulationRequest): SimulationResult {
 export const demoApi = {
   async overview(): Promise<Overview> {
     return demoOverview
+  },
+  async inbound(): Promise<InboundStatus> {
+    return {
+      generated_at: new Date().toISOString(),
+      devices_online: demoDevices.filter((device) => device.online).length,
+      devices_total: demoDevices.length,
+      upload_bps: demoOverview.upload_bps,
+      pending_upload_bytes: Math.max(
+        demoOverview.pending_upload_bytes,
+        demoDevices.reduce((total, device) => total + (device.queue_bytes ?? 0), 0),
+      ),
+      server_pending_bytes: demoOverview.pending_upload_bytes,
+      bytes_received: demoUploads.reduce((total, upload) => total + upload.received_bytes, 0),
+    }
   },
   async devices(): Promise<Device[]> {
     return demoDevices

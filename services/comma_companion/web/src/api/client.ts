@@ -8,6 +8,7 @@ import type {
   DriveDetail,
   DriveReadiness,
   DriveSeries,
+  InboundStatus,
   Job,
   MediaManifest,
   MediaSyncIndex,
@@ -1358,6 +1359,27 @@ export const api = {
         .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
         .slice(0, 8),
       recent_drives: drives.items,
+    }
+  },
+  async inbound(): Promise<InboundStatus> {
+    if (demoMode) return (await loadDemoApi()).inbound()
+    const [snapshot, rawDevices] = await Promise.all([
+      request<UploadSnapshot>('/uploads/snapshot'),
+      request<RawDevice[]>('/devices'),
+    ])
+    const devices = rawDevices.map(normalizeDevice)
+    const deviceQueueBytes = devices.reduce(
+      (total, device) => total + Math.max(0, device.queue_bytes ?? 0),
+      0,
+    )
+    return {
+      generated_at: new Date().toISOString(),
+      devices_online: devices.filter((device) => device.online).length,
+      devices_total: devices.length,
+      upload_bps: snapshot.bytes_per_second_60s,
+      pending_upload_bytes: Math.max(deviceQueueBytes, snapshot.pending_bytes),
+      server_pending_bytes: snapshot.pending_bytes,
+      bytes_received: snapshot.bytes_received,
     }
   },
   async devices(): Promise<Device[]> {

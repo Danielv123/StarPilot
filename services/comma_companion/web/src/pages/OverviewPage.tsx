@@ -7,8 +7,10 @@ import {
   RadioTower,
   ServerCog,
 } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../api/client'
+import type { InboundStatus } from '../api/types'
 import { DriveRow, UploadRow } from '../components/RecordRows'
 import {
   ErrorState,
@@ -23,16 +25,76 @@ import {
 } from '../components/ui'
 import { useApi } from '../hooks/useApi'
 import { useVisibilityPolling } from '../hooks/useVisibilityPolling'
-import { formatBitrate, formatBytes, percent } from '../utils'
+import { formatBitrate, formatBytes, formatEta, percent } from '../utils'
+
+const SPEED_HISTORY_LENGTH = 60
+
+export function instantaneousSpeed(
+  previous: InboundStatus | undefined,
+  current: InboundStatus,
+): number {
+  if (!previous) return current.upload_bps
+  const elapsedSeconds = (
+    Date.parse(current.generated_at) - Date.parse(previous.generated_at)
+  ) / 1_000
+  if (
+    !Number.isFinite(elapsedSeconds) ||
+    elapsedSeconds <= 0 ||
+    elapsedSeconds > 10 ||
+    current.bytes_received < previous.bytes_received
+  ) {
+    return current.upload_bps
+  }
+  return (current.bytes_received - previous.bytes_received) / elapsedSeconds
+}
+
+export function sparklinePath(values: number[]): string {
+  if (!values.length) return ''
+  const maximum = Math.max(1, ...values)
+  return values.map((value, index) => {
+    const x = values.length === 1 ? 100 : (index / (values.length - 1)) * 100
+    const y = 34 - (Math.max(0, value) / maximum) * 30
+    return `${index ? 'L' : 'M'}${x.toFixed(2)},${y.toFixed(2)}`
+  }).join(' ')
+}
+
+function SpeedSparkline({ values }: { values: number[] }) {
+  const line = sparklinePath(values)
+  if (!line) return null
+  return (
+    <svg className="metric-sparkline" viewBox="0 0 100 36" preserveAspectRatio="none">
+      <path className="metric-sparkline-area" d={`${line} L100,36 L0,36 Z`} />
+      <path className="metric-sparkline-line" d={line} />
+    </svg>
+  )
+}
 
 export default function OverviewPage() {
   const state = useApi(() => api.overview(), [])
-  useVisibilityPolling(state.refresh, state.failureCount, 5_000)
+  const inboundState = useApi(() => api.inbound(), [])
+  const previousInbound = useRef<InboundStatus | undefined>(undefined)
+  const [speedHistory, setSpeedHistory] = useState<number[]>([])
+  useVisibilityPolling(state.refresh, state.failureCount, 30_000)
+  useVisibilityPolling(inboundState.refresh, inboundState.failureCount, 1_000)
+
+  useEffect(() => {
+    const inbound = inboundState.data
+    if (!inbound) return
+    const speed = instantaneousSpeed(previousInbound.current, inbound)
+    previousInbound.current = inbound
+    setSpeedHistory((history) => [...history.slice(1 - SPEED_HISTORY_LENGTH), speed])
+  }, [inboundState.data])
 
   if (state.loading && !state.data) return <LoadingState label="Loading archive overview" />
   if (state.error && !state.data) return <ErrorState error={state.error} retry={state.refresh} />
   const overview = state.data
   if (!overview) return null
+  const inbound = inboundState.data
+  const uploadBps = inbound?.upload_bps ?? overview.upload_bps
+  const pendingUploadBytes = inbound?.pending_upload_bytes ?? overview.pending_upload_bytes
+  const etaSeconds = uploadBps > 0 ? pendingUploadBytes / uploadBps : undefined
+  const devicesOnline = inbound?.devices_online ?? overview.devices_online
+  const devicesTotal = inbound?.devices_total ?? overview.devices_total
   const hasStorageCapacity = Boolean(overview.storage.capacity_bytes && overview.storage.capacity_bytes > 0)
   const storagePercent = hasStorageCapacity
     ? percent(overview.storage.used_bytes, overview.storage.capacity_bytes)
@@ -47,7 +109,7 @@ export default function OverviewPage() {
         actions={
           <div className="header-status">
             <span className="live-indicator"><i /> LIVE</span>
-            <LastUpdated value={overview.generated_at} />
+            <LastUpdated value={inbound?.generated_at ?? overview.generated_at} />
           </div>
         }
       />
@@ -55,17 +117,18 @@ export default function OverviewPage() {
       <div className="metric-grid metric-grid-overview">
         <Metric
           label="Comma"
-          value={`${overview.devices_online} online`}
-          detail={`${overview.devices_total} enrolled · parked`}
-          tone={overview.devices_online === overview.devices_total ? 'good' : 'warn'}
+          value={`${devicesOnline} online`}
+          detail={`${devicesTotal} enrolled · parked`}
+          tone={devicesOnline === devicesTotal ? 'good' : 'warn'}
           icon={<CarFront size={18} />}
         />
         <Metric
           label="Inbound"
-          value={formatBitrate(overview.upload_bps)}
-          detail={`${formatBytes(overview.pending_upload_bytes)} pending`}
-          tone={overview.upload_bps > 0 ? 'info' : undefined}
+          value={formatBitrate(uploadBps)}
+          detail={`${formatBytes(pendingUploadBytes)} queued · ETA ${formatEta(etaSeconds)}`}
+          tone={uploadBps > 0 ? 'info' : undefined}
           icon={<HardDriveUpload size={18} />}
+          background={<SpeedSparkline values={speedHistory} />}
         />
         <Metric
           label="Drive archive"

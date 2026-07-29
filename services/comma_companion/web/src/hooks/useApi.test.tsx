@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { useApi } from './useApi'
 
@@ -35,6 +35,28 @@ describe('useApi dependency generations', () => {
 
     newRequest.resolve('current')
     await waitFor(() => expect(state.result.current.data).toBe('current'))
+    expect(state.result.current.loading).toBe(false)
+  })
+
+  it('keeps rendered data out of the loading state during a background refresh', async () => {
+    const nextRequest = deferred<string>()
+    const loader = vi.fn()
+      .mockResolvedValueOnce('initial')
+      .mockReturnValueOnce(nextRequest.promise)
+    const state = renderHook(() => useApi(loader, []))
+
+    await waitFor(() => expect(state.result.current.data).toBe('initial'))
+    expect(state.result.current.loading).toBe(false)
+
+    let refresh!: Promise<void>
+    act(() => {
+      refresh = state.result.current.refresh()
+    })
+    expect(state.result.current.loading).toBe(false)
+
+    nextRequest.resolve('updated')
+    await act(async () => refresh)
+    expect(state.result.current.data).toBe('updated')
     expect(state.result.current.loading).toBe(false)
   })
 })

@@ -195,6 +195,55 @@ describe('device normalization', () => {
       battery_percent: 78,
     })
   })
+
+  it('uses the complete agent queue instead of only the declared server upload', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url === '/api/v1/uploads/snapshot') {
+        return new Response(JSON.stringify({
+          active_uploads: 1,
+          failed_uploads: 0,
+          completed_uploads: 0,
+          bytes_received: 100_000_000,
+          bytes_expected: 155_000_000,
+          pending_bytes: 55_000_000,
+          bytes_per_second_60s: 1_875_000,
+          by_device: {},
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      if (url === '/api/v1/devices') {
+        return new Response(JSON.stringify([{
+          id: 'comma-1',
+          display_name: 'Ioniq',
+          enrolled_at: '2026-01-01T00:00:00Z',
+          last_seen_at: '2026-07-29T10:00:00Z',
+          online: true,
+          offroad: true,
+          agent_version: '1',
+          software_version: null,
+          network_type: 'wifi',
+          state: 'uploading',
+          capabilities: [],
+          metrics: { pending_bytes: 7_000_000_000 },
+        }]), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      throw new Error(`Unexpected request ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      await expect(api.inbound()).resolves.toMatchObject({
+        devices_online: 1,
+        devices_total: 1,
+        upload_bps: 1_875_000,
+        pending_upload_bytes: 7_000_000_000,
+        server_pending_bytes: 55_000_000,
+        bytes_received: 100_000_000,
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
 
 describe('drive catalog normalization', () => {

@@ -86,15 +86,18 @@ export function Metric({
   detail,
   tone,
   icon,
+  background,
 }: {
   label: string
   value: ReactNode
   detail?: ReactNode
   tone?: 'good' | 'warn' | 'bad' | 'info'
   icon?: ReactNode
+  background?: ReactNode
 }) {
   return (
     <div className={`metric ${tone ? `metric-${tone}` : ''}`}>
+      {background && <div className="metric-background" aria-hidden="true">{background}</div>}
       <div className="metric-topline">
         <span>{label}</span>
         {icon}

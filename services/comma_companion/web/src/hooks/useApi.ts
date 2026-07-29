@@ -17,6 +17,7 @@ export function useApi<T>(loader: () => Promise<T>, dependencies: readonly unkno
   const [failureCount, setFailureCount] = useState(0)
   const generation = useRef(0)
   const mounted = useRef(true)
+  const hasData = useRef(false)
   const inFlight = useRef<{
     generation: number
     promise: Promise<void>
@@ -28,10 +29,11 @@ export function useApi<T>(loader: () => Promise<T>, dependencies: readonly unkno
       return inFlight.current.promise
     }
     const pending = (async () => {
-      setLoading(true)
+      if (!hasData.current) setLoading(true)
       try {
         const loaded = await Promise.resolve().then(() => loaderRef.current())
         if (mounted.current && generation.current === requestGeneration) {
+          hasData.current = true
           setData(loaded)
           setError(undefined)
           setFailureCount(0)

@@ -25,8 +25,11 @@ export function useVisibilityPolling(
       if (disposed || document.visibilityState !== 'visible') return
       timer = window.setTimeout(() => {
         timer = undefined
+        const startedAt = Date.now()
         void refresh().finally(() => {
-          if (!disposed) schedule()
+          if (!disposed) {
+            schedule(Math.max(0, delay - (Date.now() - startedAt)))
+          }
         })
       }, waitMs)
     }

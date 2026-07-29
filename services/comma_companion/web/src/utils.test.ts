@@ -4,6 +4,7 @@ import {
   formatBitrate,
   formatBytes,
   formatDurationUs,
+  formatEta,
   formatLocalDate,
   mergeQuery,
   metricImprovement,
@@ -24,6 +25,13 @@ describe('time and size formatting', () => {
   it('formats transport and archive units independently', () => {
     expect(formatBytes(1024 ** 3)).toBe('1.0 GB')
     expect(formatBitrate(1_000_000)).toBe('8.0 Mbit/s')
+  })
+
+  it('formats upload ETAs without false precision', () => {
+    expect(formatEta(30)).toBe('<1 min')
+    expect(formatEta(3_661)).toBe('1h 02m')
+    expect(formatEta(90_000)).toBe('1d 1h')
+    expect(formatEta()).toBe('—')
   })
 })
 

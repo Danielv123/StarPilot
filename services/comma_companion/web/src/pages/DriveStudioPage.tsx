@@ -193,7 +193,7 @@ export function DriveMedia({
   useVisibilityPolling(
     manifestState.refresh,
     manifestState.failureCount,
-    5_000,
+    1_000,
     60_000,
     refreshWhileProcessing,
   )
@@ -1197,7 +1197,7 @@ export default function DriveStudioPage() {
   useVisibilityPolling(
     detailState.refresh,
     detailState.failureCount,
-    5_000,
+    1_000,
     60_000,
     Boolean(detail && detail.readiness !== 'ready'),
   )
@@ -1245,7 +1245,7 @@ export default function DriveStudioPage() {
       .finally(() => { if (active) setSeriesLoading(false) })
     return () => { active = false }
   }, [
-    detail,
+    detail?.duration_us,
     detail?.telemetry_generation?.ndjson_sha256,
     detail?.telemetry_generation?.timeline_version,
     driveId,
@@ -1297,7 +1297,7 @@ export default function DriveStudioPage() {
       window.clearTimeout(timeout)
     }
   }, [
-    detail,
+    detail?.duration_us,
     detail?.telemetry_generation?.ndjson_sha256,
     detail?.telemetry_generation?.timeline_version,
     driveId,

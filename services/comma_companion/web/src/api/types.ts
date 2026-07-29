@@ -31,6 +31,16 @@ export interface Overview {
   recent_drives: Drive[]
 }
 
+export interface InboundStatus {
+  generated_at: string
+  devices_online: number
+  devices_total: number
+  upload_bps: number
+  pending_upload_bytes: number
+  server_pending_bytes: number
+  bytes_received: number
+}
+
 export interface Device {
   id: string
   name: string

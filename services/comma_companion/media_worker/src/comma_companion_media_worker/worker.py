@@ -1469,6 +1469,11 @@ class MediaWorker:
       ("dcamera", "driver", "raw_hevc"),
       ("qcamera", "qcamera", "raw_hevc"),
       ("qcamera", "qcamera", "mpegts"),
+      ("video", "road", "raw_hevc"),
+      ("video", "wide", "raw_hevc"),
+      ("video", "driver", "raw_hevc"),
+      ("video", "qcamera", "raw_hevc"),
+      ("video", "qcamera", "mpegts"),
     }
     if (job.input.kind, job.input.camera, job.input.input_format) not in approved_pairs:
       raise InputValidationError(

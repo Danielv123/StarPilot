@@ -829,6 +829,10 @@ def test_source_media_caps_and_canonical_mapping_are_enforced(tmp_path: Path) ->
   raw = raw_hevc_probe(raw_job.input.path)
 
   worker._validate_source_media(raw_job, raw)
+  for camera in ("road", "wide", "driver", "qcamera"):
+    generic_raw_payload = raw_job.as_dict()
+    generic_raw_payload["input"].update(kind="video", camera=camera)
+    worker._validate_source_media(EncodeJob.from_dict(generic_raw_payload), raw)
 
   invalid_raw_sources = [
     ProbeInfo(**{**raw.as_dict(), "width": MAX_WIDTH + 1}),
@@ -851,6 +855,9 @@ def test_source_media_caps_and_canonical_mapping_are_enforced(tmp_path: Path) ->
   mpeg_job = EncodeJob.from_dict(mpeg_job_payload)
   mpeg = mpegts_probe(mpeg_job.input.path)
   worker._validate_source_media(mpeg_job, mpeg)
+  generic_mpeg_payload = mpeg_job.as_dict()
+  generic_mpeg_payload["input"]["kind"] = "video"
+  worker._validate_source_media(EncodeJob.from_dict(generic_mpeg_payload), mpeg)
 
   invalid_mpeg_sources = [
     ProbeInfo(**{**mpeg.as_dict(), "audio_stream_count": 2}),
@@ -874,6 +881,10 @@ def test_source_media_caps_and_canonical_mapping_are_enforced(tmp_path: Path) ->
   wrong_mapping["input"].update(camera="road", kind="fcamera")
   with pytest.raises(InputValidationError, match="canonical media mapping"):
     worker._validate_source_media(EncodeJob.from_dict(wrong_mapping), mpeg)
+  generic_wrong_mapping = mpeg_job.as_dict()
+  generic_wrong_mapping["input"].update(camera="road", kind="video")
+  with pytest.raises(InputValidationError, match="canonical media mapping"):
+    worker._validate_source_media(EncodeJob.from_dict(generic_wrong_mapping), mpeg)
 
 
 def test_frame_index_uses_exact_pts_and_unambiguous_rlog_join(tmp_path: Path) -> None:

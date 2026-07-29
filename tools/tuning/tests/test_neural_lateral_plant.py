@@ -11,6 +11,7 @@ torch = pytest.importorskip("torch")
 from openpilot.tools.tuning import train_lateral_plant_model as plant_data
 from openpilot.tools.tuning import train_ioniq5_nnff_neural_plant as nnff_policy
 from openpilot.tools.tuning import train_neural_lateral_plant as neural_plant
+from openpilot.tools.tuning import compare_neural_lateral_plants as compare_plants
 
 
 def synthetic_trajectory(rows: int = 500) -> plant_data.Trajectory:
@@ -20,6 +21,7 @@ def synthetic_trajectory(rows: int = 500) -> plant_data.Trajectory:
     for name in (*plant_data.BASE_FEATURES, *plant_data.DIAGNOSTIC_FIELDS)
   }
   values["lat_active"][:] = 1.0
+  values["sample_valid"][:] = 1.0
   values["v_ego"][:] = 20.0
   values["applied_torque"] = np.linspace(-0.5, 0.5, rows, dtype=np.float32)
   values["actual_lateral_accel"] = 0.8 * values["applied_torque"]
@@ -152,6 +154,102 @@ def test_search_candidates_use_shared_physical_sources() -> None:
   assert np.array_equal(current_torque[0], current_torque[1])
 
 
+def test_resampling_uses_a_causal_time_grid() -> None:
+  trajectory = synthetic_trajectory(4)
+  trajectory.times = np.asarray([0.001, 0.011, 0.022, 0.031], dtype=np.float64)
+  trajectory.values["applied_torque"] = np.arange(4, dtype=np.float32)
+  times, values = neural_plant.resampled(trajectory, sample_step=1)
+  assert np.allclose(times, [0.01, 0.02, 0.03])
+  # Each grid point uses the latest source at or before that point, never the
+  # closer future source.
+  assert values["applied_torque"].tolist() == [0.0, 1.0, 2.0]
+  assert values["sample_valid"].tolist() == [1.0, 1.0, 1.0]
+  assert values["source_age_ms"].tolist() == pytest.approx([9.0, 9.0, 8.0])
+  assert values["source_time_error_ms"].tolist() == pytest.approx(
+    [-9.0, -9.0, -8.0],
+  )
+  assert np.all(values["source_age_ms"] >= 0)
+  assert np.array_equal(
+    values["source_time_error_ms"], -values["source_age_ms"],
+  )
+
+
+def test_joined_service_age_is_measured_from_absolute_grid_tick() -> None:
+  trajectory = synthetic_trajectory(4)
+  trajectory.times = np.asarray([0.001, 0.011, 0.022, 0.031], dtype=np.float64)
+  trajectory.values["car_output_age_ms"][0] = 30.0
+
+  _, values = neural_plant.resampled(trajectory, sample_step=1)
+
+  # The selected carState is 9 ms old at the first tick, so its 30 ms-old
+  # carOutput is 39 ms old at that absolute tick and must be invalid.
+  assert values["sample_valid"].tolist() == [0.0, 1.0, 1.0]
+
+
+def test_resampling_rejects_decreasing_source_timestamps() -> None:
+  trajectory = synthetic_trajectory(4)
+  trajectory.times = np.asarray([0.0, 0.02, 0.01, 0.03], dtype=np.float64)
+  with pytest.raises(ValueError, match="decreasing source timestamps"):
+    neural_plant.resampled(trajectory, sample_step=1)
+
+
+def test_eligible_sources_reject_nonpositive_source_gaps() -> None:
+  trajectory = synthetic_trajectory(100)
+  trajectory.times[40] = trajectory.times[39]
+  config = neural_plant.ModelConfig(
+    "fixture", "gru", 1, 10, (8,), dropout=0.0,
+  )
+  sources, _, values = neural_plant.eligible_sources(
+    trajectory, config, rollout_steps=5,
+  )
+  invalid = np.flatnonzero(values["sample_valid"] < 0.5)
+  assert invalid.tolist() == [39, 40]
+  for source in sources:
+    window = slice(source - config.history_steps + 1, source + 6)
+    assert values["sample_valid"][window].min() > 0.5
+
+
+def test_eligible_sources_include_final_complete_window() -> None:
+  trajectory = synthetic_trajectory(40)
+  config = neural_plant.ModelConfig(
+    "fixture", "gru", 1, 20, (8,), dropout=0.0,
+  )
+  rollout_steps = 10
+  sources, times, _ = neural_plant.eligible_sources(
+    trajectory, config, rollout_steps,
+  )
+  assert sources[-1] == len(times) - rollout_steps - 1
+
+
+def test_atomic_cache_dump_replaces_complete_file(tmp_path) -> None:
+  path = tmp_path / "trajectory.joblib"
+  neural_plant.atomic_joblib_dump({"version": 1}, path)
+  neural_plant.atomic_joblib_dump({"version": 2}, path)
+  assert neural_plant.load(path) == {"version": 2}
+  assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_unreadable_or_legacy_trajectory_cache_is_a_miss(tmp_path) -> None:
+  path = tmp_path / "trajectory.joblib"
+  path.write_bytes(b"truncated")
+  assert neural_plant.matching_trajectory_cache(
+    path,
+    {"version": 1},
+  ) is None
+
+  neural_plant.atomic_joblib_dump(
+    {
+      "cache_key": {"version": 1},
+      "trajectories": [],
+    },
+    path,
+  )
+  assert neural_plant.matching_trajectory_cache(
+    path,
+    {"version": 1},
+  ) is None
+
+
 def test_recursive_training_horizon_is_clamped_to_available_rollout() -> None:
   config = neural_plant.ModelConfig("fixture", "gru", 2, 10, (8,), dropout=0.0)
   assert neural_plant.effective_rollout_train_steps(5.0, config, rollout_steps=100) == 100
@@ -244,6 +342,23 @@ def test_trajectory_inventory_deduplicates_segment_encodings(tmp_path) -> None:
   assert inventory["rlog_count"] == 1
 
 
+def test_corpus_content_manifest_is_counted_and_hashed(tmp_path) -> None:
+  manifest = tmp_path / "corpus.sha256"
+  manifest.write_bytes(b"a  first\nb  second\n")
+  inventory = {"rlog_count": 2}
+
+  neural_plant.record_corpus_content_manifest(inventory, manifest)
+
+  assert inventory["content_manifest_entries"] == 2
+  assert inventory["content_manifest_sha256"] == (
+    "2aab0a152e58acdc96e0d25bdf215d4403bc12ff8250cd175ec2db58d63a260c"
+  )
+  with pytest.raises(ValueError, match="entry count"):
+    neural_plant.record_corpus_content_manifest(
+      {"rlog_count": 3}, manifest,
+    )
+
+
 def test_search_profiles_use_distinct_report_paths(tmp_path) -> None:
   temporal = SimpleNamespace(output_dir=tmp_path, candidate_file=None, search_profile="temporal")
   architecture = SimpleNamespace(output_dir=tmp_path, candidate_file=None, search_profile="architecture")
@@ -252,10 +367,22 @@ def test_search_profiles_use_distinct_report_paths(tmp_path) -> None:
 
 
 def test_split_report_reuses_search_cohorts(tmp_path) -> None:
+  inventory = {
+    "rlog_count": 3,
+    "rlog_bytes": 30,
+    "newest_mtime_ns": 7,
+    "inventory_manifest_sha256": "manifest",
+    "inventory_manifest_basis": "fixture",
+    "trajectory_extraction": {
+      "version": plant_data.TRAJECTORY_EXTRACTION_VERSION,
+      "source_selection": "fixture",
+    },
+    "route_rejections": [],
+  }
   report_path = tmp_path / "temporal_search.json"
   report_path.write_text(json.dumps({
     "data": {
-      "current": {"rlog_count": 3, "rlog_bytes": 30, "newest_mtime_ns": 7},
+      "current": inventory,
       "train_routes": ["train"],
       "validation_routes": ["validation"],
       "holdout_routes": ["holdout"],
@@ -264,9 +391,19 @@ def test_split_report_reuses_search_cohorts(tmp_path) -> None:
   split = neural_plant.split_from_report(
     report_path,
     {"train", "validation", "holdout", "unused"},
-    {"rlog_count": 3, "rlog_bytes": 30, "newest_mtime_ns": 7},
+    inventory,
   )
   assert split == ({"train"}, {"validation"}, {"holdout"})
+
+  with pytest.raises(
+    ValueError,
+    match="inventory_manifest_sha256",
+  ):
+    neural_plant.split_from_report(
+      report_path,
+      {"train", "validation", "holdout", "unused"},
+      {**inventory, "inventory_manifest_sha256": "different"},
+    )
 
 
 def test_pretraining_note_is_generic_unless_explicitly_supplied() -> None:
@@ -384,8 +521,23 @@ def test_ensemble_artifact_round_trip(tmp_path) -> None:
   differentiable_models, _, _ = neural_plant.load_ensemble_artifact(
     artifact_path, differentiable=True,
   )
-  assert all(model.training for model in differentiable_models)
+  assert all(not model.training for model in differentiable_models)
+  assert all(model.gru.training for model in differentiable_models)
+  assert all(model.gru.dropout == 0.0 for model in differentiable_models)
   assert not any(parameter.requires_grad for model in differentiable_models for parameter in model.parameters())
+  history = torch.zeros(
+    (2, config.history_steps, feature_count),
+    requires_grad=True,
+  )
+  first = neural_plant.predict_delta(
+    differentiable_models[0], history, stats,
+  )
+  second = neural_plant.predict_delta(
+    differentiable_models[0], history, stats,
+  )
+  assert torch.equal(first, second)
+  first.sum().backward()
+  assert history.grad is not None
 
 
 def test_residual_gate_covers_low_speed_and_active_maneuvers() -> None:
@@ -573,6 +725,97 @@ def test_evaluation_speed_sampler_never_duplicates_sparse_buckets() -> None:
   )
   assert len(selected) == len(speeds)
   assert len(np.unique(selected)) == len(selected)
+
+
+def test_comparison_reports_all_states_at_one_and_two_seconds() -> None:
+  window_count = 2
+  rollout_steps = 200
+  history = np.zeros(
+    (window_count, 1, len(plant_data.BASE_FEATURES)),
+    dtype=np.float32,
+  )
+  history[:, :, neural_plant.V_EGO_INDEX] = 20.0
+  target = np.zeros(
+    (window_count, rollout_steps, len(plant_data.STATE_FEATURES)),
+    dtype=np.float32,
+  )
+  windows = neural_plant.WindowBatch(
+    history=history,
+    future_base=np.zeros(
+      (window_count, rollout_steps, len(plant_data.BASE_FEATURES)),
+      dtype=np.float32,
+    ),
+    target_states=target,
+    routes=["route-a", "route-b"],
+  )
+  metrics = compare_plants.prediction_metrics(
+    prediction=np.full_like(target, 0.5),
+    disagreement=np.full_like(target, 0.1),
+    windows=windows,
+    shared_state_std=np.ones(len(plant_data.STATE_FEATURES), dtype=np.float32),
+    sample_period_s=0.01,
+  )
+  assert set(metrics["horizons"]) >= {"1.00s", "2.00s"}
+  assert set(metrics["horizons"]["1.00s"]) == set(plant_data.STATE_FEATURES)
+  assert set(metrics["horizons"]["2.00s"]) == set(plant_data.STATE_FEATURES)
+
+
+def test_comparison_window_hash_ignores_config_name() -> None:
+  windows = neural_plant.WindowBatch(
+    history=np.zeros(
+      (1, 10, len(plant_data.BASE_FEATURES)),
+      dtype=np.float32,
+    ),
+    future_base=np.zeros(
+      (1, 20, len(plant_data.BASE_FEATURES)),
+      dtype=np.float32,
+    ),
+    target_states=np.zeros(
+      (1, 20, len(plant_data.STATE_FEATURES)),
+      dtype=np.float32,
+    ),
+    routes=["route-a"],
+  )
+  first = neural_plant.ModelConfig("candidate-a", "gru", 1, 10, (8,))
+  second = neural_plant.ModelConfig("candidate-b", "gru", 1, 10, (8,))
+
+  assert compare_plants.window_hash(
+    windows, first,
+  ) == compare_plants.window_hash(windows, second)
+
+
+@pytest.mark.parametrize(
+  ("field", "wrong_value"),
+  (
+    ("training_contract_version", neural_plant.TRAINING_CONTRACT_VERSION - 1),
+    ("recursive_objective_horizon_s", 1.0),
+  ),
+)
+def test_comparison_rejects_wrong_training_contract(
+  field: str,
+  wrong_value: float,
+) -> None:
+  metadata = {
+    "training_alignment": "timestamp_causal_recorded_history_asof",
+    "causal_training_eligible": True,
+    "training_schema": "comma-companion.dynamics-row",
+    "training_schema_version": 1,
+    "training_extraction_version": plant_data.TRAJECTORY_EXTRACTION_VERSION,
+    "training_contract_version": neural_plant.TRAINING_CONTRACT_VERSION,
+    "recursive_objective_horizon_s": (
+      neural_plant.RECURSIVE_OBJECTIVE_HORIZON_S
+    ),
+    "trainer_schema": neural_plant.TRAINER_SCHEMA,
+    "trainer_schema_version": neural_plant.TRAINER_SCHEMA_VERSION,
+    "member_count": 3,
+    "pretraining_performed": False,
+  }
+  metadata[field] = wrong_value
+  with pytest.raises(
+    ValueError,
+    match=rf"{field} differs",
+  ):
+    compare_plants.validate_candidate_metadata(metadata)
 
 
 def test_low_speed_curvature_identifies_intersection_turn_in() -> None:

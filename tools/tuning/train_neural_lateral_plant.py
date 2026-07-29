@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -39,6 +40,11 @@ from openpilot.tools.tuning import train_vehicle_response_model as log_data
 DEFAULT_CURRENT_ROOT = Path(r"D:\comma_driving_logs\10.30.1.75\realdata")
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "artifacts/tuning/neural_lateral_plant"
 FORMAT_VERSION = 1
+TRAINER_SCHEMA = "starpilot.neural-lateral-plant"
+TRAINER_SCHEMA_VERSION = 8
+TRAINING_CONTRACT_VERSION = 10
+RECURSIVE_OBJECTIVE_HORIZON_S = 0.5
+CAUSAL_RESAMPLE_MAX_SOURCE_AGE_NS = plant_data.MAX_ASOF_AGE_NS
 STATE_INDEXES = tuple(plant_data.BASE_FEATURES.index(name) for name in plant_data.STATE_FEATURES)
 SIGNED_STEERING_RATE_INDEX = plant_data.BASE_FEATURES.index("signed_steering_rate_deg_s")
 STEERING_RATE_INDEX = plant_data.BASE_FEATURES.index("steering_rate_deg")
@@ -621,10 +627,17 @@ def load_ensemble_artifact(path: Path, device: torch.device | str = "cpu",
     else:
       model = build_model(config).to(device)
     model.load_state_dict(state)
-    model.train(differentiable)
+    model.eval()
+    for parameter in model.parameters():
+      parameter.requires_grad_(False)
     if differentiable:
-      for parameter in model.parameters():
-        parameter.requires_grad_(False)
+      # cuDNN RNN backward requires the recurrent module to be in training
+      # mode. Keep the surrounding model in deterministic inference mode and
+      # explicitly disable the GRU's internal inter-layer dropout.
+      for module in model.modules():
+        if isinstance(module, (nn.RNN, nn.GRU, nn.LSTM)):
+          module.dropout = 0.0
+          module.train()
     models.append(model)
   stats = tensor_stats(payload["normalization"], torch.device(device))
   return models, stats, payload
@@ -639,9 +652,16 @@ def ensemble_predict_delta(models: list[nn.Module], history: torch.Tensor,
   return member_delta.mean(dim=0), member_delta.std(dim=0, unbiased=False)
 
 
-def _read_one(payload: tuple[str, str, str]) -> plant_data.Trajectory | None:
-  path, brand, fingerprint = payload
-  return plant_data.read_trajectory(Path(path), brand, fingerprint, sample_step=1)
+def _read_route(
+  payload: tuple[tuple[str, ...], str, str],
+) -> list[plant_data.Trajectory]:
+  paths, brand, fingerprint = payload
+  return plant_data.read_route_trajectories(
+    [Path(path) for path in paths],
+    brand,
+    fingerprint,
+    sample_step=1,
+  )
 
 
 def trajectory_inventory(root: Path) -> tuple[list[Path], dict[str, Any]]:
@@ -651,46 +671,205 @@ def trajectory_inventory(root: Path) -> tuple[list[Path], dict[str, Any]]:
       f"No rlog files found under {root}. Camera MP4 files do not contain the " +
       "vehicle telemetry required by this trainer."
     )
-  total_bytes = sum(path.stat().st_size for path in paths)
-  newest_mtime_ns = max(path.stat().st_mtime_ns for path in paths)
+  entries = sorted(
+    (
+      path.relative_to(root).as_posix(),
+      path.stat().st_size,
+      path.stat().st_mtime_ns,
+    )
+    for path in paths
+  )
+  manifest = "".join(
+    f"{relative_path}\0{size}\0{mtime_ns}\n"
+    for relative_path, size, mtime_ns in entries
+  ).encode()
   return paths, {
     "root": str(root.resolve()),
-    "rlog_count": len(paths),
-    "rlog_bytes": total_bytes,
-    "newest_mtime_ns": newest_mtime_ns,
+    "rlog_count": len(entries),
+    "rlog_bytes": sum(size for _, size, _ in entries),
+    "newest_mtime_ns": max(mtime_ns for _, _, mtime_ns in entries),
+    "inventory_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+    "inventory_manifest_basis": "relative_path_nul_size_nul_mtime_ns_newline",
   }
+
+
+def record_corpus_content_manifest(
+  inventory: dict[str, Any],
+  manifest_path: Path,
+) -> None:
+  manifest_lines = manifest_path.read_text(encoding="utf-8").splitlines()
+  if len(manifest_lines) != inventory["rlog_count"]:
+    raise ValueError(
+      f"Corpus content manifest entry count does not match rlog inventory: {len(manifest_lines)} != {inventory['rlog_count']}.",
+    )
+  inventory["content_manifest"] = str(manifest_path.resolve())
+  inventory["content_manifest_entries"] = len(manifest_lines)
+  inventory["content_manifest_sha256"] = hashlib.sha256(
+    manifest_path.read_bytes(),
+  ).hexdigest()
+
+
+def atomic_joblib_dump(payload: Any, path: Path) -> None:
+  path.parent.mkdir(parents=True, exist_ok=True)
+  temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+  try:
+    dump(payload, temporary_path, compress=3)
+    os.replace(temporary_path, path)
+  finally:
+    temporary_path.unlink(missing_ok=True)
+
+
+def matching_trajectory_cache(
+  cache_path: Path,
+  cache_key: dict[str, Any],
+) -> tuple[list[plant_data.Trajectory], list[dict[str, str]]] | None:
+  if not cache_path.is_file():
+    return None
+  try:
+    cached = load(cache_path)
+    trajectories = cached["trajectories"]
+    route_rejections = cached["route_rejections"]
+    valid = (
+      isinstance(cached, dict)
+      and cached.get("cache_key") == cache_key
+      and isinstance(trajectories, list)
+      and all(
+        isinstance(trajectory, plant_data.Trajectory)
+        for trajectory in trajectories
+      )
+      and isinstance(route_rejections, list)
+      and all(
+        isinstance(rejection, dict)
+        and set(rejection) == {"route", "reason"}
+        and all(isinstance(value, str) for value in rejection.values())
+        for rejection in route_rejections
+      )
+    )
+  except Exception as exc:
+    print(
+      f"ignored unreadable trajectory cache {cache_path}: " +
+      f"{type(exc).__name__}",
+      file=sys.stderr,
+    )
+    return None
+  if not valid:
+    print(
+      f"ignored incompatible trajectory cache {cache_path}",
+      file=sys.stderr,
+    )
+    return None
+  return trajectories, route_rejections
 
 
 def load_trajectories(root: Path, cache_path: Path, workers: int, brand: str,
                       fingerprint: str) -> tuple[list[plant_data.Trajectory], dict[str, Any]]:
   paths, inventory = trajectory_inventory(root)
-  cache_key = {**inventory, "brand": brand, "fingerprint": fingerprint, "sample_step": 1}
-  if cache_path.is_file():
-    cached = load(cache_path)
-    if cached.get("cache_key") == cache_key:
-      print(f"reused trajectory cache {cache_path}", flush=True)
-      return cached["trajectories"], inventory
+  inventory["trajectory_extraction"] = {
+    "version": plant_data.TRAJECTORY_EXTRACTION_VERSION,
+    "event_order": ["logMonoTime", "source_ordinal"],
+    "adjacent_segment_overlap": "route_global_merge",
+    "contiguous_run_proof": (
+      "adjacent_segment_numbers_and_valid_endOfSegment_startOfSegment_sentinels"
+    ),
+    "route_state_carry": True,
+    "max_route_state_carry_gap_s": plant_data.MAX_ROUTE_STATE_CARRY_GAP_S,
+    "max_asof_age_ms": plant_data.MAX_ASOF_AGE_NS / 1e6,
+    "source_selection": "independent_per_source_max_valid_source_with_logMonoTime_at_or_before_tick",
+    "invalid_event_policy": {
+      "carState": "drop_without_invalidating_prior_valid_state",
+      "carControl": "invalidate_until_next_valid",
+      "controlsState": "invalidate_until_next_valid",
+      "carOutput": "invalidate_until_next_valid",
+    },
+    "event_valid_policy": (
+      "drop_invalid_carState_and_invalidate_invalid_joined_service"
+    ),
+    "corrupt_input_policy": "reject_route",
+    "required_asof_sources": [
+      "carState",
+      "carControl",
+      "controlsState",
+      "carOutput",
+    ],
+    "applied_torque_source": "carOutput.actuatorsOutput.torque_only_no_fallback",
+    "desired_lateral_jerk": "recorded_only",
+    "derived_lateral_jerk": "separate_causal_trailing_window_diagnostic",
+    "signed_steering_rate": "causal_grid_difference_of_zoh_steering_angle",
+  }
+  cache_key = {
+    **inventory,
+    "brand": brand,
+    "fingerprint": fingerprint,
+    "sample_step": 1,
+  }
+  cached = matching_trajectory_cache(cache_path, cache_key)
+  if cached is not None:
+    trajectories, route_rejections = cached
+    inventory["route_rejections"] = route_rejections
+    print(f"reused trajectory cache {cache_path}", flush=True)
+    return trajectories, inventory
 
   started = perf_counter()
   trajectories: list[plant_data.Trajectory] = []
-  payloads = [(str(path), brand, fingerprint) for path in paths]
+  route_rejections: list[dict[str, str]] = []
+  route_paths = plant_data.group_route_log_paths(paths)
+  payloads = [
+    (tuple(str(path) for path in grouped_paths), brand, fingerprint)
+    for grouped_paths in route_paths
+  ]
   with ProcessPoolExecutor(max_workers=max(1, workers)) as pool:
-    futures = {pool.submit(_read_one, payload): payload[0] for payload in payloads}
+    futures = {
+      pool.submit(_read_route, payload): payload[0]
+      for payload in payloads
+    }
+    parsed_segments = 0
     for index, future in enumerate(as_completed(futures), 1):
-      path = futures[future]
+      route_path_strings = futures[future]
       try:
-        trajectory = future.result()
-      except Exception as e:
-        print(f"skip {path}: {e}", file=sys.stderr)
+        route_trajectories = future.result()
+      except plant_data.CorruptRouteError as e:
+        route_rejections.append({
+          "route": plant_data.route_name(
+            Path(route_path_strings[0]).parent.name,
+          ),
+          "reason": "corrupt_input",
+        })
+        print(
+          f"skip route {Path(route_path_strings[0]).parent.name}: {e}",
+          file=sys.stderr,
+        )
         continue
-      if trajectory is not None:
-        trajectories.append(trajectory)
-      if index % 25 == 0 or index == len(futures):
-        print(f"parsed {index}/{len(futures)} rlogs; usable={len(trajectories)}", flush=True)
+      except Exception:
+        for pending in futures:
+          pending.cancel()
+        raise
+      if not route_trajectories:
+        route_rejections.append({
+          "route": plant_data.route_name(
+            Path(route_path_strings[0]).parent.name,
+          ),
+          "reason": "no_matching_valid_carParams_or_no_trajectory",
+        })
+      parsed_segments += len(route_path_strings)
+      trajectories.extend(route_trajectories)
+      if index % 5 == 0 or index == len(futures):
+        print(
+          f"parsed {parsed_segments}/{len(paths)} rlogs across " +
+          f"{index}/{len(futures)} routes; usable={len(trajectories)}",
+          flush=True,
+        )
 
   trajectories.sort(key=lambda item: item.segment)
-  cache_path.parent.mkdir(parents=True, exist_ok=True)
-  dump({"cache_key": cache_key, "trajectories": trajectories}, cache_path, compress=3)
+  route_rejections.sort(key=lambda item: (item["route"], item["reason"]))
+  inventory["route_rejections"] = route_rejections
+  atomic_joblib_dump(
+    {
+      "cache_key": cache_key,
+      "trajectories": trajectories,
+      "route_rejections": route_rejections,
+    },
+    cache_path,
+  )
   print(
     f"cached {len(trajectories)} trajectories from " +
     f"{len({item.route for item in trajectories})} routes in " +
@@ -724,34 +903,116 @@ def split_routes(trajectories: list[plant_data.Trajectory], validation_fraction:
   return training, validation, holdouts
 
 
-def resampled(trajectory: plant_data.Trajectory, sample_step: int) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-  indexes = np.arange(0, len(trajectory.times), sample_step)
-  return trajectory.times[indexes], {
-    name: values[indexes]
-    for name, values in trajectory.values.items()
+def resampled(
+  trajectory: plant_data.Trajectory,
+  sample_step: int,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+  if sample_step < 1:
+    raise ValueError("sample_step must be positive.")
+  if len(trajectory.times) == 0:
+    return trajectory.times.copy(), {
+      name: values.copy()
+      for name, values in trajectory.values.items()
+    }
+  source_ns = np.rint(trajectory.times * 1e9).astype(np.int64)
+  if len(source_ns) > 1 and np.any(np.diff(source_ns) < 0):
+    raise ValueError(
+      f"Trajectory {trajectory.route} has decreasing source timestamps.",
+    )
+  period_ns = sample_step * 10_000_000
+  first_grid_ns = ((source_ns[0] + period_ns - 1) // period_ns) * period_ns
+  last_grid_ns = (source_ns[-1] // period_ns) * period_ns
+  if last_grid_ns < first_grid_ns:
+    return np.empty(0, dtype=np.float64), {
+      name: np.empty(0, dtype=values.dtype)
+      for name, values in trajectory.values.items()
+    }
+  grid_ns = np.arange(
+    first_grid_ns,
+    last_grid_ns + period_ns,
+    period_ns,
+    dtype=np.int64,
+  )
+  indexes = np.searchsorted(source_ns, grid_ns, side="right") - 1
+  source_valid = (
+    trajectory.values.get(
+      "sample_valid", np.ones(len(source_ns), dtype=np.float32),
+    ) > 0.5
+  )
+  if len(source_ns) > 1:
+    source_valid[1:] &= np.diff(source_ns) > 0
+  ages_ns = grid_ns - source_ns[indexes]
+  base_source_age_ns = (
+    trajectory.values.get(
+      "source_age_ms", np.zeros(len(source_ns), dtype=np.float32),
+    )[indexes].astype(np.float64) * 1e6
+  )
+  total_source_age_ns = ages_ns + base_source_age_ns
+  joined_source_age_valid = np.ones(len(grid_ns), dtype=bool)
+  for age_field in (
+    "car_control_age_ms",
+    "controls_state_age_ms",
+    "car_output_age_ms",
+  ):
+    joined_age_ns = (
+      trajectory.values[age_field][indexes].astype(np.float64) * 1e6
+    )
+    joined_source_age_valid &= (
+      np.isfinite(joined_age_ns)
+      & (joined_age_ns >= 0)
+      & ((ages_ns + joined_age_ns) <= CAUSAL_RESAMPLE_MAX_SOURCE_AGE_NS)
+    )
+  grid_valid = (
+    (indexes >= 0)
+    & source_valid[indexes]
+    & (ages_ns >= 0)
+    & np.isfinite(total_source_age_ns)
+    & (total_source_age_ns >= 0)
+    & (total_source_age_ns <= CAUSAL_RESAMPLE_MAX_SOURCE_AGE_NS)
+    & joined_source_age_valid
+  )
+  values = {
+    name: source_values[indexes].copy()
+    for name, source_values in trajectory.values.items()
   }
+  values["source_age_ms"] = (
+    total_source_age_ns.astype(np.float32) / 1e6
+  )
+  values["source_time_error_ms"] = -values["source_age_ms"]
+  values["sample_valid"] = grid_valid.astype(np.float32)
+  return grid_ns.astype(np.float64) / 1e9, values
 
 
 def eligible_sources(trajectory: plant_data.Trajectory, config: ModelConfig,
                      rollout_steps: int) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
   times, values = resampled(trajectory, config.sample_step)
   lower = config.history_steps - 1
-  upper = len(times) - rollout_steps - 1
+  upper = len(times) - rollout_steps
   if upper <= lower:
     return np.empty(0, dtype=np.int64), times, values
   source = np.arange(lower, upper, dtype=np.int64)
-  future = source[:, None] + np.arange(rollout_steps + 1)
+  starts = source - config.history_steps + 1
+  ends = source + rollout_steps
+  row_clean = (
+    (values["lat_active"] > 0.5)
+    & (values["driver_overlay"] < 0.5)
+    & (values["saturated"] < 0.5)
+    & (values["sample_valid"] > 0.5)
+    & np.isfinite(np.column_stack([
+      values[name] for name in plant_data.BASE_FEATURES
+    ])).all(axis=1)
+  )
+  bad_row_prefix = np.concatenate(([0], np.cumsum(~row_clean)))
   clean = (
-    (values["lat_active"][future].min(axis=1) > 0.5)
-    & (values["driver_overlay"][future].max(axis=1) < 0.5)
-    & (values["saturated"][future].max(axis=1) < 0.5)
-    & (values["v_ego"][source] >= plant_data.MIN_TRAIN_SPEED_MPS)
+    (values["v_ego"][source] >= plant_data.MIN_TRAIN_SPEED_MPS)
+    & ((bad_row_prefix[ends + 1] - bad_row_prefix[starts]) == 0)
   )
   gaps = np.diff(times)
   max_gap = max(0.035, config.sample_period_s * 1.8)
-  bad_prefix = np.concatenate(([0], np.cumsum(gaps > max_gap)))
-  starts = source - config.history_steps + 1
-  ends = source + rollout_steps
+  bad_prefix = np.concatenate((
+    [0],
+    np.cumsum((gaps <= 1e-4) | (gaps > max_gap)),
+  ))
   clean &= (bad_prefix[ends] - bad_prefix[starts]) == 0
   return source[clean], times, values
 
@@ -774,8 +1035,11 @@ def common_source_keys(trajectories: list[plant_data.Trajectory], routes: set[st
     config_sources: list[set[int]] = []
     for config in configs:
       rollout_steps = max(1, round(rollout_seconds / config.sample_period_s))
-      sources = eligible_sources(trajectory, config, rollout_steps)[0]
-      config_sources.append({int(source) * config.sample_step for source in sources})
+      sources, times, _ = eligible_sources(trajectory, config, rollout_steps)
+      config_sources.append({
+        int(round(times[source] * 1e9))
+        for source in sources
+      })
     shared = set.intersection(*config_sources)
     common.update((trajectory_index, source) for source in shared)
   return common
@@ -800,7 +1064,10 @@ def build_windows(trajectories: list[plant_data.Trajectory], routes: set[str],
     if source_keys is not None:
       sources = np.asarray([
         source for source in sources
-        if (trajectory_index, int(source) * config.sample_step) in source_keys
+        if (
+          trajectory_index,
+          int(round(times[source] * 1e9)),
+        ) in source_keys
       ], dtype=np.int64)
     if len(sources):
       prepared[trajectory_index] = (times, values)
@@ -1508,6 +1775,19 @@ def common_parser() -> argparse.ArgumentParser:
   parser.add_argument("--max-route-driver-overlay", type=float, default=0.50)
   parser.add_argument("--pretraining-note")
   parser.add_argument("--initial-model", type=Path)
+  parser.add_argument(
+    "--corpus-content-manifest",
+    type=Path,
+    help="SHA-256 manifest with one entry per discovered rlog.",
+  )
+  parser.add_argument(
+    "--compatible-telemetry-extractor-sha256",
+    help="Reviewed SHA-256 of the compatible telemetry extractor contract.",
+  )
+  parser.add_argument(
+    "--compatible-telemetry-extractor-version",
+    help="Reviewed semantic version of the compatible telemetry extractor.",
+  )
   parser.add_argument("--split-report", type=Path)
   parser.add_argument("--validation-fraction", type=float, default=0.15)
   parser.add_argument("--holdout-route-prefix", action="append")
@@ -1515,7 +1795,11 @@ def common_parser() -> argparse.ArgumentParser:
   parser.add_argument("--max-validation-windows", type=int, default=60000)
   parser.add_argument("--max-holdout-windows", type=int, default=30000)
   parser.add_argument("--rollout-seconds", type=float, default=2.0)
-  parser.add_argument("--rollout-train-seconds", type=float, default=0.5)
+  parser.add_argument(
+    "--rollout-train-seconds",
+    type=float,
+    default=RECURSIVE_OBJECTIVE_HORIZON_S,
+  )
   parser.add_argument("--epochs", type=int, default=35)
   parser.add_argument("--patience", type=int, default=7)
   parser.add_argument("--batch-size", type=int, default=512)
@@ -1621,7 +1905,15 @@ def split_from_report(path: Path, usable_routes: set[str],
   report_inventory = data.get("current", data.get("current_data"))
   if report_inventory is None:
     raise ValueError("Split report does not contain a data inventory.")
-  for key in ("rlog_count", "rlog_bytes", "newest_mtime_ns"):
+  for key in (
+    "rlog_count",
+    "rlog_bytes",
+    "newest_mtime_ns",
+    "inventory_manifest_sha256",
+    "inventory_manifest_basis",
+    "trajectory_extraction",
+    "route_rejections",
+  ):
     if report_inventory.get(key) != inventory.get(key):
       raise ValueError(f"Split report data inventory differs at {key}.")
   training = set(data["train_routes"])
@@ -1743,7 +2035,31 @@ def run_search(args: argparse.Namespace) -> None:
 
 
 def run_train(args: argparse.Namespace) -> None:
+  if (
+    (args.compatible_telemetry_extractor_sha256 is None)
+    != (args.compatible_telemetry_extractor_version is None)
+  ):
+    raise ValueError(
+      "Compatible telemetry extractor SHA-256 and version must be supplied together.",
+    )
+  if (
+    args.compatible_telemetry_extractor_sha256 is not None
+    and (
+      len(args.compatible_telemetry_extractor_sha256) != 64
+      or any(
+        character not in "0123456789abcdef"
+        for character in args.compatible_telemetry_extractor_sha256.lower()
+      )
+    )
+  ):
+    raise ValueError(
+      "--compatible-telemetry-extractor-sha256 must be 64 hexadecimal characters.",
+    )
   trajectories, inventory = load_current(args)
+  if args.corpus_content_manifest is not None:
+    record_corpus_content_manifest(
+      inventory, args.corpus_content_manifest,
+    )
   config = config_from_args(args)
   rollout_steps = max(1, round(args.rollout_seconds / config.sample_period_s))
   usable_routes = eligible_routes(trajectories, config, rollout_steps)
@@ -1806,6 +2122,19 @@ def run_train(args: argparse.Namespace) -> None:
   rollout_train_steps = effective_rollout_train_steps(
     args.rollout_train_seconds, config, rollout_steps,
   )
+  recursive_objective_horizon_s = (
+    rollout_train_steps * config.sample_period_s
+  )
+  if not math.isclose(
+    recursive_objective_horizon_s,
+    RECURSIVE_OBJECTIVE_HORIZON_S,
+    rel_tol=0.0,
+    abs_tol=1e-12,
+  ):
+    raise ValueError(
+      "Training contract v10 requires an effective recursive objective " +
+      f"horizon of {RECURSIVE_OBJECTIVE_HORIZON_S:.1f} seconds.",
+    )
   models: list[nn.Module] = []
   member_reports: list[dict[str, Any]] = []
   ensemble_seeds = args.ensemble_seed or [23, 41, 71]
@@ -1883,6 +2212,62 @@ def run_train(args: argparse.Namespace) -> None:
     "members": [state_dict_cpu(model) for model in models],
     "metadata": {
       "current_data": inventory,
+      "training_alignment": "timestamp_causal_recorded_history_asof",
+      "causal_training_eligible": True,
+      "training_schema": "comma-companion.dynamics-row",
+      "training_schema_version": 1,
+      "training_extraction_version": plant_data.TRAJECTORY_EXTRACTION_VERSION,
+      "training_contract_version": TRAINING_CONTRACT_VERSION,
+      "recursive_objective_horizon_s": recursive_objective_horizon_s,
+      "training_extractor_sha256": hashlib.sha256(
+        Path(plant_data.__file__).read_bytes(),
+      ).hexdigest(),
+      "trainer_schema": TRAINER_SCHEMA,
+      "trainer_schema_version": TRAINER_SCHEMA_VERSION,
+      "trainer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+      "compatible_telemetry_extractor_sha256": (
+        args.compatible_telemetry_extractor_sha256.lower()
+        if args.compatible_telemetry_extractor_sha256 is not None
+        else None
+      ),
+      "compatible_telemetry_extractor_version": (
+        args.compatible_telemetry_extractor_version
+      ),
+      "sampling": {
+        "grid": "absolute_monotonic_time",
+        "absolute_grid_field": "nominal_log_mono_time_ns",
+        "absolute_grid_phase_ns": 0,
+        "sample_period_ns": round(config.sample_period_s * 1e9),
+        "sample_rate_hz": 1.0 / config.sample_period_s,
+        "first_tick_formula": "ceil(first_valid_carState_logMonoTime_ns/sample_period_ns)*sample_period_ns",
+        "alignment": "latest_at_or_before_grid_time_zero_order_hold",
+        "source_selection": "independent_per_source_max_valid_source_with_logMonoTime_at_or_before_tick",
+        "invalid_event_policy": {
+          "carState": "drop_without_invalidating_prior_valid_state",
+          "carControl": "invalidate_until_next_valid",
+          "controlsState": "invalidate_until_next_valid",
+          "carOutput": "invalidate_until_next_valid",
+        },
+        "source_age_equation": (
+          "source_age_ms=(nominal_log_mono_time_ns-source_log_mono_time_ns)/1e6"
+        ),
+        "source_time_error_equation": "source_time_error_ms=-source_age_ms",
+        "no_future_source": True,
+        "signed_steering_rate": "causal_grid_difference_of_zoh_steering_angle",
+        "max_asof_age_ms": CAUSAL_RESAMPLE_MAX_SOURCE_AGE_NS / 1e6,
+        "required_asof_sources": [
+          "carState",
+          "carControl",
+          "controlsState",
+          "carOutput",
+        ],
+        "applied_torque_source": "carOutput.actuatorsOutput.torque_only_no_fallback",
+        "route_relative_time_formula": "nominal_t_us=(nominal_log_mono_time_ns-route_origin_log_mono_time_ns)//1000",
+        "route_relative_phase_policy": (
+          "constant_nonzero_modulo_allowed_exact_10000us_steps"
+        ),
+        "event_order": ["logMonoTime", "source_ordinal"],
+      },
       "pretraining_performed": args.initial_model is not None,
       "pretraining_note": (
         f"Fine-tuned from {args.initial_model}."
@@ -1901,6 +2286,7 @@ def run_train(args: argparse.Namespace) -> None:
       "holdout_windows": len(holdout_windows),
       "residual_validation_coverage": validation_coverage,
       "member_reports": member_reports,
+      "member_count": len(models),
       "ensemble_validation": ensemble_validation,
       "ensemble_holdout": ensemble_holdout,
       "parameters_per_member": parameter_count(models[0]),

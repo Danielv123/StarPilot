@@ -2232,13 +2232,18 @@ class MediaWorker:
         publish_journal_stat,
       ):
         raise OutputConflictError(f"publish transaction marker does not alias its durable stage: {publish_journal}")
-      journal_identity = _file_identity(publish_journal_stat)
       _unlink_verified_identity(
         staged_journal,
         _file_identity(staged_journal_stat),
         description="publish transaction marker stage",
       )
       _fsync_directory(publish_journal.parent)
+      _entries, journal_identity = self._load_publish_transaction(
+        publish_journal,
+        job=job,
+        source_sha256=source_hash,
+        expected_targets=publication_targets,
+      )
 
       for stage, target in publication_pairs:
         os.replace(stage, target)

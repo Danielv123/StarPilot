@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
+import comma_companion_media_worker.worker as worker_module
 from comma_companion_media_worker.contract import ContractError, EncodeJob
 from comma_companion_media_worker.worker import (
   ANALYZE_DURATION_US,
@@ -689,6 +690,47 @@ def test_partial_publish_failure_leaves_journal_owned_target_for_safe_retry(tmp_
   assert not journal.exists()
   assert poster.is_file()
   assert video.is_file()
+  assert source_path.is_file()
+
+
+def test_publish_refreshes_marker_identity_after_hardlink_stage_unlink(tmp_path: Path) -> None:
+  payload = job_for(tmp_path).as_dict()
+  payload["encode"]["thumbnail_count"] = 0
+  job = EncodeJob.from_dict(payload)
+  source_path = Path(job.input.path)
+  source_path.write_bytes(b"s" * 100_000)
+  worker = MediaWorker()
+  source = ProbeInfo(
+    **{
+      **raw_hevc_probe(job.input.path).as_dict(),
+      "frame_count": 20,
+      "size_bytes": 100_000,
+      "video_duration_seconds": 1.0,
+    }
+  )
+  output_probe = ProbeInfo(**{**av1_probe(frame_count=20).as_dict(), "size_bytes": 70_000})
+  _video, metadata, _poster, _frame_index, _thumbnails = worker._resolved_outputs(job, None)
+  journal = worker._publish_journal_path(metadata)
+  real_unlink_verified_identity = worker_module._unlink_verified_identity
+
+  def unlink_and_simulate_cifs_metadata_refresh(path: Path, identity: object, *, description: str) -> None:
+    real_unlink_verified_identity(path, identity, description=description)
+    if description == "publish transaction marker stage":
+      journal_stat = journal.stat()
+      os.utime(
+        journal,
+        ns=(journal_stat.st_atime_ns, journal_stat.st_mtime_ns + 1_000_000_000),
+      )
+
+  with patch.object(
+    worker_module,
+    "_unlink_verified_identity",
+    side_effect=unlink_and_simulate_cifs_metadata_refresh,
+  ):
+    result = run_fake_successful_encode(worker, job, source, output_probe)
+
+  assert result["status"] == "complete"
+  assert not journal.exists()
   assert source_path.is_file()
 
 

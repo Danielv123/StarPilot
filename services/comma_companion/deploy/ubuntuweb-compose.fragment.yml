@@ -101,6 +101,7 @@ services:
       COMPANION_MEDIA_TIMEOUT_SECONDS: "21600"
       COMPANION_TRANSCODE_CRF: "38"
       COMPANION_TRANSCODE_PRESET: "10"
+      COMPANION_RETAIN_RAW_VIDEO: "false"
       COMMA_DYNAMICS_MODEL: /app/artifacts/dynamics/neural_lateral_plant.pt
       COMMA_DYNAMICS_TORCH_THREADS: "1"
       OMP_NUM_THREADS: "1"
@@ -129,3 +130,45 @@ services:
         max-size: 10m
         max-file: "5"
 
+  comma-companion-pruner:
+    image: ghcr.io/danielv123/starpilot-comma-companion@sha256:IMAGE_DIGEST
+    container_name: comma-companion-pruner
+    restart: unless-stopped
+    command:
+      - pruner
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 1m
+    pids_limit: 32
+    cpus: "0.25"
+    mem_limit: 256m
+    mem_reservation: 64m
+    memswap_limit: 256m
+    network_mode: none
+    depends_on:
+      comma-companion:
+        condition: service_healthy
+    environment:
+      COMPANION_DATABASE_PATH: /var/lib/comma-companion/database/companion.sqlite3
+      COMPANION_ARCHIVE_ROOT: /archive/comma-companion
+      COMPANION_ARCHIVE_SENTINEL: /archive/comma-companion/.comma-companion-archive
+      COMPANION_SESSION_DIR: /var/lib/comma-companion/database/pruner-runtime
+      COMPANION_JOB_LEASE_SECONDS: "120"
+      COMPANION_JOB_POLL_SECONDS: "1"
+      COMPANION_RETAIN_RAW_VIDEO: "false"
+      TMPDIR: /tmp
+    volumes:
+      - ./comma-companion/state/database:/var/lib/comma-companion/database
+      - /mnt/media/frog/comma-companion:/archive/comma-companion:ro
+      - /mnt/media/frog/comma-companion/objects/sha256:/archive/comma-companion/objects/sha256
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777,uid=1000,gid=1000
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

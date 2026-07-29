@@ -21,6 +21,7 @@ test = [
 comma-companion-api = "comma_companion.app:run"
 comma-companion-hash-password = "comma_companion.app:hash_password_cli"
 comma-companion-worker = "comma_companion.worker:main"
+comma-companion-pruner = "comma_companion.pruner:main"
 
 [build-system]
 requires = ["hatchling"]

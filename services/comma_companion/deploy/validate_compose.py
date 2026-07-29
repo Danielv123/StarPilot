@@ -35,6 +35,12 @@ WORKER_MOUNTS = {
   DATABASE_TARGET,
   "/archive/comma-companion",
 } | OUTPUT_TARGETS
+PRUNER_OBJECT_TARGET = f"{ARCHIVE_TARGET}/objects/sha256"
+PRUNER_MOUNTS = {
+  DATABASE_TARGET,
+  ARCHIVE_TARGET,
+  PRUNER_OBJECT_TARGET,
+}
 SECRET_TARGET = "/run/companion-secrets"
 WORKER_ENVIRONMENT = {
   "COMMA_DYNAMICS_MODEL",
@@ -52,7 +58,18 @@ WORKER_ENVIRONMENT = {
   "COMPANION_SESSION_DIR",
   "COMPANION_TRANSCODE_CRF",
   "COMPANION_TRANSCODE_PRESET",
+  "COMPANION_RETAIN_RAW_VIDEO",
   "OMP_NUM_THREADS",
+  "TMPDIR",
+}
+PRUNER_ENVIRONMENT = {
+  "COMPANION_ARCHIVE_ROOT",
+  "COMPANION_ARCHIVE_SENTINEL",
+  "COMPANION_DATABASE_PATH",
+  "COMPANION_JOB_LEASE_SECONDS",
+  "COMPANION_JOB_POLL_SECONDS",
+  "COMPANION_RETAIN_RAW_VIDEO",
+  "COMPANION_SESSION_DIR",
   "TMPDIR",
 }
 
@@ -268,15 +285,17 @@ def main() -> int:
 
   config = rendered_compose()
   services = config.get("services", {})
-  if set(services) != {"companion", "worker"}:
-    fail("expected exactly companion and worker services")
+  if set(services) != {"companion", "worker", "pruner"}:
+    fail("expected exactly companion, worker, and pruner services")
   api = services["companion"]
   worker = services["worker"]
+  pruner = services["pruner"]
 
   validate_hardening("companion", api)
   validate_hardening("worker", worker)
-  if api.get("image") != worker.get("image"):
-    fail("API and worker must use the same image reference")
+  validate_hardening("pruner", pruner)
+  if len({api.get("image"), worker.get("image"), pruner.get("image")}) != 1:
+    fail("API, worker, and pruner must use the same image reference")
   build = api.get("build", {})
   build_args = build.get("args", {})
   revision = build_args.get("STARPILOT_COMMIT", "")
@@ -298,18 +317,30 @@ def main() -> int:
       and re.search(r"@sha256:[0-9a-f]{64}$", image_reference) is None
     ):
         fail("release image must use its source-bundle tag, immutable local image ID, or registry digest")
-  if api.get("command") != ["api"] or worker.get("command") != ["worker"]:
-    fail("API and worker entrypoint modes are not explicit")
+  if (
+    api.get("command") != ["api"]
+    or worker.get("command") != ["worker"]
+    or pruner.get("command") != ["pruner"]
+  ):
+    fail("API, worker, and pruner entrypoint modes are not explicit")
 
   api_targets = mount_targets(api)
   worker_targets = mount_targets(worker)
+  pruner_targets = mount_targets(pruner)
   if api_targets != API_MOUNTS:
     fail("API mount set must be database, sessions, archive, and secrets")
   if worker_targets != WORKER_MOUNTS:
     fail("worker mount set must be database, read-only archive, and output subpaths")
+  if pruner_targets != PRUNER_MOUNTS:
+    fail("pruner mount set must be database, read-only archive, and raw object store")
   api_mounts = mounts_by_target(api)
   worker_mounts = mounts_by_target(worker)
-  for name, mounts in (("companion", api_mounts), ("worker", worker_mounts)):
+  pruner_mounts = mounts_by_target(pruner)
+  for name, mounts in (
+    ("companion", api_mounts),
+    ("worker", worker_mounts),
+    ("pruner", pruner_mounts),
+  ):
     for target, mount in mounts.items():
       if mount.get("type") != "bind":
         fail(f"{name} {target} must be an explicit bind mount")
@@ -323,6 +354,10 @@ def main() -> int:
     worker_mounts[DATABASE_TARGET].get("source"),
     "worker database source",
   )
+  pruner_database_source = canonical_host_path(
+    pruner_mounts[DATABASE_TARGET].get("source"),
+    "pruner database source",
+  )
   api_session_source = canonical_host_path(
     api_mounts[SESSION_TARGET].get("source"),
     "API session source",
@@ -335,14 +370,18 @@ def main() -> int:
     worker_mounts[ARCHIVE_TARGET].get("source"),
     "worker archive source",
   )
+  pruner_archive_source = canonical_host_path(
+    pruner_mounts[ARCHIVE_TARGET].get("source"),
+    "pruner archive source",
+  )
   secret_source = canonical_host_path(
     api_mounts[SECRET_TARGET].get("source"),
     "API secret source",
   )
-  if api_database_source != worker_database_source:
-    fail("API and worker must share only the database directory")
-  if api_archive_source != worker_archive_source:
-    fail("API and worker archive views must use the same source")
+  if len({api_database_source, worker_database_source, pruner_database_source}) != 1:
+    fail("API, worker, and pruner must share the database directory")
+  if len({api_archive_source, worker_archive_source, pruner_archive_source}) != 1:
+    fail("API, worker, and pruner archive views must use the same source")
   state_root = api_database_source.parent
   if api_database_source != state_root / "database":
     fail("database source must be the database child of the local state root")
@@ -398,10 +437,22 @@ def main() -> int:
     fail("secret source must not contain or equal the source checkout")
   if worker_mounts[ARCHIVE_TARGET].get("read_only") is not True:
     fail("worker archive parent must be read-only")
+  if pruner_mounts[ARCHIVE_TARGET].get("read_only") is not True:
+    fail("pruner archive parent must be read-only")
   if api_mounts[ARCHIVE_TARGET].get("read_only") is True:
     fail("API archive mount must be writable for resumable uploads")
   if worker_mounts[DATABASE_TARGET].get("read_only") is True:
     fail("worker database mount must be writable for the durable queue")
+  if pruner_mounts[DATABASE_TARGET].get("read_only") is True:
+    fail("pruner database mount must be writable for the durable queue")
+  if pruner_mounts[PRUNER_OBJECT_TARGET].get("read_only") is True:
+    fail("pruner raw object mount must be writable")
+  pruner_object_source = canonical_host_path(
+    pruner_mounts[PRUNER_OBJECT_TARGET].get("source"),
+    "pruner raw object source",
+  )
+  if pruner_object_source != api_archive_source / "objects" / "sha256":
+    fail("pruner writable source must be exactly the raw object store")
   for target in OUTPUT_TARGETS:
     name = PurePosixPath(target).name
     mount = worker_mounts[target]
@@ -437,16 +488,37 @@ def main() -> int:
       "worker environment is missing required variables: "
       + ", ".join(sorted(missing_environment)),
     )
+  pruner_environment = pruner.get("environment", {})
+  unexpected_pruner_environment = set(pruner_environment) - PRUNER_ENVIRONMENT
+  if unexpected_pruner_environment:
+    fail(
+      "pruner environment contains unreviewed variables: "
+      + ", ".join(sorted(unexpected_pruner_environment)),
+    )
+  missing_pruner_environment = PRUNER_ENVIRONMENT - set(pruner_environment)
+  if missing_pruner_environment:
+    fail(
+      "pruner environment is missing required variables: "
+      + ", ".join(sorted(missing_pruner_environment)),
+    )
   if api.get("environment", {}).get("COMPANION_SESSION_DIR") != SESSION_TARGET:
     fail("API session directory must use its isolated session mount")
   if not PurePosixPath(worker_environment["COMPANION_SESSION_DIR"]).is_relative_to(
     PurePosixPath(DATABASE_TARGET),
   ):
     fail("worker lock/runtime directory must stay under the database mount")
+  if not PurePosixPath(pruner_environment["COMPANION_SESSION_DIR"]).is_relative_to(
+    PurePosixPath(DATABASE_TARGET),
+  ):
+    fail("pruner lock/runtime directory must stay under the database mount")
   if worker.get("network_mode") != "none" or worker.get("networks"):
     fail("worker must use network_mode none and no Docker networks")
+  if pruner.get("network_mode") != "none" or pruner.get("networks"):
+    fail("pruner must use network_mode none and no Docker networks")
   if worker.get("ports") or worker.get("expose"):
     fail("worker must not publish or expose ports")
+  if pruner.get("ports") or pruner.get("expose"):
+    fail("pruner must not publish or expose ports")
   if set(api.get("networks", {})) != {"webserver-proxy"}:
     fail("only API may join the Nginx Proxy Manager network")
 
@@ -467,6 +539,9 @@ def main() -> int:
   dependency = worker.get("depends_on", {}).get("companion", {})
   if dependency.get("condition") != "service_healthy":
     fail("worker must start after the API has initialized shared storage")
+  pruner_dependency = pruner.get("depends_on", {}).get("companion", {})
+  if pruner_dependency.get("condition") != "service_healthy":
+    fail("pruner must start after the API has initialized shared storage")
 
   api_environment = api.get("environment", {})
   importer_clients = exact_ip_setting(
@@ -641,7 +716,10 @@ def main() -> int:
     if image_config.get("User") != "65532:65532":
       fail("release image must default to UID/GID 65532")
 
-  message = "compose validation passed: quotas, model, isolated API, and secretless worker"
+  message = (
+    "compose validation passed: quotas, model, isolated API, "
+    "secretless worker, and narrow raw-video pruner"
+  )
   if release_mode:
     message += " (release mode)"
   if image_mode:

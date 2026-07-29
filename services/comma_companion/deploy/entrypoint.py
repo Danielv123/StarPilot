@@ -108,6 +108,16 @@ def validate_runtime(*, role: str) -> None:
         f"worker archive {relative}",
         archive_root / relative,
       )
+  elif role == "pruner":
+    for relative in (Path("."), Path("objects"), Path("uploads"), Path("derived")):
+      verify_read_only_directory(
+        f"pruner archive {relative}",
+        archive_root / relative,
+      )
+    verify_writable_directory(
+      "pruner raw object store",
+      archive_root / "objects" / "sha256",
+    )
   else:
     fail(f"unsupported runtime role: {role}")
 
@@ -140,6 +150,10 @@ def main() -> int:
     reject_worker_secrets()
     validate_runtime(role="worker")
     os.execvp("comma-companion-worker", ["comma-companion-worker"])
+  if arguments == ["pruner"]:
+    reject_worker_secrets()
+    validate_runtime(role="pruner")
+    os.execvp("comma-companion-pruner", ["comma-companion-pruner"])
   os.execvp(arguments[0], arguments)
 
 

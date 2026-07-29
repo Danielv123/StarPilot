@@ -609,20 +609,24 @@ def _drive_metadata(
   artifact_rows = database.query_all(
     f"""
     SELECT
-      drive_id, id, kind, camera, status, codec, width, height, fps,
-      mime_type, source_artifact_id, object_sha256, size, created_at
+      artifacts.drive_id, artifacts.id, kind, camera, status, codec, width, height, fps,
+      mime_type, source_artifact_id, object_sha256, artifacts.size,
+      artifacts.created_at,
+      objects.storage_state
     FROM artifacts
-    WHERE drive_id IN ({placeholders})
-    ORDER BY created_at, id
+    JOIN objects ON objects.sha256 = artifacts.object_sha256
+    WHERE artifacts.drive_id IN ({placeholders})
+    ORDER BY artifacts.created_at, artifacts.id
     """,
     drive_ids,
   )
   for row in artifact_rows:
     item = metadata[row["drive_id"]]
     size = int(row["size"])
-    item["all_objects"][row["object_sha256"]] = size
-    object_group = item["derived_objects"] if row["source_artifact_id"] is not None else item["raw_objects"]
-    object_group[row["object_sha256"]] = size
+    if row["storage_state"] == "present":
+      item["all_objects"][row["object_sha256"]] = size
+      object_group = item["derived_objects"] if row["source_artifact_id"] is not None else item["raw_objects"]
+      object_group[row["object_sha256"]] = size
 
     is_source_video = row["source_artifact_id"] is None and row["kind"] in CATALOG_VIDEO_TYPES
     is_ready_video = row["kind"] == "derived_video" and row["status"] == "ready" and isinstance(row["codec"], str) and row["codec"].lower() == "av1"
@@ -1142,27 +1146,33 @@ def _dashboard(request: Request) -> dict[str, Any]:
       (
         SELECT COALESCE(SUM(stored.size), 0)
         FROM (
-          SELECT object_sha256, MAX(size) AS size
+          SELECT artifacts.object_sha256, MAX(artifacts.size) AS size
           FROM artifacts
+          JOIN objects ON objects.sha256 = artifacts.object_sha256
           WHERE source_artifact_id IS NULL
-          GROUP BY object_sha256
+            AND objects.storage_state = 'present'
+          GROUP BY artifacts.object_sha256
         ) AS stored
       ) AS raw_bytes,
       (
         SELECT COALESCE(SUM(stored.size), 0)
         FROM (
-          SELECT object_sha256, MAX(size) AS size
+          SELECT artifacts.object_sha256, MAX(artifacts.size) AS size
           FROM artifacts
+          JOIN objects ON objects.sha256 = artifacts.object_sha256
           WHERE source_artifact_id IS NOT NULL
-          GROUP BY object_sha256
+            AND objects.storage_state = 'present'
+          GROUP BY artifacts.object_sha256
         ) AS stored
       ) AS derived_bytes,
       (
         SELECT COALESCE(SUM(stored.size), 0)
         FROM (
-          SELECT object_sha256, MAX(size) AS size
+          SELECT artifacts.object_sha256, MAX(artifacts.size) AS size
           FROM artifacts
-          GROUP BY object_sha256
+          JOIN objects ON objects.sha256 = artifacts.object_sha256
+          WHERE objects.storage_state = 'present'
+          GROUP BY artifacts.object_sha256
         ) AS stored
       ) AS cataloged_bytes
     """,
@@ -1253,7 +1263,8 @@ def _settings_view(request: Request) -> dict[str, Any]:
   stored = {row["key"]: json.loads(row["value_json"]) for row in rows}
   return {
     "archive_path": str(request.app.state.settings.archive_root),
-    "raw_retention_enabled": True,
+    "raw_log_retention_enabled": True,
+    "raw_video_retention_enabled": request.app.state.settings.retain_raw_video,
     "transcode_codec": "av1",
     "transcode_crf": stored.get(
       "transcode_crf",
@@ -1283,7 +1294,8 @@ def update_settings(
   current = _settings_view(request)
   immutable = {
     "archive_path",
-    "raw_retention_enabled",
+    "raw_log_retention_enabled",
+    "raw_video_retention_enabled",
     "transcode_codec",
     "worker_concurrency",
     "metered_uploads_allowed",

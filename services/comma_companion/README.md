@@ -56,11 +56,12 @@ Compose bind mounts use `create_host_path: false`, and startup requires an
 archive sentinel, so a missing SMB mount cannot silently redirect a large
 upload to the VM's root disk.
 
-Both containers run as UID/GID `65532`, have read-only root filesystems, no
+All three containers run as UID/GID `65532`, have read-only root filesystems, no
 Linux capabilities, no-new-privileges, bounded tmpfs/process limits, and no
 additional swap allowance. The API is limited to 768 MiB RAM and one CPU; the
-worker is limited to 2304 MiB RAM and two CPUs. The combined 3-GiB ceiling
-leaves roughly 1 GiB on a 4-GB webserver for the OS and reverse proxy. Tini
+worker is limited to 2304 MiB RAM and two CPUs, and the pruner to 256 MiB and
+one-quarter CPU. The combined 3.25-GiB ceiling leaves roughly 768 MiB on a
+4-GB webserver for the OS and reverse proxy. Tini
 forwards signals independently, so an FFmpeg or dynamics-worker failure cannot
 take down the API.
 
@@ -77,6 +78,15 @@ after hash verification; no hardlink or writable symlink can alias a raw
 object. FFmpeg receives raw inputs through the read-only view. The worker's one
 nonblocking lock under its database runtime directory rejects a second durable
 worker.
+
+Original camera video retention is handled by a separate `pruner` container.
+It has no network, receives no credentials, and mounts the archive read-only
+except for the exact `objects/sha256` subtree. With the default
+`COMPANION_RETAIN_RAW_VIDEO=false`, a source HEVC/TS object is removed only
+after every reference to that object has a cataloged, ready AV1 derivative.
+The catalog transition is crash-recoverable and audited. Rlogs, qlogs, and
+other non-video source artifacts are never eligible for pruning. Set the
+variable to `true` to keep original camera video as well.
 
 The native FFmpeg, capnp, and PyTorch parsers still run as children of the
 worker UID and can write the shared queue database and the three output
@@ -514,7 +524,7 @@ public reverse proxy cannot use the importer credential, even if the bearer
 token is otherwise correct. Uvicorn must trust only the exact proxy address,
 and NPM must replace client-supplied forwarding headers as described above.
 
-After NPM and both containers are healthy, prove both sides of this boundary
+After NPM and all three containers are healthy, prove both sides of this boundary
 before transferring the importer credential:
 
 ```sh
@@ -595,7 +605,7 @@ backup and therefore is insufficient by itself.
 
 Restore into new staging paths first; do not overwrite the only current copy.
 
-1. Stop both containers and snapshot/copy the current state for rollback.
+1. Stop all three containers and snapshot/copy the current state for rollback.
 2. Load the saved image (or pull the recorded registry digest), then restore
    the matching `.env`.
 3. Restore the matching SMB snapshot and local-state backup.

@@ -664,3 +664,47 @@ def test_v8_uploads_gain_nullable_agent_file_id(
   assert legacy["file_id"] is None
   assert index is not None
   assert "WHERE file_id IS NOT NULL" in index["sql"]
+
+
+def test_v9_objects_gain_video_prune_state(
+  tmp_path: Path,
+) -> None:
+  path = tmp_path / "companion.sqlite3"
+  connection = sqlite3.connect(path)
+  connection.executescript(
+    """
+    CREATE TABLE schema_meta(version INTEGER NOT NULL);
+    INSERT INTO schema_meta(version) VALUES (9);
+    CREATE TABLE objects (
+      sha256 TEXT PRIMARY KEY,
+      size INTEGER NOT NULL,
+      storage_path TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL
+    );
+    INSERT INTO objects(sha256, size, storage_path, created_at)
+    VALUES (
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      4,
+      'objects/sha256/aa/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      '2026-07-29T10:00:00Z'
+    );
+    """,
+  )
+  connection.close()
+
+  database = Database(path)
+  database.initialize()
+
+  with database.connection() as migrated:
+    version = migrated.execute(
+      "SELECT version FROM schema_meta",
+    ).fetchone()[0]
+    row = migrated.execute(
+      "SELECT storage_state, pruned_at FROM objects",
+    ).fetchone()
+
+  assert version == SCHEMA_VERSION
+  assert dict(row) == {
+    "storage_state": "present",
+    "pruned_at": None,
+  }

@@ -69,6 +69,7 @@ class Settings:
   media_timeout_seconds: int = 4 * 60 * 60
   transcode_crf: int = 38
   transcode_preset: int = 10
+  retain_raw_video: bool = False
 
   @classmethod
   def from_env(cls) -> Settings:
@@ -251,6 +252,7 @@ class Settings:
       )),
       transcode_crf=int(os.getenv("COMPANION_TRANSCODE_CRF", "38")),
       transcode_preset=int(os.getenv("COMPANION_TRANSCODE_PRESET", "10")),
+      retain_raw_video=_bool_env("COMPANION_RETAIN_RAW_VIDEO", False),
     )
     settings.validate()
     return settings

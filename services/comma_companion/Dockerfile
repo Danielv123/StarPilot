@@ -120,6 +120,7 @@ COPY --chmod=0555 deploy/comma-companion-rlog /usr/local/bin/comma-companion-rlo
 
 RUN ln -s /app/services/comma_companion/backend/.venv/bin/comma-companion-api /usr/local/bin/comma-companion-api \
     && ln -s /app/services/comma_companion/backend/.venv/bin/comma-companion-worker /usr/local/bin/comma-companion-worker \
+    && ln -s /app/services/comma_companion/backend/.venv/bin/comma-companion-pruner /usr/local/bin/comma-companion-pruner \
     && ln -s /app/services/comma_companion/backend/.venv/bin/comma-companion-hash-password /usr/local/bin/comma-companion-hash-password \
     && ln -s /app/services/comma_companion/media_worker/.venv/bin/comma-companion-media /usr/local/bin/comma-companion-media \
     && ln -s /app/services/comma_companion/adapters/dynamics/.venv/bin/comma-companion-dynamics /usr/local/bin/comma-companion-dynamics \

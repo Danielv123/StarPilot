@@ -27,6 +27,7 @@ from .controller_profile import (
   HISTORICAL_CONTROLLER_SOURCE_COMMIT,
   validated_controller_profile,
 )
+from .object_lock import ObjectLock
 
 
 CANONICAL_JSON_SEPARATORS = (",", ":")
@@ -62,6 +63,18 @@ PROCESS_OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
 DYNAMICS_REQUEST_LIMIT_BYTES = 8 * 1024 * 1024
 TELEMETRY_RECORD_LIMIT_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_MEDIA_SOURCE_BYTES = 64 * 1024 * 1024 * 1024
+RAW_VIDEO_KINDS = frozenset(
+  {
+    "video",
+    "fcamera",
+    "ecamera",
+    "dcamera",
+    "qcamera",
+    "road",
+    "wideRoad",
+    "driver",
+  }
+)
 MAX_TELEMETRY_ROUTE_SEGMENTS = 512
 MAX_TELEMETRY_SOURCE_BYTES_PER_SEGMENT = 64 * 1024 * 1024
 MAX_TELEMETRY_SOURCE_BYTES_PER_ROUTE = 2 * 1024 * 1024 * 1024
@@ -598,6 +611,7 @@ class IntegrationHandlers:
     simulation_timeout_seconds: int = SIMULATION_TIMEOUT_SECONDS,
     transcode_crf: int = 38,
     transcode_preset: int = 10,
+    retain_raw_video: bool = True,
     max_media_source_bytes: int = DEFAULT_MAX_MEDIA_SOURCE_BYTES,
     working_directory: Path | None = None,
   ):
@@ -641,6 +655,9 @@ class IntegrationHandlers:
       0,
       13,
     )
+    if not isinstance(retain_raw_video, bool):
+      raise ValueError("retain_raw_video must be a boolean")
+    self.retain_raw_video = retain_raw_video
     self.max_media_source_bytes = self._bounded_integer(
       max_media_source_bytes,
       "max_media_source_bytes",
@@ -773,6 +790,7 @@ class IntegrationHandlers:
         a.*,
         o.size AS object_size,
         o.storage_path AS object_storage_path,
+        o.storage_state,
         d.route_name,
         s.number AS segment_number
       FROM artifacts a
@@ -792,6 +810,12 @@ class IntegrationHandlers:
     return row
 
   def _source_object_path(self, row: sqlite3.Row) -> Path:
+    if row["storage_state"] != "present":
+      raise IntegrationError(
+        "artifact_content_pruned",
+        "The original camera object has already been pruned.",
+        details={"artifact_id": row["id"]},
+      )
     object_root = self.archive_root / "objects"
     path = self._archive_path(
       row["object_storage_path"],
@@ -897,20 +921,27 @@ class IntegrationHandlers:
         "The media artifact has no canonical relative filename.",
       )
     filename = relative_path.replace("\\", "/").rsplit("/", 1)[-1]
+    camera = IntegrationHandlers._camera(row)
     formats = {
-      ("fcamera", "fcamera.hevc"): "raw_hevc",
-      ("ecamera", "ecamera.hevc"): "raw_hevc",
-      ("dcamera", "dcamera.hevc"): "raw_hevc",
-      ("qcamera", "qcamera.hevc"): "raw_hevc",
-      ("qcamera", "qcamera.ts"): "mpegts",
+      ("fcamera", "road", "fcamera.hevc"): "raw_hevc",
+      ("ecamera", "wide", "ecamera.hevc"): "raw_hevc",
+      ("dcamera", "driver", "dcamera.hevc"): "raw_hevc",
+      ("qcamera", "qcamera", "qcamera.hevc"): "raw_hevc",
+      ("qcamera", "qcamera", "qcamera.ts"): "mpegts",
+      ("video", "road", "fcamera.hevc"): "raw_hevc",
+      ("video", "wide", "ecamera.hevc"): "raw_hevc",
+      ("video", "driver", "dcamera.hevc"): "raw_hevc",
+      ("video", "qcamera", "qcamera.hevc"): "raw_hevc",
+      ("video", "qcamera", "qcamera.ts"): "mpegts",
     }
-    input_format = formats.get((row["kind"], filename))
+    input_format = formats.get((row["kind"], camera, filename))
     if input_format is None:
       raise IntegrationError(
         "unsupported_media_source",
         "The artifact kind and canonical filename are not an approved camera input pair.",
         details={
           "kind": row["kind"],
+          "camera": camera,
           "filename": filename,
         },
       )
@@ -1194,6 +1225,11 @@ class IntegrationHandlers:
       validated,
     )
     media_sync = self._attempt_media_sync(context, derived_id)
+    if self.retain_raw_video:
+      raw_source = {"status": "retained", "reason": "deployment_policy"}
+    else:
+      self._schedule_raw_video_prune(artifact_id)
+      raw_source = {"status": "prune_queued"}
     _context_progress(context, 1.0)
     return {
       "status": "ready",
@@ -1230,9 +1266,228 @@ class IntegrationHandlers:
         )
       ],
       "media_sync": media_sync,
+      "raw_source": raw_source,
       "worker_status": worker_result["status"],
       "worker": worker_result,
     }
+
+  def _schedule_raw_video_prune(self, artifact_id: str) -> None:
+    now = _now_text()
+    with self.database.transaction(immediate=True) as connection:
+      connection.execute(
+        """
+        INSERT OR IGNORE INTO jobs(
+          id, type, state, payload_json, dedupe_key, available_at,
+          created_at, updated_at
+        ) VALUES (?, 'prune_raw_video', 'queued', ?, ?, ?, ?, ?)
+        """,
+        (
+          uuid4().hex,
+          canonical_json({"artifact_id": artifact_id}),
+          f"artifact:{artifact_id}",
+          now,
+          now,
+          now,
+        ),
+      )
+
+  def _raw_video_prune_candidate(
+    self,
+    connection: sqlite3.Connection,
+    object_sha256: str,
+  ) -> tuple[sqlite3.Row, list[sqlite3.Row]] | None:
+    object_row = connection.execute(
+      """
+      SELECT sha256, size, storage_path, storage_state, pruned_at
+      FROM objects
+      WHERE sha256 = ?
+      """,
+      (object_sha256,),
+    ).fetchone()
+    if object_row is None:
+      return None
+    references = connection.execute(
+      """
+      SELECT id, kind, camera, source_artifact_id, storage_path
+      FROM artifacts
+      WHERE object_sha256 = ?
+      ORDER BY id
+      """,
+      (object_sha256,),
+    ).fetchall()
+    if not references:
+      return None
+    for reference in references:
+      if (
+        reference["source_artifact_id"] is not None
+        or reference["kind"] not in RAW_VIDEO_KINDS
+      ):
+        return None
+      derivative = connection.execute(
+        """
+        SELECT derived.id
+        FROM artifacts derived
+        JOIN objects derived_object
+          ON derived_object.sha256 = derived.object_sha256
+        WHERE derived.source_artifact_id = ?
+          AND derived.kind = 'derived_video'
+          AND derived.status = 'ready'
+          AND LOWER(derived.codec) = 'av1'
+          AND derived_object.storage_state = 'present'
+        LIMIT 1
+        """,
+        (reference["id"],),
+      ).fetchone()
+      if derivative is None:
+        return None
+    return object_row, references
+
+  def _prune_raw_video_object(self, artifact_id: str) -> dict[str, Any]:
+    if self.retain_raw_video:
+      return {"status": "retained", "reason": "deployment_policy"}
+    source = self.database.query_one(
+      """
+      SELECT id, object_sha256
+      FROM artifacts
+      WHERE id = ? AND source_artifact_id IS NULL
+      """,
+      (artifact_id,),
+    )
+    if source is None:
+      return {"status": "retained", "reason": "not_source_artifact"}
+    lock_root = Path(self.database.path).parent / "object-locks"
+    with ObjectLock(lock_root, source["object_sha256"]):
+      return self._prune_raw_video_object_locked(artifact_id)
+
+  def _prune_raw_video_object_locked(
+    self,
+    artifact_id: str,
+  ) -> dict[str, Any]:
+    with self.database.transaction(immediate=True) as connection:
+      source = connection.execute(
+        """
+        SELECT id, object_sha256
+        FROM artifacts
+        WHERE id = ? AND source_artifact_id IS NULL
+        """,
+        (artifact_id,),
+      ).fetchone()
+      if source is None:
+        return {"status": "retained", "reason": "not_source_artifact"}
+      candidate = self._raw_video_prune_candidate(
+        connection,
+        source["object_sha256"],
+      )
+      if candidate is None:
+        return {"status": "retained", "reason": "shared_or_unverified"}
+      object_row, references = candidate
+      if object_row["storage_state"] == "pruned":
+        return {
+          "status": "pruned",
+          "sha256": object_row["sha256"],
+          "size_bytes": object_row["size"],
+          "already_pruned": True,
+        }
+      connection.execute(
+        """
+        UPDATE objects
+        SET storage_state = 'prune_pending', pruned_at = NULL
+        WHERE sha256 = ? AND storage_state != 'pruned'
+        """,
+        (object_row["sha256"],),
+      )
+
+    path = self._archive_path(
+      object_row["storage_path"],
+      required_root=self.archive_root / "objects" / "sha256",
+      must_exist=False,
+    )
+    already_missing = not path.exists()
+    try:
+      path.unlink(missing_ok=True)
+    except OSError as exc:
+      self.database.execute(
+        """
+        UPDATE objects
+        SET storage_state = 'present'
+        WHERE sha256 = ? AND storage_state = 'prune_pending'
+        """,
+        (object_row["sha256"],),
+      )
+      raise IntegrationError(
+        "raw_video_prune_failed",
+        "The verified source video could not be removed from object storage.",
+        details={"sha256": object_row["sha256"]},
+        retryable=True,
+      ) from exc
+
+    pruned_at = _now_text()
+    with self.database.transaction(immediate=True) as connection:
+      connection.execute(
+        """
+        UPDATE objects
+        SET storage_state = 'pruned', pruned_at = ?
+        WHERE sha256 = ? AND storage_state = 'prune_pending'
+        """,
+        (pruned_at, object_row["sha256"]),
+      )
+      connection.executemany(
+        """
+        UPDATE artifacts
+        SET status = 'raw_video_pruned'
+        WHERE id = ? AND source_artifact_id IS NULL
+        """,
+        [(reference["id"],) for reference in references],
+      )
+      connection.execute(
+        """
+        INSERT INTO audit_events(
+          actor_type, actor_id, action, resource_type, resource_id,
+          details_json, created_at
+        ) VALUES ('worker', NULL, 'raw_video.pruned', 'object', ?, ?, ?)
+        """,
+        (
+          object_row["sha256"],
+          canonical_json(
+            {
+              "artifact_ids": [reference["id"] for reference in references],
+              "size_bytes": object_row["size"],
+              "already_missing": already_missing,
+            }
+          ),
+          pruned_at,
+        ),
+      )
+    return {
+      "status": "pruned",
+      "sha256": object_row["sha256"],
+      "size_bytes": object_row["size"],
+      "already_missing": already_missing,
+    }
+
+  def prune_raw_video(
+    self,
+    context: JobContext,
+    payload: dict[str, Any],
+  ) -> dict[str, Any]:
+    artifact_id = self._required_payload_string(payload, "artifact_id")
+    result = self._prune_raw_video_object(artifact_id)
+    _context_progress(context, 1.0)
+    return result
+
+  def recover_pending_raw_video_prunes(self) -> list[dict[str, Any]]:
+    rows = self.database.query_all(
+      """
+      SELECT MIN(a.id) AS id
+      FROM objects o
+      JOIN artifacts a ON a.object_sha256 = o.sha256
+      WHERE o.storage_state = 'prune_pending'
+        AND a.source_artifact_id IS NULL
+      GROUP BY o.sha256
+      ORDER BY o.sha256
+      """,
+    )
+    return [self._prune_raw_video_object(row["id"]) for row in rows]
 
   @staticmethod
   def _strict_ndjson(value: str, description: str) -> list[dict[str, Any]]:

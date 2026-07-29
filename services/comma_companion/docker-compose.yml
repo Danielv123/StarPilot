@@ -156,6 +156,7 @@ services:
       COMPANION_MAX_ARTIFACT_BYTES: ${COMPANION_MAX_ARTIFACT_BYTES:-68719476736}
       COMPANION_TRANSCODE_CRF: ${COMPANION_TRANSCODE_CRF:-38}
       COMPANION_TRANSCODE_PRESET: ${COMPANION_TRANSCODE_PRESET:-10}
+      COMPANION_RETAIN_RAW_VIDEO: ${COMPANION_RETAIN_RAW_VIDEO:-false}
       COMMA_DYNAMICS_MODEL: ${COMMA_DYNAMICS_MODEL_IMAGE_PATH:-/app/artifacts/dynamics/neural_lateral_plant.pt}
       COMMA_DYNAMICS_TORCH_THREADS: ${COMMA_DYNAMICS_TORCH_THREADS:-1}
       OMP_NUM_THREADS: "1"
@@ -198,6 +199,47 @@ services:
       timeout: 20s
       retries: 3
       start_period: 60s
+
+  pruner:
+    <<: *container-hardening
+    container_name: comma-companion-pruner
+    image: ${COMMA_COMPANION_IMAGE:-comma-companion:local}
+    command:
+      - pruner
+    depends_on:
+      companion:
+        condition: service_healthy
+    network_mode: none
+    pids_limit: 32
+    cpus: "0.25"
+    mem_limit: 256m
+    mem_reservation: 64m
+    memswap_limit: 256m
+    environment:
+      <<: *storage-environment
+      COMPANION_SESSION_DIR: /var/lib/comma-companion/database/pruner-runtime
+      COMPANION_JOB_LEASE_SECONDS: ${COMPANION_JOB_LEASE_SECONDS:-120}
+      COMPANION_JOB_POLL_SECONDS: ${COMPANION_JOB_POLL_SECONDS:-1}
+      COMPANION_RETAIN_RAW_VIDEO: ${COMPANION_RETAIN_RAW_VIDEO:-false}
+    volumes:
+      - type: bind
+        source: ${COMPANION_STATE_PATH:-/var/lib/comma-companion}/database
+        target: /var/lib/comma-companion/database
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMPANION_ARCHIVE_PATH:-/archive/comma-companion}
+        target: /archive/comma-companion
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMPANION_ARCHIVE_PATH:-/archive/comma-companion}/objects/sha256
+        target: /archive/comma-companion/objects/sha256
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777,uid=65532,gid=65532
 
 networks:
   webserver-proxy:

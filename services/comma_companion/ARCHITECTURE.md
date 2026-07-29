@@ -148,7 +148,10 @@ then caps the first AV1 attempt to a `4/5` total-rate budget after reserving
 overhead. It fully validates and decodes the result. A result that is not both
 strictly lower average bitrate and smaller in bytes is discarded and retried
 once with a `3/5` budget. If that attempt also misses, no derived artifact is
-published and the immutable raw input remains retained. The worker records the
+published and the raw input remains retained. After successful catalog
+publication, the backend may prune only source camera objects when
+`COMPANION_RETAIN_RAW_VIDEO=false`; rlogs, qlogs, and other artifacts remain
+immutable. The worker records the
 integer-duration and rational-rate proof in result metadata, and the backend
 revalidates it before cataloging.
 

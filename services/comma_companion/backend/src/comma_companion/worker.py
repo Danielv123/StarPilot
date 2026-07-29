@@ -146,6 +146,7 @@ def main() -> None:
     max_media_source_bytes=settings.max_artifact_bytes,
     transcode_crf=settings.transcode_crf,
     transcode_preset=settings.transcode_preset,
+    retain_raw_video=settings.retain_raw_video,
   )
   lock_path = settings.session_dir / "worker.lock"
   try:

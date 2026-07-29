@@ -1143,6 +1143,173 @@ def test_verify_artifact_hashes_cataloged_object(
     )
 
 
+def test_agent_video_kind_and_canonical_camera_pair_is_approved(
+  database: Database,
+  archive_root: Path,
+) -> None:
+  _seed_artifact(
+    database,
+    archive_root,
+    artifact_id="agent-road-video",
+    kind="video",
+    relative_path=f"realdata/{ROUTE_NAME}--0/fcamera.hevc",
+    camera="road",
+    content=b"raw-hevc",
+  )
+  handlers = IntegrationHandlers(database, archive_root)
+
+  assert handlers._media_input_format(
+    handlers._artifact("agent-road-video"),
+  ) == "raw_hevc"
+
+
+def test_verified_av1_prunes_only_raw_video(
+  database: Database,
+  archive_root: Path,
+) -> None:
+  source_digest, source_storage_path = _seed_artifact(
+    database,
+    archive_root,
+    artifact_id="agent-road-video",
+    kind="video",
+    relative_path=f"realdata/{ROUTE_NAME}--0/fcamera.hevc",
+    camera="road",
+    content=b"raw-hevc-video",
+  )
+  log_digest, log_storage_path = _seed_artifact(
+    database,
+    archive_root,
+    artifact_id="route-rlog",
+    kind="rlog",
+    relative_path=f"realdata/{ROUTE_NAME}--0/rlog.zst",
+    camera=None,
+    content=b"immutable-rlog",
+  )
+  derived_content = b"smaller-av1"
+  derived_digest = hashlib.sha256(derived_content).hexdigest()
+  derived_storage_path = "derived/device/route/0/road/video.webm"
+  derived_path = archive_root / derived_storage_path
+  derived_path.parent.mkdir(parents=True, exist_ok=True)
+  derived_path.write_bytes(derived_content)
+  database.execute(
+    """
+    INSERT INTO objects(sha256, size, storage_path, created_at)
+    VALUES (?, ?, ?, ?)
+    """,
+    (derived_digest, len(derived_content), derived_storage_path, NOW),
+  )
+  source = database.query_one(
+    "SELECT device_id, drive_id, segment_id FROM artifacts WHERE id = ?",
+    ("agent-road-video",),
+  )
+  assert source is not None
+  database.execute(
+    """
+    INSERT INTO artifacts(
+      id, device_id, drive_id, segment_id, object_sha256,
+      kind, camera, relative_path, storage_path, size,
+      mime_type, codec, status, source_artifact_id, created_at
+    ) VALUES (
+      'agent-road-video-av1', ?, ?, ?, ?,
+      'derived_video', 'road', ?, ?, ?,
+      'video/webm', 'av1', 'ready', 'agent-road-video', ?
+    )
+    """,
+    (
+      source["device_id"],
+      source["drive_id"],
+      source["segment_id"],
+      derived_digest,
+      derived_storage_path,
+      derived_storage_path,
+      len(derived_content),
+      NOW,
+    ),
+  )
+  handlers = IntegrationHandlers(
+    database,
+    archive_root,
+    retain_raw_video=False,
+  )
+
+  result = handlers._prune_raw_video_object("agent-road-video")
+
+  assert result["status"] == "pruned"
+  assert not (archive_root / source_storage_path).exists()
+  assert (archive_root / derived_storage_path).read_bytes() == derived_content
+  assert (archive_root / log_storage_path).read_bytes() == b"immutable-rlog"
+  source_object = database.query_one(
+    "SELECT storage_state, pruned_at FROM objects WHERE sha256 = ?",
+    (source_digest,),
+  )
+  log_object = database.query_one(
+    "SELECT storage_state, pruned_at FROM objects WHERE sha256 = ?",
+    (log_digest,),
+  )
+  source_artifact = database.query_one(
+    "SELECT status FROM artifacts WHERE id = 'agent-road-video'",
+  )
+  assert source_object is not None
+  assert source_object["storage_state"] == "pruned"
+  assert source_object["pruned_at"] is not None
+  assert source_artifact is not None
+  assert source_artifact["status"] == "raw_video_pruned"
+  assert log_object is not None
+  assert log_object["storage_state"] == "present"
+  assert log_object["pruned_at"] is None
+
+
+def test_raw_video_object_shared_with_log_is_never_pruned(
+  database: Database,
+  archive_root: Path,
+) -> None:
+  source_digest, source_storage_path = _seed_artifact(
+    database,
+    archive_root,
+    artifact_id="shared-video",
+    kind="video",
+    relative_path=f"realdata/{ROUTE_NAME}--0/fcamera.hevc",
+    camera="road",
+    content=b"shared-content",
+  )
+  source = database.query_one(
+    "SELECT device_id, drive_id, segment_id, size FROM artifacts WHERE id = ?",
+    ("shared-video",),
+  )
+  assert source is not None
+  database.execute(
+    """
+    INSERT INTO artifacts(
+      id, device_id, drive_id, segment_id, object_sha256,
+      kind, relative_path, storage_path, size, status, created_at
+    ) VALUES (
+      'shared-rlog', ?, ?, ?, ?,
+      'rlog', ?, ?, ?, 'stored', ?
+    )
+    """,
+    (
+      source["device_id"],
+      source["drive_id"],
+      source["segment_id"],
+      source_digest,
+      f"realdata/{ROUTE_NAME}--0/rlog.zst",
+      source_storage_path,
+      source["size"],
+      NOW,
+    ),
+  )
+  handlers = IntegrationHandlers(
+    database,
+    archive_root,
+    retain_raw_video=False,
+  )
+
+  result = handlers._prune_raw_video_object("shared-video")
+
+  assert result == {"status": "retained", "reason": "shared_or_unverified"}
+  assert (archive_root / source_storage_path).read_bytes() == b"shared-content"
+
+
 def test_transcode_rejects_unapproved_source_before_subprocess(
   database: Database,
   archive_root: Path,

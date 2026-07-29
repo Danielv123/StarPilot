@@ -32,6 +32,7 @@ from .auth import (
 )
 from .db import isoformat, utc_now
 from .models import UploadCreate, UploadList, UploadSnapshot, UploadView
+from .object_lock import ObjectLock
 
 
 VIDEO_TYPES = {
@@ -630,6 +631,39 @@ def _catalog_artifact(
     (row["device_id"], row["relative_path"], digest),
   ).fetchone()
   if prior is not None:
+    prior_status = connection.execute(
+      "SELECT status FROM artifacts WHERE id = ?",
+      (prior["id"],),
+    ).fetchone()
+    if (
+      prior_status is not None
+      and prior_status["status"] == "raw_video_pruned"
+      and row["artifact_type"] in VIDEO_TYPES
+    ):
+      connection.execute(
+        "UPDATE artifacts SET status = 'stored' WHERE id = ?",
+        (prior["id"],),
+      )
+      connection.execute(
+        """
+        INSERT OR IGNORE INTO jobs(
+          id, type, state, payload_json, dedupe_key, available_at,
+          created_at, updated_at
+        ) VALUES (?, 'prune_raw_video', 'queued', ?, ?, ?, ?, ?)
+        """,
+        (
+          uuid4().hex,
+          json.dumps(
+            {"artifact_id": prior["id"]},
+            separators=(",", ":"),
+            sort_keys=True,
+          ),
+          f"artifact:{prior['id']}",
+          now_text,
+          now_text,
+          now_text,
+        ),
+      )
     prior_drive_id = prior["drive_id"] or drive_id
     if (
       prior_drive_id is not None
@@ -851,6 +885,122 @@ def _release_finalization_claim(
   )
 
 
+def _install_and_catalog_finalized_upload(
+  request: Request,
+  initial: sqlite3.Row,
+  part_path: Path,
+  digest: str,
+  actual_size: int,
+) -> dict[str, Any]:
+  upload_id = initial["id"]
+  database = request.app.state.database
+  settings = request.app.state.settings
+  try:
+    _, storage_path = _install_object(
+      settings.archive_root,
+      part_path,
+      digest,
+      actual_size,
+    )
+  except ApiError:
+    _release_finalization_claim(
+      request,
+      upload_id,
+      error="Finalization deferred because object installation failed",
+    )
+    raise
+  except OSError as exc:
+    _release_finalization_claim(
+      request,
+      upload_id,
+      error="Finalization deferred because archive storage was unavailable",
+    )
+    raise ApiError(
+      503,
+      "archive_storage_unavailable",
+      "Archive content could not be installed",
+      headers={"Retry-After": "60"},
+    ) from exc
+  now_text = isoformat()
+  with database.transaction(immediate=True) as connection:
+    row = connection.execute(
+      "SELECT * FROM uploads WHERE id = ?",
+      (upload_id,),
+    ).fetchone()
+    if row is None:
+      raise ApiError(404, "upload_not_found", "Upload was not found")
+    if row["status"] == "complete":
+      completed = row
+    elif row["status"] == "finalizing":
+      connection.execute(
+        """
+        INSERT INTO objects(sha256, size, storage_path, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(sha256) DO UPDATE SET
+          storage_state = 'present',
+          pruned_at = NULL
+        """,
+        (digest, actual_size, storage_path, now_text),
+      )
+      artifact_id = _catalog_artifact(
+        connection,
+        row,
+        digest=digest,
+        storage_path=storage_path,
+        now_text=now_text,
+        telemetry_debounce_seconds=(
+          request.app.state.settings.telemetry_debounce_seconds
+        ),
+      )
+      cursor = connection.execute(
+        """
+        UPDATE uploads
+        SET status = 'complete', object_sha256 = ?, artifact_id = ?,
+          completed_at = ?, updated_at = ?, error = NULL
+        WHERE id = ? AND status = 'finalizing'
+        """,
+        (digest, artifact_id, now_text, now_text, upload_id),
+      )
+      if cursor.rowcount != 1:
+        raise ApiError(
+          409,
+          "upload_state_changed",
+          "Upload state changed while finalizing",
+        )
+      audit(
+        connection,
+        actor_type="device",
+        actor_id=row["device_id"],
+        action="upload.complete",
+        resource_type="upload",
+        resource_id=upload_id,
+        details={
+          "artifact_id": artifact_id,
+          "sha256": digest,
+          "size": actual_size,
+        },
+        ip_address=request_ip(request),
+      )
+      completed = connection.execute(
+        "SELECT * FROM uploads WHERE id = ?",
+        (upload_id,),
+      ).fetchone()
+    else:
+      raise ApiError(
+        409,
+        "upload_terminal",
+        "Upload is terminal and must be redeclared",
+        details={
+          "state": row["status"],
+          "error": row["error"],
+          "retry_action": "redeclare",
+        },
+      )
+  part_path.unlink(missing_ok=True)
+  assert completed is not None
+  return _upload_view(completed)
+
+
 def _finalize_upload_locked(
   request: Request,
   upload_id: str,
@@ -989,108 +1139,15 @@ def _finalize_upload_locked(
       details={"declared": initial["declared_sha256"], "computed": digest},
     )
 
-  try:
-    _, storage_path = _install_object(
-      settings.archive_root,
+  lock_root = Path(database.path).parent / "object-locks"
+  with ObjectLock(lock_root, digest):
+    return _install_and_catalog_finalized_upload(
+      request,
+      initial,
       part_path,
       digest,
       actual_size,
     )
-  except ApiError:
-    _release_finalization_claim(
-      request,
-      upload_id,
-      error="Finalization deferred because object installation failed",
-    )
-    raise
-  except OSError as exc:
-    _release_finalization_claim(
-      request,
-      upload_id,
-      error="Finalization deferred because archive storage was unavailable",
-    )
-    raise ApiError(
-      503,
-      "archive_storage_unavailable",
-      "Archive content could not be installed",
-      headers={"Retry-After": "60"},
-    ) from exc
-  now_text = isoformat()
-  with database.transaction(immediate=True) as connection:
-    row = connection.execute(
-      "SELECT * FROM uploads WHERE id = ?",
-      (upload_id,),
-    ).fetchone()
-    if row is None:
-      raise ApiError(404, "upload_not_found", "Upload was not found")
-    if row["status"] == "complete":
-      completed = row
-    elif row["status"] == "finalizing":
-      connection.execute(
-        """
-        INSERT INTO objects(sha256, size, storage_path, created_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(sha256) DO NOTHING
-        """,
-        (digest, actual_size, storage_path, now_text),
-      )
-      artifact_id = _catalog_artifact(
-        connection,
-        row,
-        digest=digest,
-        storage_path=storage_path,
-        now_text=now_text,
-        telemetry_debounce_seconds=(
-          request.app.state.settings.telemetry_debounce_seconds
-        ),
-      )
-      cursor = connection.execute(
-        """
-        UPDATE uploads
-        SET status = 'complete', object_sha256 = ?, artifact_id = ?,
-          completed_at = ?, updated_at = ?, error = NULL
-        WHERE id = ? AND status = 'finalizing'
-        """,
-        (digest, artifact_id, now_text, now_text, upload_id),
-      )
-      if cursor.rowcount != 1:
-        raise ApiError(
-          409,
-          "upload_state_changed",
-          "Upload state changed while finalizing",
-        )
-      audit(
-        connection,
-        actor_type="device",
-        actor_id=row["device_id"],
-        action="upload.complete",
-        resource_type="upload",
-        resource_id=upload_id,
-        details={
-          "artifact_id": artifact_id,
-          "sha256": digest,
-          "size": actual_size,
-        },
-        ip_address=request_ip(request),
-      )
-      completed = connection.execute(
-        "SELECT * FROM uploads WHERE id = ?",
-        (upload_id,),
-      ).fetchone()
-    else:
-      raise ApiError(
-        409,
-        "upload_terminal",
-        "Upload is terminal and must be redeclared",
-        details={
-          "state": row["status"],
-          "error": row["error"],
-          "retry_action": "redeclare",
-        },
-      )
-  part_path.unlink(missing_ok=True)
-  assert completed is not None
-  return _upload_view(completed)
 
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])

@@ -6,7 +6,7 @@ import os
 import socket
 import tempfile
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -205,6 +205,7 @@ def claim_job(
   *,
   lease_seconds: float = 60,
   now: datetime | None = None,
+  allowed_types: Sequence[str] | None = None,
 ) -> Job | None:
   if not worker_id:
     raise ValueError("worker_id must not be empty")
@@ -212,6 +213,14 @@ def claim_job(
   claimed_at = _now(now)
   now_text = isoformat(claimed_at)
   lease_expires_at = isoformat(claimed_at + timedelta(seconds=lease_duration))
+  type_clause = ""
+  type_parameters: tuple[str, ...] = ()
+  if allowed_types is not None:
+    type_parameters = tuple(dict.fromkeys(allowed_types))
+    if not type_parameters:
+      raise ValueError("allowed_types must not be empty")
+    placeholders = ",".join("?" for _ in type_parameters)
+    type_clause = f"AND candidate_job.type IN ({placeholders})"
   with database.transaction(immediate=True) as connection:
     connection.execute(
       """
@@ -307,11 +316,12 @@ def claim_job(
       (now_text, now_text, now_text),
     )
     candidate = connection.execute(
-      """
+      f"""
       SELECT candidate_job.id
       FROM jobs candidate_job
       WHERE candidate_job.cancel_requested_at IS NULL
         AND candidate_job.attempts < candidate_job.max_attempts
+        {type_clause}
         AND (
           (
             candidate_job.state = 'queued'
@@ -357,7 +367,7 @@ def claim_job(
         candidate_job.id
       LIMIT 1
       """,
-      (now_text, now_text),
+      (*type_parameters, now_text, now_text),
     ).fetchone()
     if candidate is None:
       return None
@@ -810,6 +820,7 @@ def run_worker(
   heartbeat_interval: float | None = None,
   retry_backoff_seconds: float = 1,
   max_retry_backoff_seconds: float = 60,
+  record_liveness: bool = True,
 ) -> None:
   lease_duration = _lease_seconds(lease_seconds)
   poll_delay = _seconds(poll_interval, "poll_interval")
@@ -823,11 +834,13 @@ def run_worker(
   owner = worker_id or _worker_id()
 
   while not stop_event.is_set():
-    record_worker_heartbeat(database, owner)
+    if record_liveness:
+      record_worker_heartbeat(database, owner)
     job = claim_job(
       database,
       owner,
       lease_seconds=lease_duration,
+      allowed_types=tuple(handlers),
     )
     if job is None:
       stop_event.wait(poll_delay)

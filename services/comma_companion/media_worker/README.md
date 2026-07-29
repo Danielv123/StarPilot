@@ -72,9 +72,10 @@ atomic rename.
 - A caller-supplied telemetry time-map reference is copied into the immutable
   result metadata. The worker supplies the exact media half of the join and
   never invents a missing rlog timestamp.
-- Raw input is never deleted. `retain_raw` defaults to true and the result
-  always records `raw_retained: true`; any future retention policy belongs to a
-  separate catalog transaction after durable validation.
+- The media worker never deletes its input. `retain_raw` defaults to true and
+  the result always records `raw_retained: true`. The backend may separately
+  prune a source camera object only after the AV1 output and its supporting
+  artifacts have been verified and cataloged. Logs are never eligible.
 
 Temporary files are created beside their final targets, so `os.replace` stays
 on the destination filesystem. The worker checks available space before

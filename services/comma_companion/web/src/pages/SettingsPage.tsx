@@ -64,8 +64,12 @@ export default function SettingsPage() {
               <small>Configured by the container mount and shown read-only here.</small>
             </label>
             <label className="toggle-field">
-              <div><HardDrive /><span><strong>Retain immutable raw artifacts</strong><small>Keep source HEVC and rlogs after derivatives verify.</small></span></div>
-              <input type="checkbox" checked={draft.raw_retention_enabled} disabled />
+              <div><HardDrive /><span><strong>Retain original logs</strong><small>Keep rlogs, qlogs, and other non-video source artifacts immutable.</small></span></div>
+              <input type="checkbox" checked={draft.raw_log_retention_enabled} disabled />
+            </label>
+            <label className="toggle-field">
+              <div><HardDrive /><span><strong>Retain original camera video</strong><small>When off, source HEVC/TS is pruned only after its verified AV1 replacement is cataloged.</small></span></div>
+              <input type="checkbox" checked={draft.raw_video_retention_enabled} disabled />
             </label>
           </div>
         </Panel>
@@ -109,7 +113,7 @@ export default function SettingsPage() {
 
         <Panel kicker="Safety" title="Guardrails">
           <div className="guardrail-list">
-            <div><ShieldAlert /><span><strong>Raw deletion is not automated</strong><small>Source removal requires separate policy and durable verification gates.</small></span></div>
+            <div><ShieldAlert /><span><strong>Logs are never pruned</strong><small>Only source camera video is eligible, after a verified AV1 derivative exists for every reference.</small></span></div>
             <div><Database /><span><strong>SQLite stays local</strong><small>Mutable catalog state never runs on the SMB archive mount.</small></span></div>
             <div><Gauge /><span><strong>Bounded worker</strong><small>One AV1 task at a time prevents server contention.</small></span></div>
           </div>

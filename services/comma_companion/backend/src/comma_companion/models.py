@@ -513,7 +513,8 @@ class DashboardSnapshot(StrictModel):
 
 class CompanionSettings(StrictModel):
   archive_path: str
-  raw_retention_enabled: bool
+  raw_log_retention_enabled: Literal[True]
+  raw_video_retention_enabled: bool
   transcode_codec: Literal["av1"]
   transcode_crf: int = Field(ge=0, le=63)
   worker_concurrency: Literal[1]

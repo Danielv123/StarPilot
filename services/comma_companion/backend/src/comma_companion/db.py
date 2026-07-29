@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS objects (
   sha256 TEXT PRIMARY KEY,
   size INTEGER NOT NULL CHECK(size >= 0),
   storage_path TEXT NOT NULL UNIQUE,
+  storage_state TEXT NOT NULL DEFAULT 'present'
+    CHECK(storage_state IN ('present', 'prune_pending', 'pruned')),
+  pruned_at TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -875,6 +878,23 @@ def _migrate_v8_to_v9(connection: sqlite3.Connection) -> None:
     raise
 
 
+def _migrate_v9_to_v10(connection: sqlite3.Connection) -> None:
+  connection.execute("BEGIN IMMEDIATE")
+  try:
+    if _table_exists(connection, "objects"):
+      _ensure_column(
+        connection,
+        "objects",
+        "storage_state",
+        "TEXT NOT NULL DEFAULT 'present'",
+      )
+      _ensure_column(connection, "objects", "pruned_at", "TEXT")
+    connection.commit()
+  except BaseException:
+    connection.rollback()
+    raise
+
+
 class Database:
   def __init__(self, path: Path):
     self.path = path
@@ -929,6 +949,9 @@ class Database:
         if existing_version == 8:
           _migrate_v8_to_v9(connection)
           existing_version = 9
+        if existing_version == 9:
+          _migrate_v9_to_v10(connection)
+          existing_version = 10
         if existing_version is not None and existing_version != SCHEMA_VERSION:
           raise RuntimeError(
             f"database schema {existing_version} is not supported " + f"(expected {SCHEMA_VERSION})",

@@ -399,7 +399,8 @@ export const demoActivity: ActivityItem[] = [
 
 export const demoSettings: Settings = {
   archive_path: '/archive/comma-companion',
-  raw_retention_enabled: true,
+  raw_log_retention_enabled: true,
+  raw_video_retention_enabled: false,
   transcode_codec: 'av1',
   transcode_crf: 40,
   worker_concurrency: 1,

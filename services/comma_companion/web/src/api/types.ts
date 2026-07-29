@@ -471,7 +471,8 @@ export interface ActivityItem {
 
 export interface Settings {
   archive_path: string
-  raw_retention_enabled: boolean
+  raw_log_retention_enabled: true
+  raw_video_retention_enabled: boolean
   transcode_codec: string
   transcode_crf: number
   worker_concurrency: number

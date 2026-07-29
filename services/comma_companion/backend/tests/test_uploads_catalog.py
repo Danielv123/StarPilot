@@ -684,6 +684,65 @@ def test_resumable_upload_idempotency_finalization_and_catalog(
   assert "upload.chunk" not in actions
 
 
+def test_driver_camera_upload_catalogs_and_queues_av1_transcode(
+  admin_client: TestClient,
+) -> None:
+  data = b"driver-facing-hevc"
+  declaration = _declaration(
+    data,
+    relative_path="realdata/00000123--abcdef--0/dcamera.hevc",
+  )
+  declaration.update(
+    {
+      "artifact_type": "video",
+      "camera": "driver",
+    },
+  )
+  created = admin_client.post(
+    "/api/v1/uploads",
+    headers=device_headers(idempotency_key="driver-camera-upload"),
+    json=declaration,
+  )
+  assert created.status_code == 201, created.text
+
+  completed = admin_client.patch(
+    f"/api/v1/uploads/{created.json()['id']}",
+    headers={
+      **device_headers(),
+      "Upload-Offset": "0",
+      "Upload-Checksum": _checksum(data),
+      "Content-Type": "application/offset+octet-stream",
+    },
+    content=data,
+  )
+  assert completed.status_code == 200, completed.text
+
+  artifact = admin_client.app.state.database.query_one(
+    """
+    SELECT kind, camera, relative_path, status
+    FROM artifacts
+    WHERE id = ?
+    """,
+    (completed.json()["artifact_id"],),
+  )
+  assert dict(artifact) == {
+    "kind": "video",
+    "camera": "driver",
+    "relative_path": "realdata/00000123--abcdef--0/dcamera.hevc",
+    "status": "stored",
+  }
+  job = admin_client.app.state.database.query_one(
+    """
+    SELECT payload_json
+    FROM jobs
+    WHERE type = 'transcode_video'
+    """,
+  )
+  assert json.loads(job["payload_json"]) == {
+    "artifact_id": completed.json()["artifact_id"],
+  }
+
+
 def test_log_scheduler_fingerprints_only_latest_per_segment(
   admin_client: TestClient,
 ) -> None:

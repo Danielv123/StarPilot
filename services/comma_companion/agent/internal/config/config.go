@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	DefaultChunkSize = 16 * 1024 * 1024
+	DefaultChunkSize = 512 * 1024
 )
 
 type Duration struct {

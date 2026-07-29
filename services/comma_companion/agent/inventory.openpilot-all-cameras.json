@@ -1,0 +1,88 @@
+{
+  "expected_streams": [
+    {
+      "artifact_type": "qlog",
+      "root_name": "realdata"
+    },
+    {
+      "artifact_type": "rlog",
+      "root_name": "realdata"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "qcamera",
+      "root_name": "realdata"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "road",
+      "root_name": "realdata"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "wide",
+      "root_name": "realdata"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "driver",
+      "root_name": "realdata"
+    },
+    {
+      "artifact_type": "qlog",
+      "root_name": "realdata_HD"
+    },
+    {
+      "artifact_type": "rlog",
+      "root_name": "realdata_HD"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "qcamera",
+      "root_name": "realdata_HD"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "road",
+      "root_name": "realdata_HD"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "wide",
+      "root_name": "realdata_HD"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "driver",
+      "root_name": "realdata_HD"
+    },
+    {
+      "artifact_type": "qlog",
+      "root_name": "realdata_konik"
+    },
+    {
+      "artifact_type": "rlog",
+      "root_name": "realdata_konik"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "qcamera",
+      "root_name": "realdata_konik"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "road",
+      "root_name": "realdata_konik"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "wide",
+      "root_name": "realdata_konik"
+    },
+    {
+      "artifact_type": "video",
+      "camera": "driver",
+      "root_name": "realdata_konik"
+    }
+  ]
+}

@@ -38,6 +38,8 @@ const terminalCommandStates = new Set<CommandReceipt['state']>([
   'canceled',
 ])
 
+export const ACTIVE_UPLOAD_POLL_INTERVAL_MS = 1_000
+
 export default function UploadsPage() {
   const pageSize = 100
   const [filter, setFilter] = useState<UploadFilter>('')
@@ -73,7 +75,11 @@ export default function UploadsPage() {
     [jobOffset, debouncedSearch],
   )
   const jobCountsState = useApi(() => api.jobCounts(), [])
-  useVisibilityPolling(state.refresh, state.failureCount, 3_000)
+  useVisibilityPolling(
+    state.refresh,
+    state.failureCount,
+    ACTIVE_UPLOAD_POLL_INTERVAL_MS,
+  )
   useVisibilityPolling(snapshotState.refresh, snapshotState.failureCount, 3_000)
   useVisibilityPolling(devicesState.refresh, devicesState.failureCount, 5_000)
   useVisibilityPolling(jobsState.refresh, jobsState.failureCount, 3_000)

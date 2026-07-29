@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -463,6 +462,7 @@ func TestSuggestExpectedStreamsMatchesObservedCommaCorpus(t *testing.T) {
 			"fcamera.hevc",
 			"ecamera.hevc",
 			"qcamera.ts",
+			"dcamera.hevc",
 		)
 	}
 	cfg := testConfig(root, spool)
@@ -481,6 +481,7 @@ func TestSuggestExpectedStreamsMatchesObservedCommaCorpus(t *testing.T) {
 	expected := []string{
 		"realdata|qlog|-",
 		"realdata|rlog|-",
+		"realdata|video|driver",
 		"realdata|video|qcamera",
 		"realdata|video|road",
 		"realdata|video|wide",
@@ -489,8 +490,7 @@ func TestSuggestExpectedStreamsMatchesObservedCommaCorpus(t *testing.T) {
 		t.Fatalf("unexpected suggested profile: roles=%#v suggestion=%#v", roles, suggestion)
 	}
 	for _, coverage := range suggestion.Coverage {
-		if coverage.PresentSegments != 4 || coverage.SampledSegments != 4 ||
-			strings.Contains(coverage.Role, "driver") {
+		if coverage.PresentSegments != 4 || coverage.SampledSegments != 4 {
 			t.Fatalf("unexpected stream coverage: %#v", coverage)
 		}
 	}

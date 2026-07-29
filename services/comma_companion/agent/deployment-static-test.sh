@@ -5,6 +5,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(/usr/bin/dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 unit="$script_dir/comma-companion-agent.service"
 config="$script_dir/config.example.json"
+all_camera_inventory="$script_dir/inventory.openpilot-all-cameras.json"
 
 fail() {
   echo "deployment static test failed: $*" >&2
@@ -73,6 +74,31 @@ assert isinstance(inventory, dict), "example config lacks the inventory block"
 assert inventory.get("expected_streams") == [], (
     "example config must remain explicitly fail-closed until device discovery"
 )
+PY
+
+/usr/bin/python3 - "$all_camera_inventory" <<'PY'
+import json
+import sys
+
+inventory = json.load(open(sys.argv[1], encoding="utf-8"))
+streams = inventory.get("expected_streams")
+assert isinstance(streams, list) and streams, (
+    "all-camera inventory must define expected streams"
+)
+roles = {
+    (
+        stream.get("root_name"),
+        stream.get("artifact_type"),
+        stream.get("camera", ""),
+    )
+    for stream in streams
+}
+assert len(roles) == len(streams), "all-camera inventory contains duplicate roles"
+for root_name in ("realdata", "realdata_HD", "realdata_konik"):
+    assert (root_name, "rlog", "") in roles
+    assert (root_name, "video", "driver") in roles, (
+        f"all-camera inventory must include dcamera for {root_name}"
+    )
 PY
 
 /usr/bin/python3 - "$script_dir/update-device.sh" <<'PY'

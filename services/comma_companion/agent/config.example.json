@@ -29,7 +29,7 @@
   "final_segment_grace": "10m",
   "offroad_segment_grace": "90s",
   "non_segment_grace": "5m",
-  "chunk_size": 16777216,
+  "chunk_size": 524288,
   "max_files_per_scan": 8,
   "max_concurrent_uploads": 1,
   "user_agent": "comma-companion-agent/0.1.0",

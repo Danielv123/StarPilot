@@ -87,6 +87,13 @@ For the first install:
    Logging roots are alternatives, not simultaneous authorities. Configure
    every discovered root profile with an rlog, but only the root actually
    present for a route is applied.
+
+   When openpilot's `RecordFront` parameter is enabled, merge the checked-in
+   `inventory.openpilot-all-cameras.json` profile into `config.json` instead
+   of relying only on historical stream discovery. Discovery cannot advertise
+   `driver` until at least one closed segment already contains
+   `dcamera.hevc`; the explicit profile makes the first newly recorded driver
+   segment eligible for upload and route completeness accounting.
 4. Put the separately generated bearer token in `device-token`, with no
    trailing commentary, and run `chmod 0600 device-token`.
 5. Run the staging directory's `install-device.sh` as `comma`.
@@ -169,8 +176,8 @@ every upload chunk.
 
 This is a fail-closed route gate, not a privileged socket binding. There is a
 small race if the kernel changes its selected route after the per-chunk check
-but before or during the HTTP request. At most one configured chunk (16 MiB by
-default) can already be in flight when that happens. Enforcing
+but before or during the HTTP request. At most one configured chunk (512 KiB
+by default) can already be in flight when that happens. Enforcing
 `SO_BINDTODEVICE` would remove that race but would require granting the agent
 an additional Linux capability; the supplied service deliberately runs without
 it.
@@ -461,7 +468,9 @@ The response headers are `Upload-Offset`, `Upload-Length`, `Upload-State`,
 `Upload-Durable`, `Upload-Terminal`, `Upload-Retry-Action`, and, after
 verification, `Upload-SHA256`.
 
-Chunks are at most 16 MiB:
+The production agent uses 512-KiB chunks so active-transfer progress can
+advance at roughly one-second intervals on the expected uplink. The server
+continues to enforce a 16-MiB maximum:
 
 ```http
 PATCH /api/v1/uploads/{upload_id}
@@ -469,7 +478,7 @@ Content-Type: application/offset+octet-stream
 Upload-Offset: 0
 Upload-Length: 74973184
 Upload-Checksum: sha256 <base64 SHA-256 of this chunk>
-Content-Length: 16777216
+Content-Length: 524288
 ```
 
 An offset mismatch returns `409`; the agent reconciles through `HEAD`.

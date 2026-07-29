@@ -20,7 +20,7 @@ vi.mock('../api/client', () => ({
   demoMode: false,
 }))
 
-import UploadsPage from './UploadsPage'
+import UploadsPage, { ACTIVE_UPLOAD_POLL_INTERVAL_MS } from './UploadsPage'
 
 const uploadSnapshot = {
   active_uploads: 0,
@@ -84,6 +84,10 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+})
+
+it('refreshes active transfer progress every second', () => {
+  expect(ACTIVE_UPLOAD_POLL_INTERVAL_MS).toBe(1_000)
 })
 
 describe('device upload controls', () => {

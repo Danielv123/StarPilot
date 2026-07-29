@@ -42,7 +42,7 @@
     "offroad_state_file": "/data/params/d/IsOffroad",
     "onroad_state_file": "/data/params/d/IsOnroad",
     "offroad_stable_duration": "10s",
-    "offroad_max_age": "24h",
+    "offroad_max_age": "0s",
     "allow_metered": false,
     "true_values": [
       "1",

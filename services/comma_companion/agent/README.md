@@ -13,6 +13,10 @@ two Linux instances from writing the journal or spool concurrently.
   configured `stable_duration`. A segment also needs a newer segment or a
   final/offroad grace period. Rapid remote rescans cannot bypass the elapsed
   time gate.
+- Offroad uploads require complementary `IsOffroad` and `IsOnroad` values and
+  the configured stability window. `offroad_max_age` defaults to `0s`, which
+  disables wall-clock expiry so data accumulated through multi-day offline
+  periods is still uploaded. A positive value can opt back into an age limit.
 - The agent never reads or writes the stock `user.upload` xattr and never
   removes files from a logging root.
 - Before hashing or uploading, it creates a hardlink in the private spool.

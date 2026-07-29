@@ -138,7 +138,7 @@ func Defaults() Config {
 			OffroadStateFile:      "/data/params/d/IsOffroad",
 			OnroadStateFile:       "/data/params/d/IsOnroad",
 			OffroadStableDuration: Duration{10 * time.Second},
-			OffroadMaxAge:         Duration{24 * time.Hour},
+			OffroadMaxAge:         Duration{0},
 			MeteredStateFile:      "/data/params/d/NetworkMetered",
 			TrueValues:            []string{"1", "true", "yes", "on"},
 		},
@@ -452,8 +452,8 @@ func (c *Config) validate(requireToken bool) error {
 	if c.Policy.OffroadStableDuration.Duration <= 0 {
 		return errors.New("policy.offroad_stable_duration must be positive")
 	}
-	if c.Policy.OffroadMaxAge.Duration <= 0 {
-		return errors.New("policy.offroad_max_age must be positive")
+	if c.Policy.OffroadMaxAge.Duration < 0 {
+		return errors.New("policy.offroad_max_age must be non-negative")
 	}
 	if c.Storage.MaxRetainedBytes <= 0 {
 		return errors.New("storage.max_retained_bytes must be positive")

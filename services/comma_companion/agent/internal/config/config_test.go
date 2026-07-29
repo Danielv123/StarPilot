@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadAppliesDefaultsAndReadsTokenFile(t *testing.T) {
@@ -143,6 +144,27 @@ func TestDisruptiveCommandDefaultsAreDisabled(t *testing.T) {
 	if cfg.Commands.AllowAgentRestart || cfg.Commands.AllowStarPilotRestart ||
 		cfg.Commands.AllowPowerCommands {
 		t.Fatalf("disruptive commands defaulted on: %#v", cfg.Commands)
+	}
+}
+
+func TestOffroadStateAgeLimitDefaultsDisabledAndRejectsNegative(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Defaults()
+	cfg.ServerURL = "https://example.invalid"
+	cfg.DeviceID = "device"
+	cfg.TokenFile = filepath.Join(dir, "token")
+	cfg.Roots = []Root{{Name: "realdata", Path: filepath.Join(dir, "realdata")}}
+	cfg.SpoolDir = filepath.Join(dir, "spool")
+	if cfg.Policy.OffroadMaxAge.Duration != 0 {
+		t.Fatalf("offroad state age limit defaulted on: %s", cfg.Policy.OffroadMaxAge)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("disabled offroad state age limit was rejected: %v", err)
+	}
+	cfg.Policy.OffroadMaxAge = Duration{Duration: -time.Second}
+	if err := cfg.Validate(); err == nil ||
+		!strings.Contains(err.Error(), "non-negative") {
+		t.Fatalf("negative offroad state age limit was accepted: %v", err)
 	}
 }
 

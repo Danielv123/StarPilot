@@ -245,6 +245,9 @@ exact controller fidelity. Until then the mode is explicitly named
 - IDs are opaque.
 - Timestamps are UTC ISO 8601; drive timeline coordinates are integer
   microseconds (`t_us`).
+- Upload arrival time is not drive time. The catalog may initially use the
+  source file mtime, but telemetry extraction replaces it with the route UTC
+  time derived from validated timestamps inside rlog/qlog data when available.
 - REST is authoritative. `/api/v1/events` sends sequenced WebSocket
   invalidations and live progress.
 - Long operations return `202` plus a job resource.

@@ -2624,11 +2624,12 @@ def test_extract_telemetry_installs_and_indexes_canonical_stream(
   assert segment["start_t_us"] == 100
   assert segment["duration_us"] == 899_900
   drive = database.query_one(
-    "SELECT telemetry_ready, route_state FROM drives WHERE id = ?",
+    "SELECT telemetry_ready, route_state, started_at FROM drives WHERE id = ?",
     (DRIVE_ID,),
   )
   assert drive["telemetry_ready"] == 1
   assert drive["route_state"] == "complete"
+  assert drive["started_at"] == "2027-01-15T08:00:00Z"
 
 
 def test_extract_telemetry_cannot_publish_ahead_of_latest_inventory(

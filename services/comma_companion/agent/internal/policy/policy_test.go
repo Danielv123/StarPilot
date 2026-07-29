@@ -93,6 +93,40 @@ func TestOffroadStableWindowResetsWhenStateFileIdentityChanges(t *testing.T) {
 	}
 }
 
+func TestDisabledOffroadAgeLimitAcceptsOldComplementaryState(t *testing.T) {
+	dir := t.TempDir()
+	offroad := filepath.Join(dir, "IsOffroad")
+	onroad := filepath.Join(dir, "IsOnroad")
+	write(t, offroad, "1")
+	write(t, onroad, "0")
+	old := time.Date(2025, time.July, 2, 14, 5, 2, 0, time.UTC)
+	if err := os.Chtimes(offroad, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(onroad, old, old); err != nil {
+		t.Fatal(err)
+	}
+	reader := New(config.Policy{
+		UploadOnlyOffroad:     true,
+		OffroadStateFile:      offroad,
+		OnroadStateFile:       onroad,
+		OffroadStableDuration: config.Duration{Duration: 10 * time.Second},
+		OffroadMaxAge:         config.Duration{},
+		TrueValues:            []string{"1"},
+	})
+	now := time.Date(2026, time.July, 29, 15, 0, 0, 0, time.UTC)
+	reader.now = func() time.Time { return now }
+	first := reader.Read()
+	if !first.OffroadKnown || !first.OffroadSourceFresh || !first.UploadAllowed {
+		t.Fatalf("old complementary offroad state was rejected: %#v", first)
+	}
+	now = now.Add(11 * time.Second)
+	second := reader.Read()
+	if !second.OffroadStable || !second.UploadAllowed {
+		t.Fatalf("old offroad state did not pass the stability gate: %#v", second)
+	}
+}
+
 func TestWiFiRequiresEverySelectedDefaultRouteToUseConfiguredInterface(t *testing.T) {
 	dir := t.TempDir()
 	operstateRoot := filepath.Join(dir, "net")

@@ -1,0 +1,37 @@
+# Local configuration and credentials.
+/.env
+/.env.*
+!/.env.example
+/secrets/
+/device-token
+/device-token.*
+/device-token-*
+/.device-token*
+
+# Device-agent token staging variants are also covered by agent/.gitignore.
+/agent/device-token
+/agent/device-token.*
+/agent/device-token-*
+/agent/.device-token*
+
+# Host/runtime release artifacts. Keep these outside the source bundle.
+/deployed-compose*.yml
+/deployed-compose*.yaml
+/deployed-image*.json
+/deployment-snapshots/
+/snapshots/
+/backups/
+/image-archives/
+/runtime-manifests/
+/*.snapshot
+/*.snapshot.*
+/*.backup
+/*.backup.*
+/*.bak
+/*.tar
+/*.tar.gz
+/*.tgz
+/*.oci
+/*.manifest
+/runtime-manifest*.json
+/release-manifest*.json

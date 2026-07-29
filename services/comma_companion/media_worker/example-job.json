@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "job_id": "media_01JEXAMPLE",
+  "input": {
+    "path": "/archive/comma-companion/objects/sha256/ab/cd/example",
+    "artifact_id": "artifact_01JEXAMPLE",
+    "camera": "road",
+    "kind": "fcamera",
+    "input_format": "raw_hevc",
+    "segment_num": 0,
+    "expected_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "outputs": {
+    "video_path": "/archive/comma-companion/derived/device/route/0/road.av1.webm",
+    "metadata_path": "/archive/comma-companion/derived/device/route/0/road.av1.json",
+    "frame_index_path": "/archive/comma-companion/derived/device/route/0/road.av1.frames.json",
+    "poster_path": "/archive/comma-companion/thumbnails/device/route/0/road.poster.jpg",
+    "thumbnails_dir": "/archive/comma-companion/thumbnails/device/route/0/road"
+  },
+  "encode": {
+    "preset": 10,
+    "crf": 38,
+    "logical_processors": 2,
+    "thumbnail_count": 6,
+    "preserve_audio": true,
+    "audio_bitrate_kbps": 32
+  },
+  "limits": {
+    "timeout_seconds": 14400,
+    "minimum_free_bytes": 2147483648,
+    "working_space_multiplier": 1.25,
+    "cancel_file": "/var/lib/comma-companion/cancel/media_01JEXAMPLE"
+  },
+  "time_mapping": {
+    "artifact_id": "time_map_01JEXAMPLE",
+    "path": "/archive/comma-companion/telemetry/device/route/v1/road-time-map.json.zst",
+    "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    "version": "road-encode-idx-v1"
+  },
+  "retain_raw": true
+}

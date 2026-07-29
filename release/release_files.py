@@ -17,21 +17,30 @@ blacklist = [
   ".gitattributes",
   ".git$",
   ".gitmodules",
+
+  # server-only companion service
+  r"^services/comma_companion(?:/|$)",
 ]
 
 # gets you through the blacklist
 whitelist: list[str] = [
 ]
 
+
+def is_release_file(relative_path: str) -> bool:
+  relative_path = relative_path.replace("\\", "/")
+  blacklisted = any(re.search(pattern, relative_path) for pattern in blacklist)
+  whitelisted = any(re.search(pattern, relative_path) for pattern in whitelist)
+  return not blacklisted or whitelisted
+
+
 if __name__ == "__main__":
   for f in Path(ROOT).rglob("**/*"):
     if not (f.is_file() or f.is_symlink()):
       continue
 
-    rf = str(f.relative_to(ROOT))
-    blacklisted = any(re.search(p, rf) for p in blacklist)
-    whitelisted = any(re.search(p, rf) for p in whitelist)
-    if blacklisted and not whitelisted:
+    rf = f.relative_to(ROOT).as_posix()
+    if not is_release_file(rf):
       continue
 
     print(rf)

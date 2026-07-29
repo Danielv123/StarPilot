@@ -1,0 +1,131 @@
+# Merge these services into /home/danielv/docker/UbuntuWeb/docker-compose.yml.
+# Replace IMAGE_DIGEST with the immutable digest from the successful publish
+# workflow before starting the stack.
+services:
+  comma-companion:
+    image: ghcr.io/danielv123/starpilot-comma-companion@sha256:IMAGE_DIGEST
+    container_name: comma-companion
+    command:
+      - api
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 2m
+    pids_limit: 128
+    cpus: "1.0"
+    mem_limit: 768m
+    mem_reservation: 128m
+    memswap_limit: 768m
+    environment:
+      COMPANION_DATABASE_PATH: /var/lib/comma-companion/database/companion.sqlite3
+      COMPANION_ARCHIVE_ROOT: /archive/comma-companion
+      COMPANION_ARCHIVE_SENTINEL: /archive/comma-companion/.comma-companion-archive
+      COMPANION_SESSION_DIR: /var/lib/comma-companion/sessions
+      COMPANION_WEB_ROOT: /app/services/comma_companion/web/dist
+      PORT: "8000"
+      FORWARDED_ALLOW_IPS: 127.0.0.1
+      COMPANION_PUBLIC_ORIGIN: https://comma.danielv.no
+      COMPANION_ALLOWED_ORIGINS: https://comma.danielv.no
+      COMPANION_ADMIN_USERNAME: admin
+      COMPANION_IMPORT_ALLOWED_CLIENTS: 127.0.0.1,::1
+      COMPANION_COOKIE_NAME: __Host-comma_companion_session
+      COMPANION_COOKIE_SECURE: "true"
+      COMPANION_PASSWORD_HASH_CONCURRENCY: "2"
+      COMPANION_SESSION_SECRET_FILE: /run/companion-secrets/session-secret
+      COMPANION_ADMIN_PASSWORD_HASH_FILE: /run/companion-secrets/admin-password-hash
+      COMPANION_DEVICE_TOKENS_JSON_FILE: /run/companion-secrets/device-tokens.json
+      COMPANION_IMPORT_TOKEN_FILE: /run/companion-secrets/import-token
+    ports:
+      - "192.168.10.37:18000:8000"
+    networks:
+      - web
+      - default
+    volumes:
+      - ./comma-companion/state/database:/var/lib/comma-companion/database
+      - ./comma-companion/state/sessions:/var/lib/comma-companion/sessions
+      - /mnt/media/frog/comma-companion:/archive/comma-companion
+      - ./comma-companion/secrets:/run/companion-secrets:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777,uid=1000,gid=1000
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /usr/local/lib/comma-companion/healthcheck.py
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  comma-companion-worker:
+    image: ghcr.io/danielv123/starpilot-comma-companion@sha256:IMAGE_DIGEST
+    container_name: comma-companion-worker
+    command:
+      - worker
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 2m
+    pids_limit: 256
+    cpus: "2.0"
+    mem_limit: 2304m
+    mem_reservation: 512m
+    memswap_limit: 2304m
+    network_mode: none
+    depends_on:
+      comma-companion:
+        condition: service_healthy
+    environment:
+      COMPANION_DATABASE_PATH: /var/lib/comma-companion/database/companion.sqlite3
+      COMPANION_ARCHIVE_ROOT: /archive/comma-companion
+      COMPANION_ARCHIVE_SENTINEL: /archive/comma-companion/.comma-companion-archive
+      COMPANION_SESSION_DIR: /var/lib/comma-companion/database/worker-runtime
+      COMPANION_MEDIA_WORKER_COMMAND: comma-companion-media
+      COMPANION_RLOG_ADAPTER_COMMAND: comma-companion-rlog
+      COMPANION_DYNAMICS_ADAPTER_COMMAND: comma-companion-dynamics
+      COMPANION_JOB_LEASE_SECONDS: "120"
+      COMPANION_JOB_POLL_SECONDS: "1"
+      COMPANION_MEDIA_TIMEOUT_SECONDS: "21600"
+      COMPANION_TRANSCODE_CRF: "38"
+      COMPANION_TRANSCODE_PRESET: "10"
+      COMMA_DYNAMICS_MODEL: /app/artifacts/dynamics/neural_lateral_plant.pt
+      COMMA_DYNAMICS_TORCH_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      TMPDIR: /tmp
+    volumes:
+      - ./comma-companion/state/database:/var/lib/comma-companion/database
+      - /mnt/media/frog/comma-companion:/archive/comma-companion:ro
+      - /mnt/media/frog/comma-companion/derived:/archive/comma-companion/derived
+      - /mnt/media/frog/comma-companion/telemetry:/archive/comma-companion/telemetry
+      - /mnt/media/frog/comma-companion/thumbnails:/archive/comma-companion/thumbnails
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777,uid=1000,gid=1000
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /usr/local/lib/comma-companion/healthcheck.py
+        - worker
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+

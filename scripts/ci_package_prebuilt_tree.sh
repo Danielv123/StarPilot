@@ -44,7 +44,7 @@ find third_party/ -name "*x86*" -exec rm -rf {} +
 
 rm -f .gitignore .gitmodules .gitattributes .lfsconfig .overlay_init
 
-rm -rf .sconsign.dblite .vscode/ Jenkinsfile release/ scripts/ site_scons/ teleoprtc_repo/
+rm -rf .sconsign.dblite .vscode/ Jenkinsfile release/ scripts/ services/comma_companion/ site_scons/ teleoprtc_repo/
 
 find . -type d -empty ! -path "./.git*" -delete
 

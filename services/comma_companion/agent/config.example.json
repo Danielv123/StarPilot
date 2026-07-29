@@ -1,0 +1,67 @@
+{
+  "server_url": "https://comma.danielv.no",
+  "allow_insecure_http": false,
+  "device_id": "replace-with-dongle-id",
+  "token_file": "",
+  "roots": [
+    {
+      "name": "realdata",
+      "path": "/data/media/0/realdata"
+    },
+    {
+      "name": "realdata_HD",
+      "path": "/data/media/0/realdata_HD"
+    },
+    {
+      "name": "realdata_konik",
+      "path": "/data/media/0/realdata_konik"
+    }
+  ],
+  "spool_dir": "/data/private-pond-agent/spool",
+  "journal_path": "/data/private-pond-agent/spool/journal.json",
+  "scan_interval": "30s",
+  "upload_poll_interval": "2s",
+  "heartbeat_interval": "5s",
+  "long_poll_timeout": "25s",
+  "http_timeout": "45s",
+  "stable_observations": 2,
+  "stable_duration": "45s",
+  "final_segment_grace": "10m",
+  "offroad_segment_grace": "90s",
+  "non_segment_grace": "5m",
+  "chunk_size": 16777216,
+  "max_files_per_scan": 8,
+  "max_concurrent_uploads": 1,
+  "user_agent": "comma-companion-agent/0.1.0",
+  "policy": {
+    "upload_only_offroad": true,
+    "require_wifi": true,
+    "wifi_interface": "wlan0",
+    "network_type_file": "",
+    "metered_state_file": "/data/params/d/NetworkMetered",
+    "offroad_state_file": "/data/params/d/IsOffroad",
+    "onroad_state_file": "/data/params/d/IsOnroad",
+    "offroad_stable_duration": "10s",
+    "offroad_max_age": "24h",
+    "allow_metered": false,
+    "true_values": [
+      "1",
+      "true",
+      "yes",
+      "on"
+    ]
+  },
+  "storage": {
+    "max_retained_bytes": 12884901888,
+    "min_free_bytes": 8589934592,
+    "emergency_behavior": "pause"
+  },
+  "commands": {
+    "allow_agent_restart": false,
+    "allow_starpilot_restart": false,
+    "allow_power_commands": false
+  },
+  "inventory": {
+    "expected_streams": []
+  }
+}

@@ -1,0 +1,46 @@
+[Unit]
+Description=Comma Companion archive agent
+After=network-online.target
+Wants=network-online.target
+ConditionFileIsExecutable=/data/private-pond-agent/current/comma-companion-agent
+ConditionPathExists=/data/private-pond-agent/current/config.json
+ConditionPathExists=/data/private-pond-agent-secrets/device-token
+
+[Service]
+Type=simple
+User=comma
+Group=comma
+WorkingDirectory=/data/private-pond-agent/spool
+RuntimeDirectory=comma-companion-agent
+RuntimeDirectoryMode=0750
+LoadCredential=device-token:/data/private-pond-agent-secrets/device-token
+Environment=COMMA_COMPANION_TOKEN_FILE=%d/device-token
+Environment=COMMA_COMPANION_READY_FILE=%t/comma-companion-agent/ready
+ExecStart=/data/private-pond-agent/current/comma-companion-agent -config /data/private-pond-agent/current/config.json
+Restart=always
+RestartSec=10s
+TimeoutStopSec=15s
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+CPUWeight=10
+MemoryHigh=192M
+MemoryMax=256M
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+ReadOnlyPaths=/data/openpilot /data/continue.sh /data/params
+
+[Install]
+WantedBy=multi-user.target

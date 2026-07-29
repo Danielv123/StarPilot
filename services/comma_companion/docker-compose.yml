@@ -1,0 +1,205 @@
+name: comma-companion
+
+x-container-hardening: &container-hardening
+  restart: unless-stopped
+  user: "65532:65532"
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  stop_grace_period: 2m
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+x-storage-environment: &storage-environment
+  COMPANION_DATABASE_PATH: /var/lib/comma-companion/database/companion.sqlite3
+  COMPANION_ARCHIVE_ROOT: /archive/comma-companion
+  COMPANION_ARCHIVE_SENTINEL: /archive/comma-companion/.comma-companion-archive
+  TMPDIR: /tmp
+
+services:
+  companion:
+    <<: *container-hardening
+    container_name: comma-companion
+    image: ${COMMA_COMPANION_IMAGE:-comma-companion:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NODE_IMAGE: ${COMPANION_NODE_IMAGE:-node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3}
+        PYTHON_IMAGE: ${COMPANION_PYTHON_IMAGE:-python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b}
+        UV_IMAGE: ${COMPANION_UV_IMAGE:-ghcr.io/astral-sh/uv:0.11.2@sha256:c4f5de312ee66d46810635ffc5df34a1973ba753e7241ce3a08ef979ddd7bea5}
+        STARPILOT_COMMIT: ${STARPILOT_COMMIT:-unknown}
+        COMPANION_SOURCE_SHA256: ${COMPANION_SOURCE_SHA256:-0000000000000000000000000000000000000000000000000000000000000000}
+        COMMA_DYNAMICS_MODEL_FILENAME: ${COMMA_DYNAMICS_MODEL_FILENAME:-neural_lateral_plant.pt}
+        COMMA_DYNAMICS_MODEL_IMAGE_PATH: ${COMMA_DYNAMICS_MODEL_IMAGE_PATH:-/app/artifacts/dynamics/neural_lateral_plant.pt}
+        COMMA_DYNAMICS_MODEL_SHA256: ${COMMA_DYNAMICS_MODEL_SHA256:-fb1b8b951fdff19ff5f9349470415d003b61ee5655fff996365b429d93f6dc45}
+      additional_contexts:
+        model_context: ${COMMA_DYNAMICS_MODEL_CONTEXT:-../../artifacts/tuning/neural_lateral_plant_20260723}
+        cereal_context: ../../cereal
+        opendbc_car_context: ../../opendbc_repo/opendbc/car
+    command:
+      - api
+    pids_limit: 128
+    cpus: "1.0"
+    mem_limit: 768m
+    mem_reservation: 128m
+    memswap_limit: 768m
+    environment:
+      <<: *storage-environment
+      COMPANION_SESSION_DIR: /var/lib/comma-companion/sessions
+      PORT: "8000"
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      COMPANION_WEB_ROOT: /app/services/comma_companion/web/dist
+      COMPANION_PUBLIC_ORIGIN: ${COMPANION_PUBLIC_ORIGIN:-https://comma.danielv.no}
+      COMPANION_ALLOWED_ORIGINS: ${COMPANION_ALLOWED_ORIGINS:-https://comma.danielv.no}
+      COMPANION_ADMIN_USERNAME: ${COMPANION_ADMIN_USERNAME:-admin}
+      COMPANION_IMPORT_ALLOWED_CLIENTS: ${COMPANION_IMPORT_ALLOWED_CLIENTS:-127.0.0.1,::1}
+      COMPANION_COOKIE_NAME: ${COMPANION_COOKIE_NAME:-__Host-comma_companion_session}
+      COMPANION_COOKIE_SECURE: "true"
+      COMPANION_SESSION_TTL_SECONDS: ${COMPANION_SESSION_TTL_SECONDS:-43200}
+      COMPANION_STEP_UP_TTL_SECONDS: ${COMPANION_STEP_UP_TTL_SECONDS:-300}
+      COMPANION_PASSWORD_HASH_CONCURRENCY: ${COMPANION_PASSWORD_HASH_CONCURRENCY:-2}
+      COMPANION_MAX_CHUNK_BYTES: ${COMPANION_MAX_CHUNK_BYTES:-16777216}
+      COMPANION_MAX_ARTIFACT_BYTES: ${COMPANION_MAX_ARTIFACT_BYTES:-68719476736}
+      COMPANION_MAX_VIDEO_ARTIFACT_BYTES: ${COMPANION_MAX_VIDEO_ARTIFACT_BYTES:-1073741824}
+      COMPANION_MAX_LOG_ARTIFACT_BYTES: ${COMPANION_MAX_LOG_ARTIFACT_BYTES:-67108864}
+      COMPANION_MAX_OTHER_ARTIFACT_BYTES: ${COMPANION_MAX_OTHER_ARTIFACT_BYTES:-268435456}
+      COMPANION_MAX_JSON_BODY_BYTES: ${COMPANION_MAX_JSON_BODY_BYTES:-1048576}
+      COMPANION_MAX_ACTIVE_UPLOADS_PER_DEVICE: ${COMPANION_MAX_ACTIVE_UPLOADS_PER_DEVICE:-4}
+      COMPANION_MAX_PENDING_UPLOAD_BYTES_PER_DEVICE: ${COMPANION_MAX_PENDING_UPLOAD_BYTES_PER_DEVICE:-137438953472}
+      COMPANION_MAX_ACTIVE_UPLOADS_GLOBAL: ${COMPANION_MAX_ACTIVE_UPLOADS_GLOBAL:-32}
+      COMPANION_MAX_PENDING_UPLOAD_BYTES_GLOBAL: ${COMPANION_MAX_PENDING_UPLOAD_BYTES_GLOBAL:-549755813888}
+      COMPANION_MAX_INFLIGHT_UPLOAD_PATCHES_PER_DEVICE: ${COMPANION_MAX_INFLIGHT_UPLOAD_PATCHES_PER_DEVICE:-2}
+      COMPANION_MAX_INFLIGHT_UPLOAD_PATCHES_GLOBAL: ${COMPANION_MAX_INFLIGHT_UPLOAD_PATCHES_GLOBAL:-8}
+      COMPANION_MAX_ACTIVE_JOBS: ${COMPANION_MAX_ACTIVE_JOBS:-10000}
+      COMPANION_UPLOAD_STALE_SECONDS: ${COMPANION_UPLOAD_STALE_SECONDS:-86400}
+      COMPANION_ARCHIVE_MIN_FREE_BYTES: ${COMPANION_ARCHIVE_MIN_FREE_BYTES:-10737418240}
+      COMPANION_ARCHIVE_MIN_FREE_PERCENT: ${COMPANION_ARCHIVE_MIN_FREE_PERCENT:-5}
+      COMPANION_ONLINE_WINDOW_SECONDS: ${COMPANION_ONLINE_WINDOW_SECONDS:-90}
+      COMPANION_COMMAND_POLL_LIMIT: ${COMPANION_COMMAND_POLL_LIMIT:-20}
+      COMPANION_TELEMETRY_DEBOUNCE_SECONDS: ${COMPANION_TELEMETRY_DEBOUNCE_SECONDS:-120}
+      COMPANION_SESSION_SECRET_FILE: /run/companion-secrets/session-secret
+      COMPANION_ADMIN_PASSWORD_HASH_FILE: /run/companion-secrets/admin-password-hash
+      COMPANION_DEVICE_TOKENS_JSON_FILE: /run/companion-secrets/device-tokens.json
+      COMPANION_IMPORT_TOKEN_FILE: /run/companion-secrets/import-token
+    ports:
+      - "127.0.0.1:${COMPANION_LOOPBACK_PORT:-18000}:8000"
+    expose:
+      - "8000"
+    networks:
+      webserver-proxy:
+        aliases:
+          - comma-companion
+    volumes:
+      - type: bind
+        source: ${COMPANION_STATE_PATH:-/var/lib/comma-companion}/database
+        target: /var/lib/comma-companion/database
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMPANION_STATE_PATH:-/var/lib/comma-companion}/sessions
+        target: /var/lib/comma-companion/sessions
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMPANION_ARCHIVE_PATH:-/archive/comma-companion}
+        target: /archive/comma-companion
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMPANION_SECRETS_PATH:-./secrets}
+        target: /run/companion-secrets
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777,uid=65532,gid=65532
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /usr/local/lib/comma-companion/healthcheck.py
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+
+  worker:
+    <<: *container-hardening
+    container_name: comma-companion-worker
+    image: ${COMMA_COMPANION_IMAGE:-comma-companion:local}
+    command:
+      - worker
+    depends_on:
+      companion:
+        condition: service_healthy
+    network_mode: none
+    pids_limit: 256
+    cpus: "2.0"
+    mem_limit: 2304m
+    mem_reservation: 512m
+    memswap_limit: 2304m
+    environment:
+      <<: *storage-environment
+      COMPANION_SESSION_DIR: /var/lib/comma-companion/database/worker-runtime
+      COMPANION_MEDIA_WORKER_COMMAND: comma-companion-media
+      COMPANION_RLOG_ADAPTER_COMMAND: comma-companion-rlog
+      COMPANION_DYNAMICS_ADAPTER_COMMAND: comma-companion-dynamics
+      COMPANION_JOB_LEASE_SECONDS: ${COMPANION_JOB_LEASE_SECONDS:-120}
+      COMPANION_JOB_POLL_SECONDS: ${COMPANION_JOB_POLL_SECONDS:-1}
+      COMPANION_MEDIA_TIMEOUT_SECONDS: ${COMPANION_MEDIA_TIMEOUT_SECONDS:-21600}
+      COMPANION_MAX_ARTIFACT_BYTES: ${COMPANION_MAX_ARTIFACT_BYTES:-68719476736}
+      COMPANION_TRANSCODE_CRF: ${COMPANION_TRANSCODE_CRF:-38}
+      COMPANION_TRANSCODE_PRESET: ${COMPANION_TRANSCODE_PRESET:-10}
+      COMMA_DYNAMICS_MODEL: ${COMMA_DYNAMICS_MODEL_IMAGE_PATH:-/app/artifacts/dynamics/neural_lateral_plant.pt}
+      COMMA_DYNAMICS_TORCH_THREADS: ${COMMA_DYNAMICS_TORCH_THREADS:-1}
+      OMP_NUM_THREADS: "1"
+    volumes:
+      - type: bind
+        source: ${COMPANION_STATE_PATH:-/var/lib/comma-companion}/database
+        target: /var/lib/comma-companion/database
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMPANION_ARCHIVE_PATH:-/archive/comma-companion}
+        target: /archive/comma-companion
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMPANION_ARCHIVE_PATH:-/archive/comma-companion}/derived
+        target: /archive/comma-companion/derived
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMPANION_ARCHIVE_PATH:-/archive/comma-companion}/telemetry
+        target: /archive/comma-companion/telemetry
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMPANION_ARCHIVE_PATH:-/archive/comma-companion}/thumbnails
+        target: /archive/comma-companion/thumbnails
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777,uid=65532,gid=65532
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /usr/local/lib/comma-companion/healthcheck.py
+        - worker
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+
+networks:
+  webserver-proxy:
+    name: ${COMPANION_PROXY_NETWORK:-webserver-proxy}
+    external: true

@@ -1,0 +1,6 @@
+/dist/
+*.test
+/device-token
+/device-token.*
+/device-token-*
+/.device-token*

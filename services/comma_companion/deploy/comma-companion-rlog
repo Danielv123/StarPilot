@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+exec /app/services/comma_companion/adapters/rlog/.venv/bin/python \
+  -m services.comma_companion.adapters.rlog "$@"

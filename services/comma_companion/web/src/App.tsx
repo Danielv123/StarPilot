@@ -1,19 +1,20 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { ArchiveX, LoaderCircle } from 'lucide-react'
 import { Navigate, Route, Routes, useLocation } from 'react-router'
 import { api, ApiError, isSessionExpiryError, sessionExpiredEvent } from './api/client'
 import type { Session } from './api/types'
 import { AppShell } from './components/AppShell'
-import ActivityPage from './pages/ActivityPage'
-import DeviceDetailPage from './pages/DeviceDetailPage'
-import DevicesPage from './pages/DevicesPage'
-import DrivesPage from './pages/DrivesPage'
-import DriveStudioPage from './pages/DriveStudioPage'
-import LoginPage from './pages/LoginPage'
-import ModelsPage from './pages/ModelsPage'
-import OverviewPage from './pages/OverviewPage'
-import SettingsPage from './pages/SettingsPage'
-import UploadsPage from './pages/UploadsPage'
+
+const ActivityPage = lazy(() => import('./pages/ActivityPage'))
+const DeviceDetailPage = lazy(() => import('./pages/DeviceDetailPage'))
+const DevicesPage = lazy(() => import('./pages/DevicesPage'))
+const DrivesPage = lazy(() => import('./pages/DrivesPage'))
+const DriveStudioPage = lazy(() => import('./pages/DriveStudioPage'))
+const LoginPage = lazy(() => import('./pages/LoginPage'))
+const ModelsPage = lazy(() => import('./pages/ModelsPage'))
+const OverviewPage = lazy(() => import('./pages/OverviewPage'))
+const SettingsPage = lazy(() => import('./pages/SettingsPage'))
+const UploadsPage = lazy(() => import('./pages/UploadsPage'))
 
 function NotFoundPage() {
   return (
@@ -33,19 +34,30 @@ function AppRoutes() {
   }, [location.pathname])
 
   return (
-    <Routes>
-      <Route path="/" element={<OverviewPage />} />
-      <Route path="/devices" element={<DevicesPage />} />
-      <Route path="/devices/:deviceId" element={<DeviceDetailPage />} />
-      <Route path="/uploads" element={<UploadsPage />} />
-      <Route path="/drives" element={<DrivesPage />} />
-      <Route path="/drives/:driveId" element={<DriveStudioPage />} />
-      <Route path="/models" element={<ModelsPage />} />
-      <Route path="/activity" element={<ActivityPage />} />
-      <Route path="/settings" element={<SettingsPage />} />
-      <Route path="/login" element={<Navigate to="/" replace />} />
-      <Route path="*" element={<NotFoundPage />} />
-    </Routes>
+    <Suspense fallback={<LoadingState />}>
+      <Routes>
+        <Route path="/" element={<OverviewPage />} />
+        <Route path="/devices" element={<DevicesPage />} />
+        <Route path="/devices/:deviceId" element={<DeviceDetailPage />} />
+        <Route path="/uploads" element={<UploadsPage />} />
+        <Route path="/drives" element={<DrivesPage />} />
+        <Route path="/drives/:driveId" element={<DriveStudioPage />} />
+        <Route path="/models" element={<ModelsPage />} />
+        <Route path="/activity" element={<ActivityPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/login" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<NotFoundPage />} />
+      </Routes>
+    </Suspense>
+  )
+}
+
+function LoadingState() {
+  return (
+    <div className="state-panel">
+      <LoaderCircle className="state-icon spin" />
+      <strong>Opening archive view</strong>
+    </div>
   )
 }
 

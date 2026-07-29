@@ -10,15 +10,15 @@ import {
   CircleHelp,
   Clock3,
   FileCode2,
+  FastForward,
   Film,
   Gauge,
   LoaderCircle,
   Maximize2,
   Pause,
   Play,
+  Rewind,
   RotateCcw,
-  SkipBack,
-  SkipForward,
   SlidersHorizontal,
   Sparkles,
   TriangleAlert,
@@ -49,10 +49,11 @@ import {
 import { useApi } from '../hooks/useApi'
 import { useVisibilityPolling } from '../hooks/useVisibilityPolling'
 import {
-  adjacentFrame,
   frameAtVideoPts,
   frameNearestDriveTime,
+  mediaManifestEqual,
   mediaSyncUrlPins,
+  playbackTimeForAvailableMedia,
   sortedPlayableMedia,
   validateMediaSyncIndex,
 } from '../mediaSync'
@@ -188,7 +189,11 @@ export function DriveMedia({
   }>()
   const [syncLoading, setSyncLoading] = useState(false)
   const [syncError, setSyncError] = useState<string>()
-  const manifestState = useApi(() => api.mediaManifest(driveId, camera), [driveId, camera])
+  const manifestState = useApi(
+    () => api.mediaManifest(driveId, camera),
+    [driveId, camera],
+    mediaManifestEqual,
+  )
   const wasRefreshingManifest = useRef(refreshWhileProcessing)
   useVisibilityPolling(
     manifestState.refresh,
@@ -218,12 +223,13 @@ export function DriveMedia({
     () => sortedPlayableMedia(manifest?.items ?? []),
     [manifest],
   )
+  const mediaPlayheadUs = playbackTimeForAvailableMedia(playableItems, playheadUs)
   const activeIndex = playableItems.findIndex((item, index) => {
     const startUs = item.start_t_us as number
     const endUs = startUs + (item.duration_us as number)
-    return playheadUs >= startUs && (
-      playheadUs < endUs ||
-      (index === playableItems.length - 1 && playheadUs === endUs)
+    return mediaPlayheadUs >= startUs && (
+      mediaPlayheadUs < endUs ||
+      (index === playableItems.length - 1 && mediaPlayheadUs === endUs)
     )
   })
   const activeItem = activeIndex >= 0 ? playableItems[activeIndex] : undefined
@@ -237,6 +243,12 @@ export function DriveMedia({
     syncRecord && syncRecord.artifactId === activeItem?.artifact_id
       ? syncRecord.index
       : undefined
+
+  useEffect(() => {
+    if (mediaPlayheadUs === playheadUs) return
+    videoReportedDriveUs.current = mediaPlayheadUs
+    onPlayheadRef.current(mediaPlayheadUs, false)
+  }, [mediaPlayheadUs, playheadUs])
 
   useEffect(() => {
     let active = true
@@ -391,7 +403,7 @@ export function DriveMedia({
     if (Math.abs(video.currentTime - targetSeconds) > 0.001) {
       video.currentTime = Math.max(0, targetSeconds)
     }
-  }, [activeItem, exactSync, playheadUs])
+  }, [activeItem?.artifact_id, activeItem?.start_t_us, exactSync, playheadUs])
 
   useEffect(() => {
     setVideoError(undefined)
@@ -420,18 +432,6 @@ export function DriveMedia({
       ? frameNearestDriveTime(exactSync, bounded)
       : undefined
     onPlayheadRef.current(exactFrame?.drive_t_us ?? bounded, false)
-  }
-
-  const step = (offset: -1 | 1) => {
-    const exactFrame = exactSync ? adjacentFrame(exactSync, playheadUs, offset) : undefined
-    if (exactFrame) {
-      seek(exactFrame.drive_t_us)
-      return
-    }
-    const frameDurationUs = activeItem?.fps && activeItem.fps > 0
-      ? Math.round(1_000_000 / activeItem.fps)
-      : 50_000
-    seek(playheadUs + frameDurationUs * offset)
   }
 
   const toggle = async () => {
@@ -555,11 +555,11 @@ export function DriveMedia({
         <div className="video-timecode">{formatDurationUs(playheadUs, true)} / {formatDurationUs(durationUs)}</div>
       </div>
       <div className="player-controls">
-        <button type="button" className="player-button" aria-label="Back one frame" onClick={() => step(-1)}><SkipBack size={17} /></button>
+        <button type="button" className="player-button" aria-label="Back 10 seconds" onClick={() => seek(playheadUs - 10_000_000)}><Rewind size={17} /></button>
         <button type="button" className="player-button player-button-main" aria-label={playing ? 'Pause' : 'Play'} disabled={!mediaUrl || Boolean(videoError)} onClick={() => void toggle()}>
           {playing ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
         </button>
-        <button type="button" className="player-button" aria-label="Forward one frame" onClick={() => step(1)}><SkipForward size={17} /></button>
+        <button type="button" className="player-button" aria-label="Forward 10 seconds" onClick={() => seek(playheadUs + 10_000_000)}><FastForward size={17} /></button>
         <input
           className="video-scrubber"
           type="range"

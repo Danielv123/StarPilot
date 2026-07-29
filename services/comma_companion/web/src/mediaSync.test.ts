@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import type { MediaManifestItem, MediaSyncIndex } from './api/types'
+import type { MediaManifest, MediaManifestItem, MediaSyncIndex } from './api/types'
 import {
   adjacentFrame,
   frameAtVideoPts,
   frameNearestDriveTime,
+  mediaManifestEqual,
   mediaItemAtDriveTime,
+  playbackTimeForAvailableMedia,
   validateMediaSyncIndex,
 } from './mediaSync'
 
@@ -122,5 +124,35 @@ describe('segment selection', () => {
     expect(mediaItemAtDriveTime(items, 90_000_000)).toBeUndefined()
     expect(mediaItemAtDriveTime(items, 120_000_000)?.item.segment_number).toBe(2)
     expect(mediaItemAtDriveTime(items, 180_000_000)?.item.segment_number).toBe(2)
+  })
+
+  it('snaps route time zero to the first actual camera coverage', () => {
+    const items = [
+      manifestItem(1, 60_014_709, 60_000_000),
+      manifestItem(0, 14_709, 60_000_000),
+    ]
+    expect(playbackTimeForAvailableMedia(items, 0)).toBe(14_709)
+    expect(playbackTimeForAvailableMedia(items, 20_000)).toBe(20_000)
+  })
+})
+
+describe('manifest change detection', () => {
+  const base: MediaManifest = {
+    drive_id: 'drive-1',
+    camera: 'road',
+    synchronized: false,
+    items: [manifestItem(0, 14_709, 60_000_000)],
+  }
+
+  it('treats independently decoded manifests with identical media as unchanged', () => {
+    expect(mediaManifestEqual(base, JSON.parse(JSON.stringify(base)))).toBe(true)
+  })
+
+  it('detects newly playable media and synchronization changes', () => {
+    expect(mediaManifestEqual(base, {
+      ...base,
+      items: [...base.items, manifestItem(1, 60_014_709, 60_000_000)],
+    })).toBe(false)
+    expect(mediaManifestEqual(base, { ...base, synchronized: true })).toBe(false)
   })
 })

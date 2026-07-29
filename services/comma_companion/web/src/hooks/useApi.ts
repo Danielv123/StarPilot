@@ -8,10 +8,17 @@ export interface ApiState<T> {
   refresh: () => Promise<void>
 }
 
-export function useApi<T>(loader: () => Promise<T>, dependencies: readonly unknown[] = []): ApiState<T> {
+export function useApi<T>(
+  loader: () => Promise<T>,
+  dependencies: readonly unknown[] = [],
+  isEqual?: (current: T, next: T) => boolean,
+): ApiState<T> {
   const loaderRef = useRef(loader)
   loaderRef.current = loader
+  const isEqualRef = useRef(isEqual)
+  isEqualRef.current = isEqual
   const [data, setData] = useState<T>()
+  const dataRef = useRef<T | undefined>(undefined)
   const [error, setError] = useState<Error>()
   const [loading, setLoading] = useState(true)
   const [failureCount, setFailureCount] = useState(0)
@@ -33,8 +40,15 @@ export function useApi<T>(loader: () => Promise<T>, dependencies: readonly unkno
       try {
         const loaded = await Promise.resolve().then(() => loaderRef.current())
         if (mounted.current && generation.current === requestGeneration) {
+          const unchanged =
+            hasData.current &&
+            dataRef.current !== undefined &&
+            Boolean(isEqualRef.current?.(dataRef.current, loaded))
           hasData.current = true
-          setData(loaded)
+          if (!unchanged) {
+            dataRef.current = loaded
+            setData(loaded)
+          }
           setError(undefined)
           setFailureCount(0)
         }

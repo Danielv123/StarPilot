@@ -59,4 +59,22 @@ describe('useApi dependency generations', () => {
     expect(state.result.current.data).toBe('updated')
     expect(state.result.current.loading).toBe(false)
   })
+
+  it('preserves the current value when a background response has equal content', async () => {
+    const initial = { version: 1, items: ['ready'] }
+    const loader = vi.fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce({ version: 1, items: ['ready'] })
+    const state = renderHook(() => useApi(
+      loader,
+      [],
+      (current, next) => JSON.stringify(current) === JSON.stringify(next),
+    ))
+
+    await waitFor(() => expect(state.result.current.data).toBe(initial))
+    await act(async () => state.result.current.refresh())
+
+    expect(state.result.current.data).toBe(initial)
+    expect(loader).toHaveBeenCalledTimes(2)
+  })
 })

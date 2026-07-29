@@ -1,4 +1,9 @@
-import type { MediaManifestItem, MediaSyncIndex, MediaSyncPoint } from './api/types'
+import type {
+  MediaManifest,
+  MediaManifestItem,
+  MediaSyncIndex,
+  MediaSyncPoint,
+} from './api/types'
 
 export interface MediaSyncExpectation {
   driveId: string
@@ -228,4 +233,45 @@ export function sortedPlayableMedia(items: MediaManifestItem[]): MediaManifestIt
       const startDifference = (left.start_t_us as number) - (right.start_t_us as number)
       return startDifference || left.segment_number - right.segment_number
     })
+}
+
+export function playbackTimeForAvailableMedia(
+  items: MediaManifestItem[],
+  driveUs: number,
+): number {
+  if (driveUs !== 0) return driveUs
+  const firstStartUs = sortedPlayableMedia(items)[0]?.start_t_us
+  return firstStartUs != null && firstStartUs > 0 ? firstStartUs : driveUs
+}
+
+function mediaManifestSignature(manifest: MediaManifest): string {
+  return JSON.stringify({
+    drive_id: manifest.drive_id,
+    camera: manifest.camera,
+    synchronized: manifest.synchronized,
+    items: manifest.items.map((item) => ({
+      segment_number: item.segment_number,
+      start_t_us: item.start_t_us,
+      duration_us: item.duration_us,
+      artifact_id: item.artifact_id,
+      url: item.url,
+      mime_type: item.mime_type,
+      codec: item.codec,
+      fps: item.fps,
+      sync_mode: item.sync_mode,
+      sync_url: item.sync_url,
+      frame_index_artifact_id: item.frame_index_artifact_id,
+      frame_index_url: item.frame_index_url,
+      sync_reason: item.sync_reason,
+      video_sha256: item.video_sha256,
+      timeline_origin: item.timeline_origin,
+    })),
+  })
+}
+
+export function mediaManifestEqual(
+  current: MediaManifest,
+  next: MediaManifest,
+): boolean {
+  return mediaManifestSignature(current) === mediaManifestSignature(next)
 }

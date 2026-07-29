@@ -101,10 +101,9 @@ describe('DriveMedia synchronization state', () => {
     })
   })
 
-  it('loads a pinned exact timeline and frame-steps using adjacent mappings', async () => {
+  it('loads a pinned exact timeline', async () => {
     apiMocks.mediaManifest.mockResolvedValueOnce(manifest('exact'))
     apiMocks.mediaSync.mockResolvedValueOnce(syncIndex())
-    const onPlayhead = vi.fn()
 
     render(
       <DriveMedia
@@ -112,7 +111,7 @@ describe('DriveMedia synchronization state', () => {
         camera="road"
         durationUs={2_000_000}
         playheadUs={1_000_000}
-        onPlayhead={onPlayhead}
+        onPlayhead={vi.fn()}
         telemetrySha256="t"
         timelineVersion="frame-telemetry-v1"
       />,
@@ -123,8 +122,94 @@ describe('DriveMedia synchronization state', () => {
       '/api/v1/drives/drive-1/media-sync?camera=road&segment=0&telemetry_sha256=t&frame_index_sha256=f&frame_index_artifact_id=frames-0&video_sha256=v&video_artifact_id=video-0',
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Forward one frame' }))
-    await waitFor(() => expect(onPlayhead).toHaveBeenCalledWith(1_050_000, false))
+  })
+
+  it('uses the outer controls for conventional ten-second skips', async () => {
+    const longManifest = manifest('approximate')
+    longManifest.items[0].duration_us = 30_000_000
+    apiMocks.mediaManifest.mockResolvedValueOnce(longManifest)
+    const onPlayhead = vi.fn()
+
+    render(
+      <DriveMedia
+        driveId="drive-1"
+        camera="road"
+        durationUs={40_000_000}
+        playheadUs={15_000_000}
+        onPlayhead={onPlayhead}
+      />,
+    )
+
+    expect(await screen.findByText('APPROXIMATE ALIGNMENT')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Back 10 seconds' }))
+    expect(onPlayhead).toHaveBeenCalledWith(5_000_000, false)
+    fireEvent.click(screen.getByRole('button', { name: 'Forward 10 seconds' }))
+    expect(onPlayhead).toHaveBeenCalledWith(25_000_000, false)
+  })
+
+  it('starts at the first playable camera timestamp when the route begins just before it', async () => {
+    apiMocks.mediaManifest.mockResolvedValueOnce(manifest('approximate'))
+    const onPlayhead = vi.fn()
+
+    const view = render(
+      <DriveMedia
+        driveId="drive-1"
+        camera="road"
+        durationUs={2_000_000}
+        playheadUs={0}
+        onPlayhead={onPlayhead}
+      />,
+    )
+
+    expect(await screen.findByText('APPROXIMATE ALIGNMENT')).toBeInTheDocument()
+    expect(view.container.querySelector('video')).not.toBeNull()
+    await waitFor(() => expect(onPlayhead).toHaveBeenCalledWith(1_000_000, false))
+  })
+
+  it('does not seek the active video when a one-second manifest refresh adds later media', async () => {
+    const initial = manifest('approximate')
+    initial.items[0].duration_us = 2_000_000
+    const updated: MediaManifest = {
+      ...initial,
+      items: [
+        ...initial.items,
+        {
+          ...initial.items[0],
+          segment_number: 1,
+          start_t_us: 3_000_000,
+          artifact_id: 'video-1',
+          url: '/api/v1/artifacts/video-1/media',
+        },
+      ],
+    }
+    apiMocks.mediaManifest
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValue(updated)
+
+    const view = render(
+      <DriveMedia
+        driveId="drive-1"
+        camera="road"
+        durationUs={5_000_000}
+        playheadUs={1_500_000}
+        onPlayhead={vi.fn()}
+        refreshWhileProcessing
+      />,
+    )
+
+    expect(await screen.findByText('APPROXIMATE ALIGNMENT')).toBeInTheDocument()
+    const video = view.container.querySelector('video') as HTMLVideoElement
+    Object.defineProperty(video, 'readyState', {
+      configurable: true,
+      value: HTMLMediaElement.HAVE_METADATA,
+    })
+    video.currentTime = 0.8
+
+    await waitFor(
+      () => expect(apiMocks.mediaManifest).toHaveBeenCalledTimes(2),
+      { timeout: 2_500 },
+    )
+    expect(video.currentTime).toBe(0.8)
   })
 
   it('forces a post-transition manifest read when processing becomes ready', async () => {

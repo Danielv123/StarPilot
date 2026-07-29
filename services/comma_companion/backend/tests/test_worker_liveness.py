@@ -100,6 +100,9 @@ def test_dashboard_worker_liveness_has_exact_absent_stale_online_states(
     "last_seen": None,
     "stale": False,
     "online": False,
+    "transcode_jobs_remaining": 0,
+    "transcode_seconds_per_job": None,
+    "eta_seconds": 0,
   }
 
   stale_seen = utc_now() - timedelta(
@@ -119,6 +122,9 @@ def test_dashboard_worker_liveness_has_exact_absent_stale_online_states(
     "last_seen": stale_seen_text,
     "stale": True,
     "online": False,
+    "transcode_jobs_remaining": 0,
+    "transcode_seconds_per_job": None,
+    "eta_seconds": 0,
   }
 
   fresh_seen_text = isoformat()
@@ -135,6 +141,9 @@ def test_dashboard_worker_liveness_has_exact_absent_stale_online_states(
     "last_seen": fresh_seen_text,
     "stale": False,
     "online": True,
+    "transcode_jobs_remaining": 0,
+    "transcode_seconds_per_job": None,
+    "eta_seconds": 0,
   }
 
 

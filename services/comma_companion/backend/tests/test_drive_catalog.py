@@ -177,6 +177,21 @@ def test_successful_media_retry_clears_historical_failure(
       """,
       (uuid4().hex, drive_id, segment_id, rlog_sha, now),
     )
+    connection.execute(
+      """
+      INSERT INTO uploads(
+        id, device_id, relative_path, route_name, segment_number,
+        artifact_type, camera, declared_size, offset, status,
+        part_path, object_sha256, artifact_id,
+        created_at, updated_at, completed_at
+      ) VALUES (
+        ?, 'device-one', 'route-retry/0/fcamera.hevc', 'route-retry', 0,
+        'video', 'road', 3, 3, 'complete',
+        'uploads/route-retry.part', ?, ?, ?, ?, ?
+      )
+      """,
+      (uuid4().hex, source_sha, source_id, now, now, now),
+    )
     rlog_source_fingerprint = _complete_inventory(
       connection,
       drive_id=drive_id,
@@ -226,6 +241,11 @@ def test_successful_media_retry_clears_historical_failure(
   assert failed.status_code == 200
   assert failed.json()["readiness"] == "failed"
   assert failed.json()["failed_media"] == 1
+  assert failed.json()["backup_bytes_received"] == 3
+  assert failed.json()["backup_bytes_expected"] == 3
+  assert failed.json()["expected_media"] == 1
+  assert failed.json()["ready_media"] == 0
+  assert failed.json()["pruned_media"] == 0
 
   with database.transaction(immediate=True) as connection:
     connection.execute(
@@ -262,6 +282,14 @@ def test_successful_media_retry_clears_historical_failure(
       """,
       (succeeded_job_id, payload),
     )
+    connection.execute(
+      """
+      UPDATE objects
+      SET storage_state = 'pruned', pruned_at = ?
+      WHERE sha256 = ?
+      """,
+      (now, source_sha),
+    )
 
   recovered = admin_client.get(f"/api/v1/drives/{drive_id}")
   assert recovered.status_code == 200
@@ -270,6 +298,8 @@ def test_successful_media_retry_clears_historical_failure(
   assert recovered.json()["expected_media"] == 1
   assert recovered.json()["ready_media"] == 1
   assert recovered.json()["ready_segments"] == 1
+  assert recovered.json()["pruned_media"] == 1
+  assert recovered.json()["raw_video_pruning_required"] is True
 
 
 def test_catalog_search_and_readiness_filter_precede_pagination(

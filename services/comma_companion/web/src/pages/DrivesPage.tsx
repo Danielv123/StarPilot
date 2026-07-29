@@ -17,10 +17,10 @@ import {
 import { Link } from 'react-router'
 import { api } from '../api/client'
 import type { DriveReadiness } from '../api/types'
-import { DriveRow } from '../components/RecordRows'
-import { EmptyState, ErrorState, LoadingState, PageHeader, Panel, ProgressBar, StatusBadge } from '../components/ui'
+import { DriveProgressBars, DriveRow, driveStatusLabel } from '../components/RecordRows'
+import { EmptyState, ErrorState, LoadingState, PageHeader, Panel, StatusBadge } from '../components/ui'
 import { useApi } from '../hooks/useApi'
-import { formatBytes, formatDistance, formatDurationUs, formatLocalDate, percent } from '../utils'
+import { formatBytes, formatDistance, formatDurationUs, formatLocalDate } from '../utils'
 
 export default function DrivesPage() {
   const pageSize = 50
@@ -119,7 +119,6 @@ export default function DrivesPage() {
       ) : (
         <div className="drive-grid">
           {drives.map((drive) => {
-            const completeness = percent(drive.ready_segments, drive.segment_count)
             return (
               <Link to={`/drives/${encodeURIComponent(drive.id)}`} className="drive-card" key={drive.id}>
                 <div className="drive-thumb">
@@ -132,7 +131,7 @@ export default function DrivesPage() {
                     <div><strong>{formatLocalDate(drive.started_at)}</strong><span className="mono">{drive.route_name}</span></div>
                     <StatusBadge
                       state={drive.readiness === 'ready' ? 'healthy' : drive.readiness === 'partial' ? 'warning' : 'running'}
-                      label={drive.readiness}
+                      label={driveStatusLabel(drive)}
                     />
                   </div>
                   <div className="drive-card-route">
@@ -144,10 +143,7 @@ export default function DrivesPage() {
                     <span><Camera size={14} /> {drive.cameras.filter((camera) => camera.available).length} cameras</span>
                     <span><FileCode2 size={14} /> {drive.telemetry_ready ? 'indexed' : 'pending'}</span>
                   </div>
-                  <div className="drive-backup-progress">
-                    <div><span>Backup completeness</span><strong>{Math.round(completeness)}%</strong></div>
-                    <ProgressBar value={completeness} tone={drive.readiness === 'partial' ? 'warn' : 'primary'} />
-                  </div>
+                  <DriveProgressBars drive={drive} className="drive-card-progress" />
                   <div className="drive-card-footer">
                     <span>{drive.vehicle}</span>
                     <strong>{formatBytes(drive.derived_bytes)} AV1</strong>

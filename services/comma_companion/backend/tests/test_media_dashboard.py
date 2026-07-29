@@ -181,6 +181,48 @@ def test_dashboard_health_openapi_and_extension_errors(
   assert capabilities.json()["modes"] == ["approximate_closed_loop"]
 
 
+def test_dashboard_worker_eta_uses_recent_transcode_throughput(
+  admin_client: TestClient,
+) -> None:
+  database = admin_client.app.state.database
+  with database.transaction(immediate=True) as connection:
+    for index, completed_at in enumerate(
+      (
+        "2026-07-29T10:00:00Z",
+        "2026-07-29T10:01:00Z",
+        "2026-07-29T10:02:00Z",
+        "2026-07-29T10:03:00Z",
+      )
+    ):
+      connection.execute(
+        """
+        INSERT INTO jobs(
+          id, type, state, payload_json, progress,
+          created_at, updated_at, completed_at
+        ) VALUES (?, 'transcode_video', 'succeeded', '{}', 1, ?, ?, ?)
+        """,
+        (f"completed-{index}", completed_at, completed_at, completed_at),
+      )
+    connection.execute(
+      """
+      INSERT INTO jobs(
+        id, type, state, payload_json, progress, created_at, updated_at
+      ) VALUES
+        ('running-half', 'transcode_video', 'running', '{}', 0.5,
+         '2026-07-29T10:04:00Z', '2026-07-29T10:04:00Z'),
+        ('queued-full', 'transcode_video', 'queued', '{}', 0,
+         '2026-07-29T10:04:00Z', '2026-07-29T10:04:00Z')
+      """,
+    )
+
+  response = admin_client.get("/api/v1/dashboard")
+  assert response.status_code == 200, response.text
+  worker = response.json()["worker"]
+  assert worker["transcode_jobs_remaining"] == 2
+  assert worker["transcode_seconds_per_job"] == 60.0
+  assert worker["eta_seconds"] == 90
+
+
 def test_dashboard_archive_health_matches_degraded_readiness(
   admin_client: TestClient,
 ) -> None:

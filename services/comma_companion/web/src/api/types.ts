@@ -19,6 +19,8 @@ export interface Overview {
   drives_ready: number
   drives_by_readiness: DriveReadinessCounts
   jobs_active: number
+  worker_transcode_jobs_remaining: number
+  worker_eta_seconds?: number
   storage: StorageSummary
   services: Array<{
     id: string
@@ -154,6 +156,15 @@ export interface Drive {
   readiness: DriveReadiness
   segment_count: number
   ready_segments: number
+  expected_media: number
+  ready_media: number
+  missing_media: number
+  failed_media: number
+  pruned_media: number
+  raw_video_pruning_required: boolean
+  backup_bytes_received: number
+  backup_bytes_expected: number
+  artifact_count: number
   cameras: Camera[]
   telemetry_ready: boolean
   vehicle?: string

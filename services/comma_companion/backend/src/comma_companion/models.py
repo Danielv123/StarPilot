@@ -408,6 +408,10 @@ class DriveView(StrictModel):
   ready_media: int
   missing_media: int
   failed_media: int
+  pruned_media: int
+  raw_video_pruning_required: bool
+  backup_bytes_received: int
+  backup_bytes_expected: int
   artifact_count: int
   telemetry_ready: bool
   readiness: Literal["importing", "processing", "ready", "partial", "failed"]
@@ -482,6 +486,9 @@ class WorkerLiveness(StrictModel):
   last_seen: datetime | None = None
   stale: bool
   online: bool
+  transcode_jobs_remaining: int
+  transcode_seconds_per_job: float | None = None
+  eta_seconds: int | None = None
 
 
 class ArchiveHealth(StrictModel):

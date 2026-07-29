@@ -1250,7 +1250,7 @@ svg {
   grid-template-columns: minmax(190px, 1.25fr) minmax(170px, 1fr) 95px minmax(120px, 0.7fr) 110px auto 20px;
   align-items: center;
   gap: 12px;
-  min-height: 70px;
+  min-height: 88px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
   border-radius: 4px;
@@ -1310,15 +1310,21 @@ svg {
   color: var(--faint);
 }
 
-.drive-completeness > div {
+.drive-progress-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.drive-progress-item > div {
   display: flex;
   justify-content: space-between;
-  margin-bottom: 6px;
+  gap: 8px;
+  margin-bottom: 4px;
   color: var(--muted);
   font-size: 8px;
 }
 
-.drive-completeness strong {
+.drive-progress-item strong {
   color: var(--text-2);
 }
 
@@ -1339,6 +1345,7 @@ svg {
 
 .drive-row-compact {
   grid-template-columns: minmax(180px, 1.2fr) minmax(150px, 1fr) 90px 110px auto 20px;
+  min-height: 70px;
 }
 
 .drive-row-compact .drive-completeness {
@@ -2348,20 +2355,8 @@ svg {
   gap: 5px;
 }
 
-.drive-backup-progress {
+.drive-card-progress {
   margin-top: 15px;
-}
-
-.drive-backup-progress > div {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 6px;
-  color: var(--muted);
-  font-size: 8px;
-}
-
-.drive-backup-progress strong {
-  color: var(--text-2);
 }
 
 .drive-card-footer {

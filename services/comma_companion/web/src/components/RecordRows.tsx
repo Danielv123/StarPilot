@@ -95,8 +95,97 @@ export function UploadRow({ upload, expanded = false }: { upload: Upload; expand
   )
 }
 
+export interface DriveProgressSummary {
+  backupPercent: number
+  backupDetail: string
+  processingPercent: number
+  processingDetail: string
+  processingComplete: boolean
+}
+
+export function driveProgressSummary(drive: Drive): DriveProgressSummary {
+  const backupPercent = percent(
+    drive.backup_bytes_received,
+    drive.backup_bytes_expected,
+  )
+  const expectedMedia = Math.max(0, drive.expected_media)
+  const readyMedia = Math.min(expectedMedia, Math.max(0, drive.ready_media))
+  const prunedMedia = Math.min(expectedMedia, Math.max(0, drive.pruned_media))
+  const processingSteps = expectedMedia * (
+    drive.raw_video_pruning_required ? 2 : 1
+  )
+  const completedSteps = readyMedia + (
+    drive.raw_video_pruning_required ? prunedMedia : 0
+  )
+  const processingPercent = percent(completedSteps, processingSteps)
+  const processingComplete = processingSteps > 0 && completedSteps >= processingSteps
+  return {
+    backupPercent,
+    backupDetail: drive.backup_bytes_expected > 0
+      ? `${formatBytes(drive.backup_bytes_received)} / ${formatBytes(drive.backup_bytes_expected)}`
+      : 'No upload record',
+    processingPercent,
+    processingDetail: expectedMedia > 0
+      ? drive.raw_video_pruning_required
+        ? `${readyMedia}/${expectedMedia} AV1 · ${prunedMedia}/${expectedMedia} pruned`
+        : `${readyMedia}/${expectedMedia} AV1`
+      : 'Waiting for camera files',
+    processingComplete,
+  }
+}
+
+export function driveStatusLabel(drive: Drive): string {
+  if (drive.readiness !== 'processing') return drive.readiness
+  const progress = driveProgressSummary(drive)
+  if (progress.processingComplete && !drive.telemetry_ready) {
+    return 'awaiting telemetry'
+  }
+  if (progress.processingComplete) return 'finalizing'
+  return 'processing'
+}
+
+export function DriveProgressBars({
+  drive,
+  className = '',
+}: {
+  drive: Drive
+  className?: string
+}) {
+  const progress = driveProgressSummary(drive)
+  return (
+    <div className={`drive-progress-stack ${className}`.trim()}>
+      <div className="drive-progress-item" title={progress.backupDetail}>
+        <div>
+          <span>Backup</span>
+          <strong>{Math.round(progress.backupPercent)}%</strong>
+        </div>
+        <ProgressBar
+          value={progress.backupPercent}
+          tone={drive.readiness === 'failed' ? 'error' : 'primary'}
+        />
+      </div>
+      <div className="drive-progress-item" title={progress.processingDetail}>
+        <div>
+          <span>{progress.processingComplete ? 'Processed' : 'Processing'}</span>
+          <strong>{Math.round(progress.processingPercent)}%</strong>
+        </div>
+        <ProgressBar
+          value={progress.processingPercent}
+          tone={
+            drive.failed_media > 0
+              ? 'error'
+              : progress.processingComplete
+                ? 'primary'
+                : 'warn'
+          }
+        />
+      </div>
+    </div>
+  )
+}
+
 export function DriveRow({ drive, compact = false }: { drive: Drive; compact?: boolean }) {
-  const completeness = percent(drive.ready_segments, drive.segment_count)
+  const statusLabel = driveStatusLabel(drive)
   return (
     <Link to={`/drives/${encodeURIComponent(drive.id)}`} className={`drive-row ${compact ? 'drive-row-compact' : ''}`}>
       <div className="drive-date">
@@ -119,11 +208,7 @@ export function DriveRow({ drive, compact = false }: { drive: Drive; compact?: b
       </div>
       {!compact && (
         <div className="drive-completeness">
-          <div>
-            <span>Backup</span>
-            <strong>{Math.round(completeness)}%</strong>
-          </div>
-          <ProgressBar value={completeness} tone={drive.readiness === 'partial' ? 'warn' : 'primary'} />
+          <DriveProgressBars drive={drive} />
         </div>
       )}
       <div className="drive-media">
@@ -142,7 +227,7 @@ export function DriveRow({ drive, compact = false }: { drive: Drive; compact?: b
                 ? 'warning'
                 : 'running'
         }
-        label={drive.readiness}
+        label={statusLabel}
       />
       <ArrowRight className="row-arrow" size={17} />
     </Link>

@@ -24,7 +24,7 @@ import type {
   Upload,
   UploadSnapshot,
 } from './types'
-import { getCsrfToken } from '../utils'
+import { formatEta, getCsrfToken } from '../utils'
 
 type DemoApi = typeof import('./demo')['demoApi']
 
@@ -166,6 +166,9 @@ interface RawDashboard {
     last_seen: string | null
     stale: boolean
     online: boolean
+    transcode_jobs_remaining: number
+    transcode_seconds_per_job: number | null
+    eta_seconds: number | null
   }
   archive: {
     available: boolean
@@ -222,6 +225,10 @@ interface RawDrive {
   ready_media: number
   missing_media: number
   failed_media: number
+  pruned_media: number
+  raw_video_pruning_required: boolean
+  backup_bytes_received: number
+  backup_bytes_expected: number
   artifact_count: number
   telemetry_ready: boolean
   readiness: 'importing' | 'processing' | 'ready' | 'partial' | 'failed'
@@ -563,6 +570,15 @@ function normalizeDrive(raw: RawDrive): Drive {
     readiness: raw.readiness,
     segment_count: raw.segment_count,
     ready_segments: raw.ready_segments,
+    expected_media: raw.expected_media,
+    ready_media: raw.ready_media,
+    missing_media: raw.missing_media,
+    failed_media: raw.failed_media,
+    pruned_media: raw.pruned_media,
+    raw_video_pruning_required: raw.raw_video_pruning_required,
+    backup_bytes_received: raw.backup_bytes_received,
+    backup_bytes_expected: raw.backup_bytes_expected,
+    artifact_count: raw.artifact_count,
     cameras: raw.cameras.map((camera) => ({
       id: camera.id,
       label: camera.label,
@@ -1309,6 +1325,13 @@ export const api = {
       (raw.jobs_by_state.running ?? 0) +
       (raw.jobs_by_state.leased ?? 0) +
       (raw.jobs_by_state.queued ?? 0)
+    const workerQueueDetail = raw.worker.transcode_jobs_remaining > 0
+      ? `${raw.worker.transcode_jobs_remaining} encode${raw.worker.transcode_jobs_remaining === 1 ? '' : 's'} remaining · ETA ${
+        raw.worker.eta_seconds == null ? 'calculating' : formatEta(raw.worker.eta_seconds)
+      }`
+      : workerActive
+        ? `${workerActive} non-encode job${workerActive === 1 ? '' : 's'} remaining`
+        : 'queue caught up'
     return {
       generated_at: raw.generated_at,
       devices_online: raw.devices_online,
@@ -1319,6 +1342,8 @@ export const api = {
       drives_ready: raw.drives_ready,
       drives_by_readiness: readinessCounts(raw.drives_by_readiness),
       jobs_active: workerActive,
+      worker_transcode_jobs_remaining: raw.worker.transcode_jobs_remaining,
+      worker_eta_seconds: raw.worker.eta_seconds ?? undefined,
       storage: {
         used_bytes: raw.storage_used_bytes ?? raw.storage_cataloged_bytes,
         capacity_bytes: raw.storage_capacity_bytes ?? undefined,
@@ -1347,10 +1372,10 @@ export const api = {
             ? workerActive ? 'running' : 'healthy'
             : raw.worker.stale ? 'error' : 'offline',
           detail: raw.worker.online
-            ? `${workerActive} active or queued`
+            ? workerQueueDetail
             : raw.worker.stale
-              ? `heartbeat stale · ${workerActive} active or queued`
-              : `no heartbeat · ${workerActive} active or queued`,
+              ? `heartbeat stale · ${workerQueueDetail}`
+              : `no heartbeat · ${workerQueueDetail}`,
           updated_at: raw.worker.last_seen ?? raw.generated_at,
         },
         { id: 'ingest', label: 'Ingest', state: raw.upload.failed_uploads ? 'warning' : raw.upload.active_uploads ? 'running' : 'healthy', detail: `${raw.upload.active_uploads} active`, updated_at: raw.generated_at },

@@ -261,6 +261,10 @@ describe('drive catalog normalization', () => {
       ready_media: 0,
       missing_media: 1,
       failed_media: 0,
+      pruned_media: 0,
+      raw_video_pruning_required: true,
+      backup_bytes_received: 100,
+      backup_bytes_expected: 100,
       artifact_count: 2,
       telemetry_ready: true,
       readiness: 'ready',
@@ -401,6 +405,10 @@ describe('catalog pagination and dashboard totals', () => {
     ready_media: 1,
     missing_media: 0,
     failed_media: 0,
+    pruned_media: 1,
+    raw_video_pruning_required: true,
+    backup_bytes_received: 100,
+    backup_bytes_expected: 100,
     artifact_count: 3,
     telemetry_ready: true,
     readiness: 'ready',
@@ -519,6 +527,9 @@ describe('catalog pagination and dashboard totals', () => {
             last_seen: '2026-01-01T00:01:00Z',
             stale: true,
             online: false,
+            transcode_jobs_remaining: 9,
+            transcode_seconds_per_job: 60,
+            eta_seconds: 540,
           },
           archive: {
             available: true,
@@ -556,6 +567,8 @@ describe('catalog pagination and dashboard totals', () => {
         drives_ready: 201,
         drives_by_readiness: { processing: 30, ready: 201 },
         jobs_active: 6,
+        worker_transcode_jobs_remaining: 9,
+        worker_eta_seconds: 540,
         storage: {
           used_bytes: 6_000,
           capacity_bytes: 10_000,
@@ -568,6 +581,7 @@ describe('catalog pagination and dashboard totals', () => {
       })
       expect(overview.services.find((service) => service.id === 'worker')).toMatchObject({
         state: 'error',
+        detail: 'heartbeat stale · 9 encodes remaining · ETA 9 min',
         updated_at: '2026-01-01T00:01:00Z',
       })
       expect(overview.services.find((service) => service.id === 'archive')).toMatchObject({

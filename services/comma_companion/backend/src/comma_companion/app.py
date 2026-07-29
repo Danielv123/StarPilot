@@ -11,8 +11,9 @@ import sqlite3
 import sys
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from statistics import median
 from typing import Any
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -157,6 +158,20 @@ DRIVE_SELECT = """
   SELECT
     d.id, d.device_id, d.route_name, d.started_at, d.ended_at,
     d.duration_us, d.telemetry_ready, d.route_state, d.created_at,
+    (
+      SELECT COALESCE(SUM(MIN(upload.offset, upload.declared_size)), 0)
+      FROM uploads upload
+      WHERE upload.device_id = d.device_id
+        AND upload.route_name = d.route_name
+        AND upload.status != 'canceled'
+    ) AS backup_bytes_received,
+    (
+      SELECT COALESCE(SUM(upload.declared_size), 0)
+      FROM uploads upload
+      WHERE upload.device_id = d.device_id
+        AND upload.route_name = d.route_name
+        AND upload.status != 'canceled'
+    ) AS backup_bytes_expected,
     COUNT(DISTINCT s.id) AS segment_count,
     COUNT(DISTINCT a.id) AS artifact_count,
     COUNT(DISTINCT CASE WHEN a.status = 'failed' THEN a.id END)
@@ -186,6 +201,28 @@ DRIVE_SELECT = """
         AND a.segment_id IS NOT NULL
       THEN a.segment_id || ':' || COALESCE(a.camera, a.kind)
     END) AS ready_media_pair_count,
+    (
+      SELECT COUNT(DISTINCT pruned_source.id)
+      FROM artifacts pruned_source
+      JOIN objects pruned_object
+        ON pruned_object.sha256 = pruned_source.object_sha256
+      WHERE pruned_source.drive_id = d.id
+        AND pruned_source.source_artifact_id IS NULL
+        AND pruned_source.segment_id IS NOT NULL
+        AND pruned_source.kind IN (
+          'fcamera', 'ecamera', 'dcamera', 'qcamera',
+          'road', 'wideRoad', 'driver', 'video'
+        )
+        AND pruned_object.storage_state = 'pruned'
+        AND EXISTS (
+          SELECT 1
+          FROM artifacts pruned_derived
+          WHERE pruned_derived.source_artifact_id = pruned_source.id
+            AND pruned_derived.kind = 'derived_video'
+            AND LOWER(pruned_derived.codec) = 'av1'
+            AND pruned_derived.status = 'ready'
+        )
+    ) AS pruned_media_count,
     (
       SELECT COUNT(*)
       FROM segments ready_segment
@@ -744,6 +781,8 @@ def _drive_metadata(
 def _drive_view(
   row: sqlite3.Row,
   metadata: dict[str, Any] | None = None,
+  *,
+  raw_video_pruning_required: bool = False,
 ) -> dict[str, Any]:
   catalog = metadata or {}
   inventory_present = row["inventory_id"] is not None
@@ -765,6 +804,10 @@ def _drive_view(
       expected_media - ready_media,
     ),
     "failed_media": row["failed_media_job_count"],
+    "pruned_media": row["pruned_media_count"],
+    "raw_video_pruning_required": raw_video_pruning_required,
+    "backup_bytes_received": row["backup_bytes_received"],
+    "backup_bytes_expected": row["backup_bytes_expected"],
     "artifact_count": row["artifact_count"],
     "telemetry_ready": bool(row["telemetry_ready"]),
     "readiness": _readiness(row),
@@ -1191,6 +1234,28 @@ def _dashboard(request: Request) -> dict[str, Any]:
   job_rows = database.query_all(
     "SELECT state, COUNT(*) AS count FROM jobs GROUP BY state",
   )
+  transcode_work = database.query_one(
+    """
+    SELECT
+      COUNT(*) AS jobs_remaining,
+      COALESCE(SUM(1.0 - MIN(1.0, MAX(0.0, progress))), 0.0)
+        AS work_remaining
+    FROM jobs
+    WHERE type = 'transcode_video'
+      AND state IN ('queued', 'leased', 'running')
+    """,
+  )
+  recent_transcodes = database.query_all(
+    """
+    SELECT completed_at
+    FROM jobs
+    WHERE type = 'transcode_video'
+      AND state = 'succeeded'
+      AND completed_at IS NOT NULL
+    ORDER BY completed_at DESC
+    LIMIT 21
+    """,
+  )
   worker_online_after = isoformat(
     generated_at - timedelta(seconds=WORKER_STALE_AFTER_SECONDS),
   )
@@ -1213,6 +1278,34 @@ def _dashboard(request: Request) -> dict[str, Any]:
   )
   assert counts is not None
   assert worker is not None
+  assert transcode_work is not None
+  completion_times = sorted(
+    datetime.fromisoformat(row["completed_at"])
+    for row in recent_transcodes
+  )
+  completion_gaps = [
+    (current - previous).total_seconds()
+    for previous, current in zip(
+      completion_times,
+      completion_times[1:],
+      strict=False,
+    )
+    if 1 <= (current - previous).total_seconds() <= 600
+  ]
+  seconds_per_transcode = (
+    float(median(completion_gaps))
+    if len(completion_gaps) >= 3
+    else None
+  )
+  transcode_jobs_remaining = int(transcode_work["jobs_remaining"])
+  if transcode_jobs_remaining == 0:
+    transcode_eta_seconds: int | None = 0
+  elif seconds_per_transcode is None:
+    transcode_eta_seconds = None
+  else:
+    transcode_eta_seconds = math.ceil(
+      float(transcode_work["work_remaining"]) * seconds_per_transcode,
+    )
   worker_online = bool(worker["online"])
   drives_by_readiness = dict.fromkeys(
     ("importing", "processing", "ready", "partial", "failed"),
@@ -1245,6 +1338,9 @@ def _dashboard(request: Request) -> dict[str, Any]:
       "last_seen": worker["last_seen"],
       "stale": worker["last_seen"] is not None and not worker_online,
       "online": worker_online,
+      "transcode_jobs_remaining": transcode_jobs_remaining,
+      "transcode_seconds_per_job": seconds_per_transcode,
+      "eta_seconds": transcode_eta_seconds,
     },
     "archive": _archive_health(request),
   }
@@ -1492,7 +1588,14 @@ def list_drives(
     [row["id"] for row in rows],
   )
   return {
-    "items": [_drive_view(row, metadata.get(row["id"])) for row in rows],
+    "items": [
+      _drive_view(
+        row,
+        metadata.get(row["id"]),
+        raw_video_pruning_required=not request.app.state.settings.retain_raw_video,
+      )
+      for row in rows
+    ],
     "total": summary["total"],
     "limit": limit,
     "offset": offset,
@@ -1543,7 +1646,11 @@ def _get_drive_detail(request: Request, drive_id: str) -> dict[str, Any]:
     request.app.state.database,
     [drive_id],
   )
-  detail = _drive_view(row, metadata.get(drive_id))
+  detail = _drive_view(
+    row,
+    metadata.get(drive_id),
+    raw_video_pruning_required=not request.app.state.settings.retain_raw_video,
+  )
   route_inventory = latest_inventory_view(
     request.app.state.database,
     drive_id,

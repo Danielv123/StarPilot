@@ -240,6 +240,16 @@ services:
           create_host_path: false
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777,uid=65532,gid=65532
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /usr/local/lib/comma-companion/healthcheck.py
+        - pruner
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
 
 networks:
   webserver-proxy:

@@ -45,7 +45,7 @@ def _read_only_probe(path: Path) -> tuple[bool, str | None]:
   return False, "write unexpectedly succeeded"
 
 
-def _worker_process_is_running() -> bool:
+def _child_process_is_running(command_name: bytes) -> bool:
   try:
     child_pids = Path("/proc/1/task/1/children").read_text(
       encoding="utf-8",
@@ -57,7 +57,7 @@ def _worker_process_is_running() -> bool:
       command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
     except OSError:
       continue
-    if b"comma-companion-worker" in command:
+    if command_name in command:
       return True
   return False
 
@@ -110,7 +110,7 @@ def check_worker() -> int:
     ),
   )
 
-  if not _worker_process_is_running():
+  if not _child_process_is_running(b"comma-companion-worker"):
     print("durable worker process is not running under init", file=sys.stderr)
     return 1
 
@@ -174,13 +174,103 @@ def check_worker() -> int:
   return 0
 
 
+def check_pruner() -> int:
+  database_path = Path(
+    os.environ.get(
+      "COMPANION_DATABASE_PATH",
+      "/var/lib/comma-companion/database/companion.sqlite3",
+    ),
+  )
+  session_dir = Path(
+    os.environ.get(
+      "COMPANION_SESSION_DIR",
+      "/var/lib/comma-companion/database/pruner-runtime",
+    ),
+  )
+  archive_root = Path(
+    os.environ.get(
+      "COMPANION_ARCHIVE_ROOT",
+      "/archive/comma-companion",
+    ),
+  )
+  sentinel = Path(
+    os.environ.get(
+      "COMPANION_ARCHIVE_SENTINEL",
+      str(archive_root / ".comma-companion-archive"),
+    ),
+  )
+
+  if not _child_process_is_running(b"comma-companion-pruner"):
+    print("raw-video pruner process is not running under init", file=sys.stderr)
+    return 1
+  if not sentinel.is_file():
+    print("pruner archive sentinel is missing", file=sys.stderr)
+    return 1
+  try:
+    for relative in (Path("."), Path("objects"), Path("uploads"), Path("derived")):
+      path = archive_root / relative
+      read_only, error = _read_only_probe(path) if path.is_dir() else (
+        False,
+        "directory is missing",
+      )
+      if not read_only:
+        print(f"pruner path is not read-only: {path}: {error}", file=sys.stderr)
+        return 1
+    object_store = archive_root / "objects" / "sha256"
+    writable, error = _write_probe(object_store) if object_store.is_dir() else (
+      False,
+      "directory is missing",
+    )
+    if not writable:
+      print(f"pruner object store is not writable: {object_store}: {error}", file=sys.stderr)
+      return 1
+  except OSError as error:
+    print(f"pruner archive check failed: {type(error).__name__}: {error}", file=sys.stderr)
+    return 1
+
+  lock_path = session_dir / "pruner.lock"
+  try:
+    with lock_path.open("r+", encoding="utf-8") as lock:
+      try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+      except BlockingIOError:
+        pass
+      else:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        print("raw-video pruner does not hold its singleton lock", file=sys.stderr)
+        return 1
+  except OSError as error:
+    print(f"pruner lock check failed: {type(error).__name__}: {error}", file=sys.stderr)
+    return 1
+
+  if not database_path.is_file():
+    print(f"pruner database is missing: {database_path}", file=sys.stderr)
+    return 1
+  try:
+    with sqlite3.connect(
+      f"file:{database_path.as_posix()}?mode=ro",
+      uri=True,
+      timeout=2,
+    ) as connection:
+      row = connection.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
+  except sqlite3.Error as error:
+    print(f"pruner database check failed: {type(error).__name__}: {error}", file=sys.stderr)
+    return 1
+  if row is None or not isinstance(row[0], int):
+    print("pruner database schema metadata is missing", file=sys.stderr)
+    return 1
+  return 0
+
+
 def main() -> int:
   arguments = sys.argv[1:]
   if not arguments or arguments == ["api"]:
     return check_api()
   if arguments == ["worker"]:
     return check_worker()
-  print("usage: healthcheck.py [api|worker]", file=sys.stderr)
+  if arguments == ["pruner"]:
+    return check_pruner()
+  print("usage: healthcheck.py [api|worker|pruner]", file=sys.stderr)
   return 2
 
 

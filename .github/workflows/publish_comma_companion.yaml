@@ -1,0 +1,100 @@
+name: Publish Comma Companion Image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - StarPilot
+      - Starpilot-20inch-ioniq5
+    paths:
+      - ".github/workflows/publish_comma_companion.yaml"
+      - "artifacts/tuning/neural_lateral_plant_20260723/neural_lateral_plant.pt"
+      - "cereal/__init__.py"
+      - "cereal/*.capnp"
+      - "cereal/include/**"
+      - "opendbc_repo/opendbc/car/car.capnp"
+      - "services/comma_companion/**"
+
+concurrency:
+  group: publish-comma-companion-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
+env:
+  IMAGE_NAME: ghcr.io/danielv123/starpilot-comma-companion
+  MODEL_PATH: artifacts/tuning/neural_lateral_plant_20260723/neural_lateral_plant.pt
+  MODEL_SHA256: fb1b8b951fdff19ff5f9349470415d003b61ee5655fff996365b429d93f6dc45
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Verify release inputs
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$MODEL_SHA256" "$MODEL_PATH" | sha256sum --check --strict
+          source_sha="$(python3 services/comma_companion/deploy/source_manifest.py)"
+          test "${#source_sha}" -eq 64
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and publish
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/comma_companion
+          file: services/comma_companion/Dockerfile
+          build-contexts: |
+            model_context=artifacts/tuning/neural_lateral_plant_20260723
+            cereal_context=cereal
+            opendbc_car_context=opendbc_repo/opendbc/car
+          build-args: |
+            STARPILOT_COMMIT=${{ github.sha }}
+            COMPANION_SOURCE_SHA256=${{ steps.release.outputs.source_sha }}
+            COMMA_DYNAMICS_MODEL_SHA256=${{ env.MODEL_SHA256 }}
+          platforms: linux/amd64
+          labels: ${{ steps.metadata.outputs.labels }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          cache-from: type=gha,scope=comma-companion-amd64
+          cache-to: type=gha,mode=max,scope=comma-companion-amd64
+          provenance: mode=max
+          sbom: true
+          push: true
+
+      - name: Attest the published image
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+

@@ -66,6 +66,7 @@ class Settings:
   dynamics_adapter_command: str = "comma-companion-dynamics"
   job_lease_seconds: int = 300
   job_poll_seconds: float = 1.0
+  worker_concurrency: int = 1
   media_timeout_seconds: int = 4 * 60 * 60
   transcode_crf: int = 38
   transcode_preset: int = 10
@@ -246,6 +247,10 @@ class Settings:
         "COMPANION_JOB_POLL_SECONDS",
         "1",
       )),
+      worker_concurrency=int(os.getenv(
+        "COMPANION_WORKER_CONCURRENCY",
+        "1",
+      )),
       media_timeout_seconds=int(os.getenv(
         "COMPANION_MEDIA_TIMEOUT_SECONDS",
         str(4 * 60 * 60),
@@ -384,6 +389,10 @@ class Settings:
       raise ValueError("COMPANION_JOB_LEASE_SECONDS must be positive")
     if self.job_poll_seconds <= 0:
       raise ValueError("COMPANION_JOB_POLL_SECONDS must be positive")
+    if not 1 <= self.worker_concurrency <= 8:
+      raise ValueError(
+        "COMPANION_WORKER_CONCURRENCY must be between 1 and 8",
+      )
     if self.media_timeout_seconds <= 0:
       raise ValueError("COMPANION_MEDIA_TIMEOUT_SECONDS must be positive")
     if not 0 <= self.transcode_crf <= 63:

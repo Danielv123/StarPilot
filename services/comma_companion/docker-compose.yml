@@ -140,10 +140,10 @@ services:
         condition: service_healthy
     network_mode: none
     pids_limit: 256
-    cpus: "2.0"
-    mem_limit: 2304m
-    mem_reservation: 512m
-    memswap_limit: 2304m
+    cpus: "4.0"
+    mem_limit: 4608m
+    mem_reservation: 1024m
+    memswap_limit: 4608m
     environment:
       <<: *storage-environment
       COMPANION_SESSION_DIR: /var/lib/comma-companion/database/worker-runtime
@@ -152,6 +152,7 @@ services:
       COMPANION_DYNAMICS_ADAPTER_COMMAND: comma-companion-dynamics
       COMPANION_JOB_LEASE_SECONDS: ${COMPANION_JOB_LEASE_SECONDS:-120}
       COMPANION_JOB_POLL_SECONDS: ${COMPANION_JOB_POLL_SECONDS:-1}
+      COMPANION_WORKER_CONCURRENCY: ${COMPANION_WORKER_CONCURRENCY:-2}
       COMPANION_MEDIA_TIMEOUT_SECONDS: ${COMPANION_MEDIA_TIMEOUT_SECONDS:-21600}
       COMPANION_MAX_ARTIFACT_BYTES: ${COMPANION_MAX_ARTIFACT_BYTES:-68719476736}
       COMPANION_TRANSCODE_CRF: ${COMPANION_TRANSCODE_CRF:-38}

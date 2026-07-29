@@ -5,8 +5,10 @@ import os
 import shlex
 import signal
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 from .config import Settings
 from .db import Database, ensure_storage_directories
@@ -116,6 +118,45 @@ def _refresh_model_registry(
     )
 
 
+def _run_worker_pool(
+  database: Database,
+  handlers: Mapping[str, Any],
+  stop_event: threading.Event,
+  *,
+  concurrency: int,
+  lease_seconds: float,
+  poll_interval: float,
+) -> None:
+  failures: list[BaseException] = []
+
+  def run_instance() -> None:
+    try:
+      run_worker(
+        database,
+        handlers,
+        stop_event,
+        lease_seconds=lease_seconds,
+        poll_interval=poll_interval,
+      )
+    except BaseException as exc:
+      failures.append(exc)
+      stop_event.set()
+
+  threads = [
+    threading.Thread(
+      target=run_instance,
+      name=f"archive-worker-{index + 1}",
+    )
+    for index in range(concurrency)
+  ]
+  for thread in threads:
+    thread.start()
+  for thread in threads:
+    thread.join()
+  if failures:
+    raise failures[0]
+
+
 def main() -> None:
   logging.basicConfig(
     level=os.getenv("COMPANION_LOG_LEVEL", "INFO").upper(),
@@ -152,11 +193,15 @@ def main() -> None:
   try:
     with SingletonWorkerLock(lock_path):
       _refresh_model_registry(database, integrations)
-      LOGGER.info("Worker started")
-      run_worker(
+      LOGGER.info(
+        "Worker started with concurrency=%d",
+        settings.worker_concurrency,
+      )
+      _run_worker_pool(
         database,
         integrations.handlers,
         stop_event,
+        concurrency=settings.worker_concurrency,
         lease_seconds=settings.job_lease_seconds,
         poll_interval=settings.job_poll_seconds,
       )

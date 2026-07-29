@@ -140,7 +140,7 @@ services:
         condition: service_healthy
     network_mode: none
     pids_limit: 256
-    cpus: "4.0"
+    cpus: "6.0"
     mem_limit: 4608m
     mem_reservation: 1024m
     memswap_limit: 4608m

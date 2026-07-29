@@ -45,6 +45,7 @@ from comma_companion_media_worker.worker import (
   TimeoutError,
   ToolVersions,
   ValidationResult,
+  _published_hardlink_alias,
   _stage_path,
   _webm_cues_front_loaded,
 )
@@ -74,6 +75,24 @@ def job_for(tmp_path: Path) -> EncodeJob:
       },
     }
   )
+
+
+def test_published_hardlink_alias_accepts_cifs_synthetic_inodes(tmp_path: Path) -> None:
+  source = tmp_path / "source"
+  target = tmp_path / "target"
+  source.write_bytes(b"journal")
+  os.link(source, target)
+  source_stat = source.stat()
+  target_stat = target.stat()
+  synthetic_target_stat = SimpleNamespace(
+    st_mode=target_stat.st_mode,
+    st_dev=target_stat.st_dev,
+    st_ino=target_stat.st_ino + 1,
+    st_nlink=target_stat.st_nlink,
+    st_size=target_stat.st_size,
+  )
+
+  assert _published_hardlink_alias(source, target, source_stat, synthetic_target_stat)
 
 
 def raw_hevc_probe(path: str = "camera.data") -> ProbeInfo:

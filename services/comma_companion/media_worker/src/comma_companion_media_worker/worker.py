@@ -381,6 +381,30 @@ def _stat_matches_identity(file_stat: os.stat_result, identity: _FileIdentity) -
   return stat.S_ISREG(file_stat.st_mode) and _file_identity(file_stat) == identity
 
 
+def _published_hardlink_alias(
+  source: Path,
+  target: Path,
+  source_stat: os.stat_result,
+  target_stat: os.stat_result,
+) -> bool:
+  if (
+    not stat.S_ISREG(source_stat.st_mode)
+    or not stat.S_ISREG(target_stat.st_mode)
+    or source_stat.st_dev != target_stat.st_dev
+    or source_stat.st_nlink < 2
+    or target_stat.st_nlink < 2
+    or source_stat.st_size != target_stat.st_size
+  ):
+    return False
+  if source_stat.st_ino == target_stat.st_ino:
+    return True
+  # CIFS can report a pathname-specific synthetic inode for two names backed by
+  # the same server-side hardlink. os.link() has just created the target with
+  # O_EXCL semantics; equal bounded journal bytes plus link counts verify that
+  # case without weakening the ordinary inode-identity path.
+  return source.read_bytes() == target.read_bytes()
+
+
 def _unlink_verified_identity(path: Path, identity: _FileIdentity, *, description: str) -> None:
   try:
     current = path.stat(follow_symlinks=False)
@@ -2196,11 +2220,11 @@ class MediaWorker:
         raise OutputConflictError(f"publish transaction marker already exists: {publish_journal}") from exc
       staged_journal_stat = staged_journal.stat(follow_symlinks=False)
       publish_journal_stat = publish_journal.stat(follow_symlinks=False)
-      if (
-        not stat.S_ISREG(staged_journal_stat.st_mode)
-        or not stat.S_ISREG(publish_journal_stat.st_mode)
-        or staged_journal_stat.st_dev != publish_journal_stat.st_dev
-        or staged_journal_stat.st_ino != publish_journal_stat.st_ino
+      if not _published_hardlink_alias(
+        staged_journal,
+        publish_journal,
+        staged_journal_stat,
+        publish_journal_stat,
       ):
         raise OutputConflictError(f"publish transaction marker does not alias its durable stage: {publish_journal}")
       journal_identity = _file_identity(publish_journal_stat)

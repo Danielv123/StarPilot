@@ -13,6 +13,16 @@ def test_hardlink_probe_verifies_alias_and_cleans_up(tmp_path: Path) -> None:
   assert list(tmp_path.iterdir()) == []
 
 
+def test_hardlink_probe_handles_cifs_path_specific_inodes(
+  tmp_path: Path,
+  monkeypatch: MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(Path, "samefile", lambda _self, _other: False)
+
+  assert preflight_storage._hardlink_probe(tmp_path) == (True, None)
+  assert list(tmp_path.iterdir()) == []
+
+
 def test_primary_storage_gate_requires_hardlink() -> None:
   result: dict[str, object] = {
     "atomic_replace": True,

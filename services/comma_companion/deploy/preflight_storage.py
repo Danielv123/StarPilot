@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import sys
 from pathlib import Path
 from uuid import uuid4
@@ -54,6 +55,37 @@ def _write_probe(path: Path) -> tuple[bool, str | None]:
     return False, f"{type(error).__name__}: {error}"
 
 
+def _hardlink_paths_alias(source: Path, link: Path) -> bool:
+  try:
+    if link.samefile(source):
+      return True
+  except OSError:
+    pass
+
+  source_stat = source.stat(follow_symlinks=False)
+  link_stat = link.stat(follow_symlinks=False)
+  if (
+    not stat.S_ISREG(source_stat.st_mode)
+    or not stat.S_ISREG(link_stat.st_mode)
+    or source_stat.st_dev != link_stat.st_dev
+    or source_stat.st_nlink < 2
+    or link_stat.st_nlink < 2
+    or source_stat.st_size != link_stat.st_size
+    or source.read_bytes() != link.read_bytes()
+  ):
+    return False
+
+  # Some CIFS mounts expose a different synthetic inode for each pathname even
+  # when the SMB server created a real hardlink. Prove aliasing by extending the
+  # disposable source and observing the same bytes through the target.
+  marker = f"comma-companion-hardlink-alias-{uuid4().hex}\n".encode()
+  with source.open("ab") as stream:
+    stream.write(marker)
+    stream.flush()
+    os.fsync(stream.fileno())
+  return link.read_bytes().endswith(marker)
+
+
 def _hardlink_probe(path: Path) -> tuple[bool, str | None]:
   source = path / f".storage-hardlink-source-{uuid4().hex}"
   link = path / f".storage-hardlink-target-{uuid4().hex}"
@@ -63,7 +95,7 @@ def _hardlink_probe(path: Path) -> tuple[bool, str | None]:
       stream.flush()
       os.fsync(stream.fileno())
     os.link(source, link)
-    if not link.samefile(source):
+    if not _hardlink_paths_alias(source, link):
       return False, "hardlink target does not alias its source"
     return True, None
   except OSError as error:
@@ -345,7 +377,7 @@ def main() -> int:
 
     try:
       os.link(published, hardlink)
-      result["hardlink"] = hardlink.samefile(published)
+      result["hardlink"] = _hardlink_paths_alias(published, hardlink)
     except OSError as error:
       result["hardlink_error"] = f"{type(error).__name__}: {error}"
 

@@ -110,7 +110,11 @@ export function driveProgressSummary(drive: Drive): DriveProgressSummary {
   )
   const expectedMedia = Math.max(0, drive.expected_media)
   const readyMedia = Math.min(expectedMedia, Math.max(0, drive.ready_media))
-  const prunedMedia = Math.min(expectedMedia, Math.max(0, drive.pruned_media))
+  const prunedMedia = Math.min(
+    expectedMedia,
+    readyMedia,
+    Math.max(0, drive.pruned_media),
+  )
   const processingSteps = expectedMedia * (
     drive.raw_video_pruning_required ? 2 : 1
   )

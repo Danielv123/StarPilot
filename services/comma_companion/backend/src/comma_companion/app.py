@@ -202,7 +202,10 @@ DRIVE_SELECT = """
       THEN a.segment_id || ':' || COALESCE(a.camera, a.kind)
     END) AS ready_media_pair_count,
     (
-      SELECT COUNT(DISTINCT pruned_source.id)
+      SELECT COUNT(DISTINCT
+        pruned_source.segment_id || ':' ||
+        COALESCE(pruned_source.camera, pruned_source.kind)
+      )
       FROM artifacts pruned_source
       JOIN objects pruned_object
         ON pruned_object.sha256 = pruned_source.object_sha256

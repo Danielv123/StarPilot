@@ -128,14 +128,22 @@ def test_successful_media_retry_clears_historical_failure(
   drive_id = uuid4().hex
   segment_id = uuid4().hex
   source_id = uuid4().hex
+  duplicate_source_id = uuid4().hex
   derived_id = uuid4().hex
+  duplicate_derived_id = uuid4().hex
   failed_job_id = uuid4().hex
   succeeded_job_id = uuid4().hex
   now = isoformat()
   with database.transaction(immediate=True) as connection:
     source_sha = _object(connection, b"raw", "raw")
+    duplicate_source_sha = _object(connection, b"raw-duplicate", "raw-duplicate")
     rlog_sha = _object(connection, b"log", "rlog")
     derived_sha = _object(connection, b"av1", "derived")
+    duplicate_derived_sha = _object(
+      connection,
+      b"av1-duplicate",
+      "derived-duplicate",
+    )
     connection.execute(
       """
       INSERT INTO drives(
@@ -286,9 +294,51 @@ def test_successful_media_retry_clears_historical_failure(
       """
       UPDATE objects
       SET storage_state = 'pruned', pruned_at = ?
-      WHERE sha256 = ?
+      WHERE sha256 IN (?, ?)
       """,
-      (now, source_sha),
+      (now, source_sha, duplicate_source_sha),
+    )
+    connection.execute(
+      """
+      INSERT INTO artifacts(
+        id, device_id, drive_id, segment_id, object_sha256,
+        kind, camera, relative_path, storage_path, size,
+        status, created_at
+      ) VALUES (
+        ?, 'device-one', ?, ?, ?, 'fcamera', 'road',
+        'route-retry/0/fcamera-duplicate.hevc',
+        'objects/raw-duplicate', 13, 'stored', ?
+      )
+      """,
+      (
+        duplicate_source_id,
+        drive_id,
+        segment_id,
+        duplicate_source_sha,
+        now,
+      ),
+    )
+    connection.execute(
+      """
+      INSERT INTO artifacts(
+        id, device_id, drive_id, segment_id, object_sha256,
+        kind, camera, relative_path, storage_path, size,
+        mime_type, codec, status, source_artifact_id, created_at
+      ) VALUES (
+        ?, 'device-one', ?, ?, ?, 'derived_video', 'road',
+        'derived/route-retry/0/road-duplicate.webm',
+        'objects/derived-duplicate', 13,
+        'video/webm', 'av1', 'ready', ?, ?
+      )
+      """,
+      (
+        duplicate_derived_id,
+        drive_id,
+        segment_id,
+        duplicate_derived_sha,
+        duplicate_source_id,
+        now,
+      ),
     )
 
   recovered = admin_client.get(f"/api/v1/drives/{drive_id}")

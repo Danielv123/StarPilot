@@ -53,4 +53,17 @@ describe('drive catalog progress', () => {
     expect(driveProgressSummary(retained).processingComplete).toBe(true)
     expect(driveStatusLabel(retained)).toBe('finalizing')
   })
+
+  it('never counts more pruned streams than ready AV1 streams', () => {
+    const historicalDuplicates = drive({
+      expected_media: 2,
+      ready_media: 1,
+      pruned_media: 20,
+    })
+    expect(driveProgressSummary(historicalDuplicates)).toMatchObject({
+      processingPercent: 50,
+      processingDetail: '1/2 AV1 · 1/2 pruned',
+      processingComplete: false,
+    })
+  })
 })

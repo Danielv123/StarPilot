@@ -1408,14 +1408,20 @@ export const api = {
       request<RawDevice[]>('/devices'),
     ])
     const devices = rawDevices.map(normalizeDevice)
+    const onlineDevices = devices.filter((device) => device.online)
     const deviceQueueBytes = devices.reduce(
       (total, device) => total + Math.max(0, device.queue_bytes ?? 0),
       0,
     )
+    const devicesOnroad = onlineDevices.filter((device) => device.onroad === true).length
+    const devicesParked = onlineDevices.filter((device) => device.offroad === true).length
     return {
       generated_at: new Date().toISOString(),
-      devices_online: devices.filter((device) => device.online).length,
+      devices_online: onlineDevices.length,
       devices_total: devices.length,
+      devices_onroad: devicesOnroad,
+      devices_parked: devicesParked,
+      devices_road_state_unknown: onlineDevices.length - devicesOnroad - devicesParked,
       upload_bps: snapshot.bytes_per_second_60s,
       pending_upload_bytes: Math.max(deviceQueueBytes, snapshot.pending_bytes),
       server_pending_bytes: snapshot.pending_bytes,

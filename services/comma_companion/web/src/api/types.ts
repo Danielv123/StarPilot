@@ -37,6 +37,9 @@ export interface InboundStatus {
   generated_at: string
   devices_online: number
   devices_total: number
+  devices_onroad: number
+  devices_parked: number
+  devices_road_state_unknown: number
   upload_bps: number
   pending_upload_bytes: number
   server_pending_bytes: number

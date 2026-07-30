@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { InboundStatus } from '../api/types'
 import {
   ACTIVE_PIPELINE_POLL_INTERVAL_MS,
+  deviceRoadStateDetail,
   instantaneousSpeed,
   sparklinePath,
 } from './OverviewPage'
@@ -11,6 +12,9 @@ function inbound(overrides: Partial<InboundStatus> = {}): InboundStatus {
     generated_at: '2026-07-29T10:00:00.000Z',
     devices_online: 1,
     devices_total: 1,
+    devices_onroad: 1,
+    devices_parked: 0,
+    devices_road_state_unknown: 0,
     upload_bps: 2_000_000,
     pending_upload_bytes: 7_000_000_000,
     server_pending_bytes: 55_000_000,
@@ -22,6 +26,17 @@ function inbound(overrides: Partial<InboundStatus> = {}): InboundStatus {
 describe('overview inbound telemetry', () => {
   it('refreshes active upload rows once per second', () => {
     expect(ACTIVE_PIPELINE_POLL_INTERVAL_MS).toBe(1_000)
+  })
+
+  it('shows live onroad and parked counts instead of a hard-coded parked label', () => {
+    expect(deviceRoadStateDetail(inbound(), 1)).toBe('1 enrolled · 1 onroad')
+    expect(deviceRoadStateDetail(inbound({
+      devices_online: 3,
+      devices_total: 4,
+      devices_onroad: 1,
+      devices_parked: 1,
+      devices_road_state_unknown: 1,
+    }), 4)).toBe('4 enrolled · 1 onroad · 1 parked · 1 state unknown')
   })
 
   it('derives a one-second bandwidth sample from received-byte deltas', () => {

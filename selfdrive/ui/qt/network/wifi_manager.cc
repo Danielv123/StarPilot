@@ -442,7 +442,7 @@ void WifiManager::updateGsmSettings(bool roaming, QString apn, bool metered) {
     }
 
     if (changes) {
-      QDBusPendingCall pending_call = asyncCall(lteConnectionPath.path(), NM_DBUS_INTERFACE_SETTINGS_CONNECTION, "UpdateUnsaved", QVariant::fromValue(settings));  // update is temporary
+      QDBusPendingCall pending_call = asyncCall(lteConnectionPath.path(), NM_DBUS_INTERFACE_SETTINGS_CONNECTION, "Update", QVariant::fromValue(settings));
       QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(pending_call);
       QObject::connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher]() {
         deactivateConnection(lteConnectionPath);

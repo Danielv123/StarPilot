@@ -61,6 +61,27 @@ func TestMeteredNetworkBlocksUpload(t *testing.T) {
 	}
 }
 
+func TestOnroadUnmeteredCellularUploadIsAllowed(t *testing.T) {
+	dir := t.TempDir()
+	offroad := filepath.Join(dir, "IsOffroad")
+	onroad := filepath.Join(dir, "IsOnroad")
+	metered := filepath.Join(dir, "NetworkMetered")
+	write(t, offroad, "0")
+	write(t, onroad, "1")
+	write(t, metered, "0")
+	status := New(config.Policy{
+		UploadOnlyOffroad: false,
+		RequireWiFi:       false,
+		MeteredStateFile:  metered,
+		OffroadStateFile:  offroad,
+		OnroadStateFile:   onroad,
+		TrueValues:        []string{"1"},
+	}).Read()
+	if !status.UploadAllowed || !status.MeteredKnown || status.Metered {
+		t.Fatalf("onroad unmetered cellular upload was not allowed: %#v", status)
+	}
+}
+
 func TestOffroadStableWindowResetsWhenStateFileIdentityChanges(t *testing.T) {
 	dir := t.TempDir()
 	offroad := filepath.Join(dir, "IsOffroad")

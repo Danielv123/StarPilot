@@ -544,10 +544,16 @@ export const demoApi = {
     return demoOverview
   },
   async inbound(): Promise<InboundStatus> {
+    const onlineDevices = demoDevices.filter((device) => device.online)
+    const devicesOnroad = onlineDevices.filter((device) => device.onroad === true).length
+    const devicesParked = onlineDevices.filter((device) => device.offroad === true).length
     return {
       generated_at: new Date().toISOString(),
-      devices_online: demoDevices.filter((device) => device.online).length,
+      devices_online: onlineDevices.length,
       devices_total: demoDevices.length,
+      devices_onroad: devicesOnroad,
+      devices_parked: devicesParked,
+      devices_road_state_unknown: onlineDevices.length - devicesOnroad - devicesParked,
       upload_bps: demoOverview.upload_bps,
       pending_upload_bytes: Math.max(
         demoOverview.pending_upload_bytes,

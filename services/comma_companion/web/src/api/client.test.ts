@@ -235,6 +235,9 @@ describe('device normalization', () => {
       await expect(api.inbound()).resolves.toMatchObject({
         devices_online: 1,
         devices_total: 1,
+        devices_onroad: 0,
+        devices_parked: 1,
+        devices_road_state_unknown: 0,
         upload_bps: 1_875_000,
         pending_upload_bytes: 7_000_000_000,
         server_pending_bytes: 55_000_000,

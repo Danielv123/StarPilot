@@ -147,6 +147,13 @@ func TestDisruptiveCommandDefaultsAreDisabled(t *testing.T) {
 	}
 }
 
+func TestUploadDefaultsAllowOnroadUnmeteredCellular(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Policy.UploadOnlyOffroad || cfg.Policy.RequireWiFi || cfg.Policy.AllowMetered {
+		t.Fatalf("unexpected upload policy defaults: %#v", cfg.Policy)
+	}
+}
+
 func TestOffroadStateAgeLimitDefaultsDisabledAndRejectsNegative(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Defaults()

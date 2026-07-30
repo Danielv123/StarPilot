@@ -167,14 +167,19 @@ return `EXDEV`. Root ownership and file modes make the installed private tree
 read-only to `comma`, with only its spool writable, while preserving the
 same-mount hardlink guarantee.
 
-When `require_wifi` is enabled, `wlan0` must be operational and every
+The default policy permits uploads while onroad and over cellular, but still
+requires the active network to be reported as unmetered. This matches the
+device UI's cellular metering choice without allowing uploads on a connection
+the device considers metered.
+
+When `require_wifi` is enabled as an optional stricter policy, `wlan0` must be operational and every
 lowest-metric IPv4/IPv6 default route must use that interface. A higher-metric
 cellular fallback therefore does not block uploads, but a selected or
 equal-cost cellular route does. A Params value that merely says `wifi` cannot
 override the route check, and the policy is checked again immediately before
 every upload chunk.
 
-This is a fail-closed route gate, not a privileged socket binding. There is a
+The optional Wi-Fi-only mode is a fail-closed route gate, not a privileged socket binding. There is a
 small race if the kernel changes its selected route after the per-chunk check
 but before or during the HTTP request. At most one configured chunk (512 KiB
 by default) can already be in flight when that happens. Enforcing

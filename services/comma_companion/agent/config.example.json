@@ -34,8 +34,8 @@
   "max_concurrent_uploads": 1,
   "user_agent": "comma-companion-agent/0.1.0",
   "policy": {
-    "upload_only_offroad": true,
-    "require_wifi": true,
+    "upload_only_offroad": false,
+    "require_wifi": false,
     "wifi_interface": "wlan0",
     "network_type_file": "",
     "metered_state_file": "/data/params/d/NetworkMetered",

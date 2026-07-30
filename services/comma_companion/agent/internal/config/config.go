@@ -132,8 +132,8 @@ func Defaults() Config {
 		MaxConcurrentUploads: 1,
 		UserAgent:            "comma-companion-agent/dev",
 		Policy: Policy{
-			UploadOnlyOffroad:     true,
-			RequireWiFi:           true,
+			UploadOnlyOffroad:     false,
+			RequireWiFi:           false,
 			WiFiInterface:         "wlan0",
 			OffroadStateFile:      "/data/params/d/IsOffroad",
 			OnroadStateFile:       "/data/params/d/IsOnroad",

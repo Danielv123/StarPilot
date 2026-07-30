@@ -59,6 +59,20 @@ export function sparklinePath(values: number[]): string {
   }).join(' ')
 }
 
+export function deviceRoadStateDetail(
+  inbound: InboundStatus | undefined,
+  devicesTotal: number,
+): string {
+  const details = [`${devicesTotal} enrolled`]
+  if (!inbound) return details[0]
+  if (inbound.devices_onroad) details.push(`${inbound.devices_onroad} onroad`)
+  if (inbound.devices_parked) details.push(`${inbound.devices_parked} parked`)
+  if (inbound.devices_road_state_unknown) {
+    details.push(`${inbound.devices_road_state_unknown} state unknown`)
+  }
+  return details.join(' · ')
+}
+
 function SpeedSparkline({ values }: { values: number[] }) {
   const line = sparklinePath(values)
   if (!line) return null
@@ -126,7 +140,7 @@ export default function OverviewPage() {
         <Metric
           label="Comma"
           value={`${devicesOnline} online`}
-          detail={`${devicesTotal} enrolled · parked`}
+          detail={deviceRoadStateDetail(inbound, devicesTotal)}
           tone={devicesOnline === devicesTotal ? 'good' : 'warn'}
           icon={<CarFront size={18} />}
         />

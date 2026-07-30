@@ -121,8 +121,8 @@ func (s *Scanner) Scan(ctx context.Context, offroad bool) Result {
 			result.BytesSpooled += bytes
 		}
 	}
-	if offroad && rootWalksComplete {
-		if err := s.recordRouteInventories(all, now); err != nil {
+	if rootWalksComplete {
+		if err := s.recordRouteInventories(all, now, offroad); err != nil {
 			s.logger.Printf("scan: capture route inventory: %v", err)
 			result.Errors++
 		}
@@ -545,7 +545,7 @@ type routeManifestCandidate struct {
 	manifest      state.RouteManifest
 }
 
-func (s *Scanner) recordRouteInventories(items []candidate, now time.Time) error {
+func (s *Scanner) recordRouteInventories(items []candidate, now time.Time, offroad bool) error {
 	snapshot := s.journal.Snapshot()
 	captured := make(map[string]state.File, len(snapshot.Files))
 	for _, file := range snapshot.Files {
@@ -569,6 +569,7 @@ func (s *Scanner) recordRouteInventories(items []candidate, now time.Time) error
 			captured,
 			snapshot,
 			now,
+			offroad,
 		)
 		if err != nil {
 			return err
@@ -642,6 +643,7 @@ func (s *Scanner) buildRouteManifest(
 	captured map[string]state.File,
 	snapshot state.Journal,
 	now time.Time,
+	offroad bool,
 ) (state.RouteManifest, bool, error) {
 	maxSegment := -1
 	currentPaths := make(map[string]bool)
@@ -667,10 +669,16 @@ func (s *Scanner) buildRouteManifest(
 	if maxSegment < 0 {
 		return state.RouteManifest{}, false, nil
 	}
+	closureGrace := s.config.FinalSegmentGrace.Duration
+	closureEvidence := "final_segment_grace"
+	if offroad {
+		closureGrace = s.config.OffroadSegmentGrace.Duration
+		closureEvidence = "offroad_segment_grace"
+	}
 	for _, item := range items {
 		if *item.segmentNumber == maxSegment {
 			age := now.Sub(time.Unix(0, item.modTimeNS))
-			if age < 0 || age < s.config.OffroadSegmentGrace.Duration {
+			if age < 0 || age < closureGrace {
 				return state.RouteManifest{}, false, nil
 			}
 		}
@@ -837,9 +845,11 @@ func (s *Scanner) buildRouteManifest(
 	sort.Strings(rootList)
 	evidence := []string{
 		"no_lock",
-		"offroad",
-		"offroad_segment_grace",
 		"stable_duration",
+		closureEvidence,
+	}
+	if offroad {
+		evidence = append(evidence, "offroad")
 	}
 	inventoryState := "complete"
 	capabilitySource := "configured+route_union"

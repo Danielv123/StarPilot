@@ -282,6 +282,47 @@ func TestRouteInventoryCompleteAndImmutableSupersedingGeneration(t *testing.T) {
 	}
 }
 
+func TestRouteInventoryBackfillsAfterFinalGraceWithoutOffroadSignal(t *testing.T) {
+	base := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "realdata")
+	spool := filepath.Join(filepath.Dir(root), "spool")
+	writeRouteFiles(t, root, "closed-route", 0, base.Add(-2*time.Hour), "rlog.zst", "qlog.zst")
+	writeRouteFiles(t, root, "active-route", 0, base, "rlog.zst", "qlog.zst")
+
+	cfg := testConfig(root, spool)
+	cfg.MaxFilesPerScan = 100
+	cfg.Inventory.ExpectedStreams = []config.InventoryStream{
+		{RootName: "realdata", ArtifactType: "rlog"},
+		{RootName: "realdata", ArtifactType: "qlog"},
+	}
+	store, err := journal.Open(cfg.JournalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := New(cfg, store, testLogger{t})
+	now := base
+	subject.now = func() time.Time { return now }
+
+	subject.Scan(context.Background(), false)
+	now = base.Add(2 * time.Second)
+	result := subject.Scan(context.Background(), false)
+	if result.Errors != 0 || result.FilesSpooled != 2 {
+		t.Fatalf("closed route was not captured without offroad state: %#v", result)
+	}
+	snapshot := store.Snapshot()
+	inventory, found := latestRouteInventory(snapshot, "closed-route")
+	if !found {
+		t.Fatal("closed route inventory was not backfilled without offroad state")
+	}
+	if contains(inventory.Manifest.ClosureEvidence, "offroad") ||
+		!contains(inventory.Manifest.ClosureEvidence, "final_segment_grace") {
+		t.Fatalf("unexpected closure evidence: %#v", inventory.Manifest.ClosureEvidence)
+	}
+	if _, found := latestRouteInventory(snapshot, "active-route"); found {
+		t.Fatal("active route inventory was captured before final-segment grace elapsed")
+	}
+}
+
 func TestRouteInventoryEmptyConfigIsExplicitlyPartial(t *testing.T) {
 	manifest := captureTestRouteInventory(
 		t,

@@ -144,6 +144,7 @@ export interface Job {
 export type DriveReadiness = 'ready' | 'processing' | 'partial' | 'uploading' | 'importing' | 'failed'
 export type CatalogDriveReadiness = Exclude<DriveReadiness, 'uploading'>
 export type DriveReadinessCounts = Record<CatalogDriveReadiness, number>
+export type TelemetryStatus = 'ready' | 'awaiting_rlogs' | 'awaiting_inventory' | 'extracting' | 'refreshing' | 'finalizing'
 
 export interface Drive {
   id: string
@@ -165,8 +166,12 @@ export interface Drive {
   backup_bytes_received: number
   backup_bytes_expected: number
   artifact_count: number
+  expected_rlogs: number
+  archived_rlogs: number
+  rlog_backup_complete: boolean
   cameras: Camera[]
   telemetry_ready: boolean
+  telemetry_status: TelemetryStatus
   vehicle?: string
   software_version?: string
   model_name?: string

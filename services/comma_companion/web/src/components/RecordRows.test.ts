@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Drive } from '../api/types'
-import { driveProgressSummary, driveStatusLabel } from './RecordRows'
+import { driveProgressSummary, driveStatusLabel, rlogBackupLabel } from './RecordRows'
 
 function drive(overrides: Partial<Drive> = {}): Drive {
   return {
@@ -21,8 +21,12 @@ function drive(overrides: Partial<Drive> = {}): Drive {
     backup_bytes_received: 75,
     backup_bytes_expected: 100,
     artifact_count: 5,
+    expected_rlogs: 2,
+    archived_rlogs: 2,
+    rlog_backup_complete: true,
     cameras: [],
     telemetry_ready: false,
+    telemetry_status: 'refreshing',
     ...overrides,
   }
 }
@@ -38,10 +42,29 @@ describe('drive catalog progress', () => {
     })
   })
 
-  it('identifies media-complete routes that are only waiting for telemetry', () => {
+  it('identifies media-complete routes whose telemetry is being refreshed', () => {
     const completedMedia = drive({ pruned_media: 2 })
     expect(driveProgressSummary(completedMedia).processingPercent).toBe(100)
-    expect(driveStatusLabel(completedMedia)).toBe('awaiting telemetry')
+    expect(driveStatusLabel(completedMedia)).toBe('refreshing telemetry')
+    expect(rlogBackupLabel(completedMedia)).toBe('2/2 rlogs')
+  })
+
+  it('reports rlog backup independently from telemetry readiness', () => {
+    expect(rlogBackupLabel(drive({
+      expected_rlogs: 2,
+      archived_rlogs: 1,
+      rlog_backup_complete: false,
+      telemetry_status: 'awaiting_rlogs',
+    }))).toBe('1/2 rlogs')
+  })
+
+  it('names the route inventory gate after all rlogs are backed up', () => {
+    const awaitingInventory = drive({
+      pruned_media: 2,
+      telemetry_status: 'awaiting_inventory',
+    })
+    expect(rlogBackupLabel(awaitingInventory)).toBe('2/2 rlogs')
+    expect(driveStatusLabel(awaitingInventory)).toBe('awaiting route inventory')
   })
 
   it('does not require pruning when raw-video retention is enabled', () => {
@@ -49,6 +72,7 @@ describe('drive catalog progress', () => {
       pruned_media: 0,
       raw_video_pruning_required: false,
       telemetry_ready: true,
+      telemetry_status: 'ready',
     })
     expect(driveProgressSummary(retained).processingComplete).toBe(true)
     expect(driveStatusLabel(retained)).toBe('finalizing')

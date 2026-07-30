@@ -413,7 +413,18 @@ class DriveView(StrictModel):
   backup_bytes_received: int
   backup_bytes_expected: int
   artifact_count: int
+  expected_rlogs: int
+  archived_rlogs: int
+  rlog_backup_complete: bool
   telemetry_ready: bool
+  telemetry_status: Literal[
+    "ready",
+    "awaiting_rlogs",
+    "awaiting_inventory",
+    "extracting",
+    "refreshing",
+    "finalizing",
+  ]
   readiness: Literal["importing", "processing", "ready", "partial", "failed"]
   cameras: list[DriveCameraView] = Field(default_factory=list)
   vehicle: str | None = None

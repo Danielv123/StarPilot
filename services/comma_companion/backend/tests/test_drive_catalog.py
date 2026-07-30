@@ -5,6 +5,7 @@ import json
 from time import perf_counter
 from uuid import uuid4
 
+from comma_companion.app import _prime_drive_catalog, _telemetry_status
 from comma_companion.db import isoformat
 
 
@@ -120,6 +121,42 @@ def _complete_inventory(
     ],
   )
   return rlog_source_fingerprint
+
+
+def test_telemetry_status_distinguishes_rlog_backup_from_indexing() -> None:
+  row = {
+    "inventory_id": "inventory-one",
+    "inventory_expected_rlog_count": 2,
+    "inventory_archived_rlog_count": 2,
+    "archived_rlog_count": 2,
+    "segment_count": 2,
+    "inventory_rlog_source_fingerprint": "current",
+    "telemetry_source_fingerprint": "previous",
+    "telemetry_ready": 0,
+  }
+
+  assert _telemetry_status(row) == "refreshing"
+  assert _telemetry_status({
+    **row,
+    "inventory_archived_rlog_count": 1,
+  }) == "awaiting_rlogs"
+  assert _telemetry_status({
+    **row,
+    "inventory_id": None,
+  }) == "awaiting_inventory"
+  assert _telemetry_status({
+    **row,
+    "telemetry_source_fingerprint": None,
+  }) == "extracting"
+  assert _telemetry_status({
+    **row,
+    "telemetry_source_fingerprint": "current",
+  }) == "finalizing"
+  assert _telemetry_status({
+    **row,
+    "telemetry_source_fingerprint": "current",
+    "telemetry_ready": 1,
+  }) == "ready"
 
 
 def test_successful_media_retry_clears_historical_failure(
@@ -255,6 +292,10 @@ def test_successful_media_retry_clears_historical_failure(
   assert failed.json()["expected_media"] == 1
   assert failed.json()["ready_media"] == 0
   assert failed.json()["pruned_media"] == 0
+  assert failed.json()["expected_rlogs"] == 1
+  assert failed.json()["archived_rlogs"] == 1
+  assert failed.json()["rlog_backup_complete"] is True
+  assert failed.json()["telemetry_status"] == "ready"
 
   with database.transaction(immediate=True) as connection:
     connection.execute(
@@ -715,6 +756,36 @@ def test_cached_catalog_request_does_not_recompute_drive_readiness(
   primed = admin_client.get("/api/v1/drives?limit=50")
   assert primed.status_code == 200, primed.text
   assert primed.json()["total"] == 20
+
+  with database.transaction(immediate=True) as connection:
+    cached_rows = connection.execute(
+      "SELECT drive_id, payload_json FROM drive_catalog_cache",
+    ).fetchall()
+    for row in cached_rows:
+      payload = json.loads(row["payload_json"])
+      payload.pop("archived_rlog_count")
+      connection.execute(
+        """
+        UPDATE drive_catalog_cache
+        SET payload_json = ?
+        WHERE drive_id = ?
+        """,
+        (
+          json.dumps(payload, separators=(",", ":"), sort_keys=True),
+          row["drive_id"],
+        ),
+      )
+
+  _prime_drive_catalog(database)
+  upgraded_cache_entries = database.query_one(
+    """
+    SELECT COUNT(*) AS count
+    FROM drive_catalog_cache
+    WHERE json_type(payload_json, '$.archived_rlog_count') IS NOT NULL
+    """,
+  )
+  assert upgraded_cache_entries is not None
+  assert upgraded_cache_entries["count"] == 20
 
   started = perf_counter()
   cached = admin_client.get("/api/v1/drives?limit=50")

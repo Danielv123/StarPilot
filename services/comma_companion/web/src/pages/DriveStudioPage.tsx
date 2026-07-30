@@ -37,6 +37,7 @@ import type {
   SimulationResult,
 } from '../api/types'
 import { EventTimeline, SignalChart } from '../components/Charts'
+import { rlogBackupLabel, telemetryStatusLabel } from '../components/RecordRows'
 import {
   EmptyState,
   ErrorState,
@@ -1597,7 +1598,7 @@ export default function DriveStudioPage() {
         <div className="integrity-grid">
           <div><CheckCircle2 /><span>Segments</span><strong>{detail.ready_segments} / {detail.segment_count} durable</strong><ProgressBar value={percent(detail.ready_segments, detail.segment_count)} /></div>
           <div><Film /><span>Playback</span><strong>{detail.cameras.filter((item) => item.available).map((item) => item.label).join(', ') || 'none'}</strong><small>Server-side AV1 derivatives</small></div>
-          <div><FileCode2 /><span>Rlogs</span><strong>{detail.telemetry_ready ? 'Indexed' : 'Pending'}</strong><small>{detail.rlog_hashes?.length ?? 0} source hashes</small></div>
+          <div><FileCode2 /><span>Rlogs</span><strong>{rlogBackupLabel(detail)}</strong><small>{telemetryStatusLabel(detail.telemetry_status)} · {detail.rlog_hashes?.length ?? 0} source hashes</small></div>
           <div>
             <Clock3 />
             <span>Sync</span>

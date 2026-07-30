@@ -113,6 +113,35 @@ def _readiness(row: Mapping[str, Any] | sqlite3.Row) -> str:
   return "importing"
 
 
+def _telemetry_status(row: Mapping[str, Any] | sqlite3.Row) -> str:
+  inventory_present = row["inventory_id"] is not None
+  expected_rlogs = (
+    row["inventory_expected_rlog_count"]
+    if inventory_present
+    else max(row["segment_count"], row["archived_rlog_count"])
+  )
+  archived_rlogs = (
+    row["inventory_archived_rlog_count"]
+    if inventory_present
+    else row["archived_rlog_count"]
+  )
+  if expected_rlogs == 0 or archived_rlogs < expected_rlogs:
+    return "awaiting_rlogs"
+  if not inventory_present:
+    return "awaiting_inventory"
+  if row["telemetry_source_fingerprint"] is None:
+    return "extracting"
+  if (
+    row["inventory_rlog_source_fingerprint"] is not None
+    and row["inventory_rlog_source_fingerprint"]
+    != row["telemetry_source_fingerprint"]
+  ):
+    return "refreshing"
+  if bool(row["telemetry_ready"]):
+    return "ready"
+  return "finalizing"
+
+
 CATALOG_VIDEO_TYPES = frozenset(
   {
     "fcamera",
@@ -165,6 +194,12 @@ DRIVE_SELECT = """
       AS failed_artifact_count,
     COUNT(DISTINCT CASE WHEN a.status = 'partial' THEN a.id END)
       AS partial_artifact_count,
+    COUNT(DISTINCT CASE
+      WHEN a.source_artifact_id IS NULL
+        AND a.kind = 'rlog'
+        AND a.status IN ('stored', 'verified', 'ready')
+      THEN a.id
+    END) AS archived_rlog_count,
     COUNT(DISTINCT CASE
       WHEN a.status = 'ready'
         AND a.kind = 'derived_video'
@@ -827,6 +862,16 @@ def _drive_view(
   inventory_present = row["inventory_id"] is not None
   expected_media = row["inventory_expected_media_count"] if inventory_present else row["expected_media_count"]
   ready_media = row["inventory_ready_media_count"] if inventory_present else row["ready_media_pair_count"]
+  expected_rlogs = (
+    row["inventory_expected_rlog_count"]
+    if inventory_present
+    else max(row["segment_count"], row["archived_rlog_count"])
+  )
+  archived_rlogs = (
+    row["inventory_archived_rlog_count"]
+    if inventory_present
+    else row["archived_rlog_count"]
+  )
   return {
     "id": row["id"],
     "device_id": row["device_id"],
@@ -848,7 +893,15 @@ def _drive_view(
     "backup_bytes_received": drive_progress.get("backup_bytes_received", 0),
     "backup_bytes_expected": drive_progress.get("backup_bytes_expected", 0),
     "artifact_count": row["artifact_count"],
+    "expected_rlogs": expected_rlogs,
+    "archived_rlogs": archived_rlogs,
+    "rlog_backup_complete": (
+      inventory_present
+      and expected_rlogs > 0
+      and archived_rlogs >= expected_rlogs
+    ),
     "telemetry_ready": bool(row["telemetry_ready"]),
+    "telemetry_status": _telemetry_status(row),
     "readiness": _readiness(row),
     "cameras": catalog.get("cameras", []),
     "vehicle": catalog.get("vehicle"),
@@ -971,6 +1024,10 @@ def _prime_drive_catalog(database: Database) -> None:
     FROM drives drive
     LEFT JOIN drive_catalog_cache cache ON cache.drive_id = drive.id
     WHERE cache.drive_id IS NULL
+      OR json_type(
+        cache.payload_json,
+        '$.archived_rlog_count'
+      ) IS NULL
     """,
     (isoformat(),),
   )
@@ -1044,6 +1101,7 @@ def _hydrate_cached_drive_row(
   if not isinstance(payload, dict):
     raise RuntimeError("drive catalog cache payload must be an object")
   hydrated.update(payload)
+  hydrated.setdefault("archived_rlog_count", 0)
   return hydrated
 
 

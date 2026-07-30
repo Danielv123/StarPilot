@@ -266,7 +266,11 @@ describe('drive catalog normalization', () => {
       backup_bytes_received: 100,
       backup_bytes_expected: 100,
       artifact_count: 2,
+      expected_rlogs: 1,
+      archived_rlogs: 1,
+      rlog_backup_complete: true,
       telemetry_ready: true,
+      telemetry_status: 'ready',
       readiness: 'ready',
       cameras: [{
         id: 'road',
@@ -410,7 +414,11 @@ describe('catalog pagination and dashboard totals', () => {
     backup_bytes_received: 100,
     backup_bytes_expected: 100,
     artifact_count: 3,
+    expected_rlogs: 1,
+    archived_rlogs: 1,
+    rlog_backup_complete: true,
     telemetry_ready: true,
+    telemetry_status: 'ready',
     readiness: 'ready',
     cameras: [{
       id: 'road',

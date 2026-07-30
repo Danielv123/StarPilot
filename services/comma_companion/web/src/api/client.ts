@@ -230,7 +230,11 @@ interface RawDrive {
   backup_bytes_received: number
   backup_bytes_expected: number
   artifact_count: number
+  expected_rlogs: number
+  archived_rlogs: number
+  rlog_backup_complete: boolean
   telemetry_ready: boolean
+  telemetry_status: 'ready' | 'awaiting_rlogs' | 'awaiting_inventory' | 'extracting' | 'refreshing' | 'finalizing'
   readiness: 'importing' | 'processing' | 'ready' | 'partial' | 'failed'
   cameras: Array<{
     id: string
@@ -579,6 +583,9 @@ function normalizeDrive(raw: RawDrive): Drive {
     backup_bytes_received: raw.backup_bytes_received,
     backup_bytes_expected: raw.backup_bytes_expected,
     artifact_count: raw.artifact_count,
+    expected_rlogs: raw.expected_rlogs,
+    archived_rlogs: raw.archived_rlogs,
+    rlog_backup_complete: raw.rlog_backup_complete,
     cameras: raw.cameras.map((camera) => ({
       id: camera.id,
       label: camera.label,
@@ -589,6 +596,7 @@ function normalizeDrive(raw: RawDrive): Drive {
       fps: camera.fps ?? undefined,
     })),
     telemetry_ready: raw.telemetry_ready,
+    telemetry_status: raw.telemetry_status,
     vehicle: raw.vehicle ?? undefined,
     distance_m: raw.distance_m ?? undefined,
     location_start: raw.location_start ?? undefined,

@@ -142,10 +142,37 @@ export function driveStatusLabel(drive: Drive): string {
   if (drive.readiness !== 'processing') return drive.readiness
   const progress = driveProgressSummary(drive)
   if (progress.processingComplete && !drive.telemetry_ready) {
-    return 'awaiting telemetry'
+    return telemetryStatusLabel(drive.telemetry_status)
   }
   if (progress.processingComplete) return 'finalizing'
   return 'processing'
+}
+
+export function telemetryStatusLabel(status: Drive['telemetry_status']): string {
+  switch (status) {
+    case 'awaiting_rlogs':
+      return 'awaiting rlogs'
+    case 'awaiting_inventory':
+      return 'awaiting route inventory'
+    case 'extracting':
+      return 'extracting telemetry'
+    case 'refreshing':
+      return 'refreshing telemetry'
+    case 'finalizing':
+      return 'finalizing telemetry'
+    case 'ready':
+      return 'telemetry ready'
+  }
+}
+
+export function rlogBackupLabel(drive: Drive): string {
+  if (drive.expected_rlogs > 0) {
+    return `${drive.archived_rlogs}/${drive.expected_rlogs} rlogs`
+  }
+  if (drive.archived_rlogs > 0) {
+    return `${drive.archived_rlogs} ${drive.archived_rlogs === 1 ? 'rlog' : 'rlogs'}`
+  }
+  return 'no rlogs yet'
 }
 
 export function DriveProgressBars({
@@ -219,7 +246,7 @@ export function DriveRow({ drive, compact = false }: { drive: Drive; compact?: b
         <Film size={14} />
         <span>{drive.cameras.filter((camera) => camera.available).length} cam</span>
         <FileCode2 size={14} />
-        <span>{drive.telemetry_ready ? 'rlog' : 'no rlog'}</span>
+        <span>{rlogBackupLabel(drive)}</span>
       </div>
       <StatusBadge
         state={

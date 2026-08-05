@@ -25,6 +25,9 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import (
 )
 from openpilot.selfdrive.controls.lib.latcontrol_vehicle_tunes import (
   IONIQ_5_DAMPING_GAIN,
+  IONIQ_5_FRICTION_JERK_GAIN,
+  IONIQ_5_HIGHWAY_DAMPING_FULL_SPEED,
+  IONIQ_5_HIGHWAY_DAMPING_GAIN,
   IONIQ_5_REVERSAL_DAMPING_GAIN,
   IONIQ_5_REVERSAL_DAMPING_HOLD_SECONDS,
   clear_flm_runtime_overrides,
@@ -919,6 +922,34 @@ class TestLatControl:
         measurement_rate, 0.2, 0.0, 11.0, -2.0, False,
       )
     assert recovered_error_rate == pytest.approx(-measurement_rate)
+
+  def test_ioniq_5_increases_damping_at_highway_speed(self):
+    controller, _, _, _, _ = self._build_torque_controller(HYUNDAI.HYUNDAI_IONIQ_5)
+    measurement_rate = 2.0
+
+    highway_error_rate = controller._ioniq_5_damping_error_rate(
+      measurement_rate, 0.5, 0.0, IONIQ_5_HIGHWAY_DAMPING_FULL_SPEED, 0.0, False,
+    )
+
+    assert highway_error_rate == pytest.approx(
+      -measurement_rate * IONIQ_5_HIGHWAY_DAMPING_GAIN / IONIQ_5_DAMPING_GAIN,
+    )
+
+  def test_ioniq_5_uses_tuned_friction_jerk_gain(self, monkeypatch):
+    controller, VM, CS, params, starpilot_toggles = self._build_torque_controller(HYUNDAI.HYUNDAI_IONIQ_5)
+    monkeypatch.setattr(controller.jerk_filter, "update", lambda _raw_jerk: 2.0)
+    captured = {}
+
+    def fake_get_friction(error, _deadzone, _threshold, _torque_params):
+      captured["error"] = error
+      return 0.0
+
+    monkeypatch.setattr(latcontrol_torque, "get_friction", fake_get_friction)
+    _, _, lac_log = controller.update(
+      True, CS, VM, params, False, 0.0025, False, 0.2, None, None, starpilot_toggles,
+    )
+
+    assert captured["error"] - lac_log.error == pytest.approx(2.0 * IONIQ_5_FRICTION_JERK_GAIN)
 
   def test_ioniq_6_default_update_path(self):
     controller, VM, CS, params, starpilot_toggles = self._build_torque_controller(HYUNDAI.HYUNDAI_IONIQ_6)

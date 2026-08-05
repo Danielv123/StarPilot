@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(REPO_ROOT))
 
 from openpilot.tools.tuning import optimize_ioniq5_response_tune as tune_math
+from openpilot.tools.tuning import delay_alignment
 from openpilot.tools.tuning import train_lateral_plant_model as plant_data
 
 
@@ -60,6 +61,7 @@ CURRENT_CODE_TUNE = tune_math.Tune(
   sustained_turn_in_ff_lat_width=0.30,
   steady_high_lat_taper=0.015,
   hkg_friction_threshold=True,
+  friction_jerk_gain=0.10,
 )
 
 
@@ -76,6 +78,7 @@ class RolloutBatch:
   target_desired: np.ndarray
   target_jerk: np.ndarray
   segments: list[str]
+  response_jerk: np.ndarray | None = None
 
 
 @dataclass
@@ -114,14 +117,16 @@ def load_validation_trajectories(metadata: dict[str, Any]) -> list[plant_data.Tr
 
 
 def build_batch(trajectories: list[plant_data.Trajectory], routes: set[str], history_steps: int,
-                rollout_steps: int, max_windows: int, seed: int) -> RolloutBatch:
+                rollout_steps: int, max_windows: int, seed: int,
+                response_delay_steps: int = 0) -> RolloutBatch:
   windows: list[tuple[plant_data.Trajectory, int]] = []
   for trajectory in trajectories:
     if trajectory.route not in routes:
       continue
     values = trajectory.values
-    for source in range(history_steps - 1, len(trajectory.times) - rollout_steps):
-      future = slice(source, source + rollout_steps + 1)
+    first_source = max(history_steps - 1, response_delay_steps)
+    for source in range(first_source, len(trajectory.times) - rollout_steps):
+      future = slice(source - response_delay_steps, source + rollout_steps + 1)
       if values["lat_active"][future].min() < 0.5 or values["driver_overlay"][future].max() > 0.5:
         continue
       if values["saturated"][future].max() > 0.5 or values["v_ego"][source] < 3.0:
@@ -158,9 +163,10 @@ def build_batch(trajectories: list[plant_data.Trajectory], routes: set[str], his
     logged_applied=future_field("applied_torque", 0),
     logged_controller_output=future_field("controller_output", 0),
     initial_i=np.asarray([trajectory.values["controller_i"][source] for trajectory, source in windows]),
-    target_desired=future_field("desired_lateral_accel", 1),
-    target_jerk=future_field("desired_lateral_jerk", 1),
+    target_desired=future_field("desired_lateral_accel", 1 - response_delay_steps),
+    target_jerk=future_field("desired_lateral_jerk", 1 - response_delay_steps),
     segments=[trajectory.segment for trajectory, _ in windows],
+    response_jerk=future_field("desired_lateral_jerk", -response_delay_steps),
   )
 
 
@@ -239,6 +245,97 @@ class ClosedLoopEvaluator:
   def _rms(values: np.ndarray, mask: np.ndarray) -> float:
     selected = values[mask]
     return float(np.sqrt(np.mean(selected ** 2))) if len(selected) else 0.0
+
+  def _ramp_hold_events(self) -> tuple[np.ndarray, np.ndarray]:
+    """Find turn-in ramps that become a hold on the delay-aligned reference."""
+    desired = self.batch.target_desired
+    jerk = self.batch.target_jerk
+    events = np.zeros_like(desired, dtype=bool)
+    directions = np.zeros_like(desired, dtype=np.float64)
+    recent_steps = max(2, round(0.35 / self.dt))
+    refractory_steps = max(1, round(0.25 / self.dt))
+    hold = np.abs(jerk) < 0.10
+    turn_in = (
+      (np.abs(desired) >= 0.12)
+      & (desired * jerk >= 0.025)
+      & (np.abs(jerk) >= 0.12)
+    )
+    for row in range(len(desired)):
+      last_event = -refractory_steps
+      for step in range(1, desired.shape[1]):
+        start = max(0, step - recent_steps)
+        recent_turn_in = np.count_nonzero(turn_in[row, start:step]) >= max(2, round(0.05 / self.dt))
+        hold_onset = hold[row, step] and not hold[row, step - 1]
+        if recent_turn_in and hold_onset and step - last_event >= refractory_steps:
+          events[row, step] = True
+          directions[row, step] = np.sign(desired[row, step])
+          last_event = step
+    return events, directions
+
+  def shape_metrics(self, trace: RolloutTrace) -> dict[str, float]:
+    """Score the two observed failures: highway oscillation and ramp-to-hold dip."""
+    desired = self.batch.target_desired
+    jerk = self.batch.target_jerk
+    speed = self.batch.v_ego
+    actual_index = plant_data.STATE_FEATURES.index("actual_lateral_accel")
+    rate_index = plant_data.STATE_FEATURES.index("signed_steering_rate_deg_s")
+    actual = trace.states[:, :, actual_index]
+    steering_rate = trace.states[:, :, rate_index]
+    initial_actual = self.batch.history[:, 0, self.base_index["actual_lateral_accel"]]
+    initial_rate = self.batch.history[:, 0, self.base_index["signed_steering_rate_deg_s"]]
+    response_rate = np.diff(np.column_stack((initial_actual, actual)), axis=1) / self.dt
+    steering_accel = np.diff(np.column_stack((initial_rate, steering_rate)), axis=1) / self.dt
+    initial_command = self.batch.history[:, 0, self.base_index["applied_torque"]]
+    command_slew = np.diff(np.column_stack((initial_command, trace.commands)), axis=1) / self.dt
+
+    highway_quiet = (
+      (speed >= 22.0)
+      & (np.abs(jerk) < 0.20)
+      & (np.abs(desired) >= 0.05)
+    )
+    highway_rate_error = response_rate - jerk
+    highway_shape_rate_error_rms = self._rms(highway_rate_error, highway_quiet)
+    highway_steering_accel_rms = self._rms(steering_accel, highway_quiet)
+    highway_command_slew_rms = self._rms(command_slew, highway_quiet)
+    highway_score = (
+      0.55 * highway_shape_rate_error_rms / 0.50
+      + 0.25 * highway_steering_accel_rms / 150.0
+      + 0.20 * highway_command_slew_rms / 5.0
+    )
+
+    ramp_events, ramp_directions = self._ramp_hold_events()
+    post_steps = max(1, round(0.30 / self.dt))
+    dips: list[float] = []
+    counter_rates: list[float] = []
+    for row, step in np.argwhere(ramp_events):
+      direction = ramp_directions[row, step]
+      end = min(actual.shape[1], step + post_steps + 1)
+      projected_delta = direction * (actual[row, step:end] - actual[row, step])
+      dips.append(max(0.0, -float(np.min(projected_delta))))
+      projected_rate = direction * response_rate[row, step:end]
+      counter_rates.extend(np.maximum(-projected_rate, 0.0).tolist())
+    ramp_hold_dip_mean = float(np.mean(dips)) if dips else 0.0
+    ramp_hold_dip_p95 = float(np.percentile(dips, 95)) if dips else 0.0
+    ramp_hold_counter_rate_rms = (
+      float(np.sqrt(np.mean(np.square(counter_rates)))) if counter_rates else 0.0
+    )
+    ramp_hold_score = (
+      0.65 * ramp_hold_counter_rate_rms / 0.50
+      + 0.35 * ramp_hold_dip_mean / 0.05
+    )
+    return {
+      "score": float(highway_score + ramp_hold_score),
+      "highway_score": float(highway_score),
+      "highway_samples": int(np.count_nonzero(highway_quiet)),
+      "highway_shape_rate_error_rms_mps3": highway_shape_rate_error_rms,
+      "highway_steering_accel_rms_deg_s2": highway_steering_accel_rms,
+      "highway_command_slew_rms_per_s": highway_command_slew_rms,
+      "ramp_hold_score": float(ramp_hold_score),
+      "ramp_hold_events": int(np.count_nonzero(ramp_events)),
+      "ramp_hold_dip_mean_mps2": ramp_hold_dip_mean,
+      "ramp_hold_dip_p95_mps2": ramp_hold_dip_p95,
+      "ramp_hold_counter_rate_rms_mps3": ramp_hold_counter_rate_rms,
+    }
 
   def wobble_metrics(self, trace: RolloutTrace) -> dict[str, float]:
     desired = self.batch.target_desired
@@ -355,10 +452,13 @@ class ClosedLoopEvaluator:
         "bias": float(np.mean(values)),
       }
     transition_rmse = float(np.mean([phases[name]["rmse"] for name in ("turn_in_left", "turn_in_right", "unwind_left", "unwind_right")]))
-    active = np.abs(desired) >= 0.08
+    # Command regularization belongs to the controller's current reference,
+    # while tracking metrics belong to the delayed response reference above.
+    active = np.abs(self.batch.desired) >= 0.08
     command_delta_rms = float(np.sqrt(np.mean(command_delta[active] ** 2)))
     command_rms = float(np.sqrt(np.mean(commands[active] ** 2)))
     wobble = self.wobble_metrics(trace)
+    shape = self.shape_metrics(trace)
     objective = (
       transition_rmse
       + 0.20 * phases["center"]["rmse"]
@@ -366,6 +466,7 @@ class ClosedLoopEvaluator:
       + 0.08 * command_delta_rms
       + 0.02 * command_rms
       + self.wobble_weight * wobble["score"]
+      + 0.30 * shape["score"]
     )
     horizons = {
       f"{(step + 1) * self.dt:.2f}s": {
@@ -382,6 +483,7 @@ class ClosedLoopEvaluator:
       "command_delta_rms": command_delta_rms,
       "command_rms": command_rms,
       "wobble": wobble,
+      "shape": shape,
       "phases": phases,
       "horizons": horizons,
       "tune": asdict(tune),
@@ -395,7 +497,8 @@ class ClosedLoopEvaluator:
 
 
 def optimize(evaluator: ClosedLoopEvaluator, start: tune_math.Tune,
-             max_path_regression_fraction: float) -> tuple[tune_math.Tune, list[dict[str, Any]]]:
+             max_path_regression_fraction: float,
+             search_fields: set[str] | None = None) -> tuple[tune_math.Tune, list[dict[str, Any]]]:
   current = replace(start, name="closed_loop_start")
   best = evaluator.evaluate(current)
   history = [best]
@@ -417,13 +520,23 @@ def optimize(evaluator: ClosedLoopEvaluator, start: tune_math.Tune,
     "center_taper_lat_width": (0.01, 0.03, 0.12),
     "center_taper_speed_width": (0.20, 1.0, 5.0),
     "steady_high_lat_taper": (0.01, 0.0, 0.10),
+    "friction_jerk_gain": (0.03, 0.0, 0.30),
     "sustained_turn_in_ff_boost_left": (0.03, 0.0, 0.35),
     "sustained_turn_in_ff_boost_right": (0.03, 0.0, 0.35),
   }
+  if search_fields:
+    unknown_fields = search_fields - fields.keys()
+    if unknown_fields:
+      raise ValueError(f"Unknown tune search field(s): {', '.join(sorted(unknown_fields))}")
+    fields = {name: spec for name, spec in fields.items() if name in search_fields}
   for pass_index in range(3):
     improved = False
     for field, (initial_step, low, high) in fields.items():
       step = initial_step / (2 ** pass_index)
+      print(
+        f"coordinate pass={pass_index + 1}/3 field={field} step={step:.5f}",
+        flush=True,
+      )
       values = sorted({float(np.clip(getattr(current, field) + offset * step, low, high)) for offset in (-2, -1, 0, 1, 2)})
       candidates = [replace(current, name=f"search_{field}_{value:.4f}", **{field: value}) for value in values]
       results = evaluator.evaluate_many(candidates)
@@ -472,6 +585,12 @@ def main() -> None:
   parser.add_argument("--holdout-route-prefix", action="append", default=[])
   parser.add_argument("--diagnostic-route-prefix", action="append", default=[])
   parser.add_argument("--wobble-weight", type=float, default=0.12)
+  parser.add_argument(
+    "--response-delay-s",
+    type=float,
+    default=delay_alignment.DEFAULT_RESPONSE_DELAY_S,
+    help="Physical command-to-response delay represented in the tracking target.",
+  )
   parser.add_argument("--max-path-regression", type=float, default=0.01,
                       help="Maximum permitted fractional regression in transition and center path RMSE.")
   parser.add_argument("--random-state", type=int, default=23)
@@ -500,8 +619,20 @@ def main() -> None:
     holdout_routes = set(routes[1::2])
   history_steps = int(metadata["history_steps"])
   sample_period_s = float(metadata["sample_period_s"])
-  search_batch = build_batch(trajectories, search_routes, history_steps, args.rollout_steps, args.max_search_windows, args.random_state)
-  holdout_batch = build_batch(trajectories, holdout_routes, history_steps, args.rollout_steps, args.max_holdout_windows, args.random_state + 1)
+  try:
+    response_delay_steps, effective_response_delay_s = delay_alignment.quantize_response_delay(
+      args.response_delay_s, sample_period_s, history_steps - 1,
+    )
+  except ValueError as e:
+    raise SystemExit(str(e)) from e
+  search_batch = build_batch(
+    trajectories, search_routes, history_steps, args.rollout_steps,
+    args.max_search_windows, args.random_state, response_delay_steps,
+  )
+  holdout_batch = build_batch(
+    trajectories, holdout_routes, history_steps, args.rollout_steps,
+    args.max_holdout_windows, args.random_state + 1, response_delay_steps,
+  )
   print(f"closed-loop windows: search={len(search_batch.history)} holdout={len(holdout_batch.history)}")
 
   starting_tune = current_tune(args.starting_tune, args.starting_tune_variant)
@@ -511,8 +642,11 @@ def main() -> None:
   diagnostic_routes = routes_matching_prefixes(routes, args.diagnostic_route_prefix) if args.diagnostic_route_prefix else set()
   route_diagnostics = {}
   for index, route in enumerate(sorted(diagnostic_routes)):
-    batch = build_batch(trajectories, {route}, history_steps, args.rollout_steps, args.max_diagnostic_windows,
-                        args.random_state + 100 + index)
+    batch = build_batch(
+      trajectories, {route}, history_steps, args.rollout_steps,
+      args.max_diagnostic_windows, args.random_state + 100 + index,
+      response_delay_steps,
+    )
     evaluator = ClosedLoopEvaluator(model, batch, sample_period_s, args.wobble_weight)
     route_diagnostics[route] = {
       "windows": len(batch.history),
@@ -523,14 +657,17 @@ def main() -> None:
   result = {
     "plant_model": str(args.model),
     "starting_tune_report": str(args.starting_tune),
-    "alignment": "predicted state at each rollout timestamp is scored against desired lateral acceleration at that same timestamp",
+    "alignment": "predicted response at time t is scored against the command reference at t minus response_delay_s",
+    "requested_response_delay_s": args.response_delay_s,
+    "response_delay_steps": response_delay_steps,
+    "effective_response_delay_s": effective_response_delay_s,
     "rollout_steps": args.rollout_steps,
     "sample_period_s": sample_period_s,
     "search_routes": sorted(search_routes),
     "holdout_routes": sorted(holdout_routes),
     "search_windows": len(search_batch.history),
     "holdout_windows": len(holdout_batch.history),
-    "objective": f"balanced path RMSE + center RMSE + command cost + {args.wobble_weight:g} normalized wobble score",
+    "objective": f"balanced path RMSE + center RMSE + command cost + {args.wobble_weight:g} normalized wobble score + 0.30 highway/ramp-hold shape score",
     "wobble_weight": args.wobble_weight,
     "max_path_regression_fraction": args.max_path_regression,
     "wobble_horizon_s": args.rollout_steps * sample_period_s,

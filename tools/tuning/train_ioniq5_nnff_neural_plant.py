@@ -27,6 +27,7 @@ except ModuleNotFoundError as e:
   ) from e
 
 from openpilot.tools.tuning import train_goal_based_ioniq5_nnff as legacy
+from openpilot.tools.tuning import delay_alignment
 from openpilot.tools.tuning import train_lateral_plant_model as plant_data
 from openpilot.tools.tuning import train_neural_lateral_plant as neural_plant
 from openpilot.tools.tuning.train_ioniq5_nnff import INPUT_VARS as LEGACY_INPUT_VARS, flux_predict
@@ -75,6 +76,70 @@ class PolicyWindows:
       regimes=self.regimes[indexes],
       segments=[self.segments[index] for index in indexes],
     )
+
+
+class LearnedResponseDelay(torch.nn.Module):
+  def __init__(self, initial_s: float, minimum_s: float, maximum_s: float,
+               learnable: bool = True):
+    super().__init__()
+    self.minimum_s = float(minimum_s)
+    self.maximum_s = float(maximum_s)
+    fraction = (float(initial_s) - self.minimum_s) / (self.maximum_s - self.minimum_s)
+    fraction = float(np.clip(fraction, 1e-6, 1.0 - 1e-6))
+    raw = torch.logit(torch.tensor(fraction, dtype=torch.float32))
+    self.raw = torch.nn.Parameter(raw, requires_grad=learnable)
+
+  def forward(self) -> torch.Tensor:
+    fraction = torch.sigmoid(self.raw)
+    return self.minimum_s + (self.maximum_s - self.minimum_s) * fraction
+
+
+def optimizer_step_if_finite(
+  optimizer: torch.optim.Optimizer,
+  parameters: list[torch.nn.Parameter],
+  max_grad_norm: float,
+) -> float | None:
+  """Clip and apply one update, rejecting non-finite recurrent gradients."""
+  try:
+    grad_norm = torch.nn.utils.clip_grad_norm_(
+      parameters,
+      max_grad_norm,
+      error_if_nonfinite=True,
+    )
+  except RuntimeError:
+    optimizer.zero_grad(set_to_none=True)
+    return None
+  optimizer.step()
+  if not all(torch.isfinite(parameter).all() for parameter in parameters):
+    raise FloatingPointError("Optimizer produced a non-finite policy or response delay parameter.")
+  return float(grad_norm.detach().cpu())
+
+
+def delayed_reference(
+  values: torch.Tensor,
+  current_index: int,
+  rollout_steps: int,
+  response_delay_s: float | torch.Tensor,
+  sample_period_s: float,
+  first_offset: int = 1,
+) -> torch.Tensor:
+  """Linearly interpolate command references at response_time - delay."""
+  delay = torch.as_tensor(response_delay_s, dtype=values.dtype, device=values.device)
+  delay_samples = delay / sample_period_s
+  whole_samples = torch.floor(delay_samples)
+  fraction = delay_samples - whole_samples
+  whole = int(whole_samples.detach().cpu())
+  newer_start = current_index + first_offset - whole
+  newer_end = newer_start + rollout_steps
+  if newer_start < 0 or newer_end > values.shape[1]:
+    raise ValueError("Response delay reaches outside the available reference window.")
+  newer = values[:, newer_start:newer_end]
+  if newer_start == 0:
+    if float(fraction.detach().cpu()) > 1e-7:
+      raise ValueError("Fractional response delay reaches before available history.")
+    return newer
+  older = values[:, newer_start - 1:newer_end - 1]
+  return torch.lerp(newer, older, fraction)
 
 
 def path_offsets(sample_period_s: float) -> tuple[int, ...]:
@@ -136,7 +201,7 @@ def balanced_indexes(labels: np.ndarray, size: int, rng: np.random.Generator,
 
 def discover_trajectories(root: Path, prefixes: list[str], sample_step: int) -> list[plant_data.Trajectory]:
   paths = sorted({
-    path.resolve()
+    path.absolute()
     for prefix in prefixes
     for path in root.glob(f"{prefix}--*/rlog.zst")
   })
@@ -154,7 +219,8 @@ def discover_trajectories(root: Path, prefixes: list[str], sample_step: int) -> 
 
 def build_windows(trajectories: list[plant_data.Trajectory], history_steps: int,
                   rollout_steps: int, offsets: tuple[int, ...],
-                  window_stride: int, max_windows: int, seed: int) -> PolicyWindows:
+                  window_stride: int, max_windows: int, seed: int,
+                  response_delay_steps: int = 0) -> PolicyWindows:
   histories: list[np.ndarray] = []
   paths: list[np.ndarray] = []
   curvatures: list[np.ndarray] = []
@@ -169,12 +235,12 @@ def build_windows(trajectories: list[plant_data.Trajectory], history_steps: int,
 
   for trajectory in trajectories:
     values = trajectory.values
-    lower = max(history_steps - 1, -min(offsets))
+    lower = max(history_steps - 1, -min(offsets), response_delay_steps)
     upper = len(trajectory.times) - rollout_steps - max(offsets) - 1
     if upper <= lower:
       continue
     source = np.arange(lower, upper, window_stride)
-    active_index = source[:, None] + np.arange(rollout_steps + 1)
+    active_index = source[:, None] + np.arange(-response_delay_steps, rollout_steps + 1)
     path_index = source[:, None] + path_relative
     clean = (
       (values["lat_active"][active_index].min(axis=1) > 0.5)
@@ -335,7 +401,8 @@ class PlantPredictor:
 def rollout_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
                    policy_mean: torch.Tensor, policy_std: torch.Tensor,
                    batch: dict[str, torch.Tensor], offsets: tuple[int, ...],
-                   sample_period_s: float, command_rate_limit_per_s: float,
+                   sample_period_s: float, response_delay_s: float | torch.Tensor,
+                   command_rate_limit_per_s: float,
                    low_speed_angle_assist_gain: float,
                    low_speed_angle_assist_max: float) -> dict[str, torch.Tensor]:
   history = batch["history"].clone()
@@ -351,6 +418,10 @@ def rollout_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
   commands = []
   states = []
   disagreements = []
+  target_desired = delayed_reference(
+    batch["path"], current_index, batch["jerk"].shape[1],
+    response_delay_s, sample_period_s,
+  )
 
   def evaluate(values: torch.Tensor) -> torch.Tensor:
     return policy((values - policy_mean) / policy_std)[:, 0]
@@ -411,8 +482,7 @@ def rollout_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
       torch.clamp(next_state[:, index], lower, upper)
       for index, (lower, upper) in enumerate(STATE_CLAMPS)
     ])
-    target_desired = batch["path"][:, current_index + step + 1]
-    errors.append(next_state[:, actual_index] - target_desired)
+    errors.append(next_state[:, actual_index] - target_desired[:, step])
     commands.append(command)
     states.append(next_state)
     disagreements.append(disagreement)
@@ -435,23 +505,32 @@ def rollout_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
 
 def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
                 offsets: tuple[int, ...], sample_period_s: float,
+                response_delay_s: float | torch.Tensor,
                 command_rate_limit_per_s: float, wobble_weight: float,
                 uncertainty_weight: float, slew_weight: float,
                 inside_bias_weight: float, low_speed_angle_weight: float,
                 low_speed_rate_weight: float) -> tuple[torch.Tensor, dict[str, float]]:
   current_index = -min(offsets)
-  desired = torch.stack([
-    batch["path"][:, current_index + step + 1] for step in range(trace["errors"].shape[1])
-  ], dim=1)
-  jerk = batch["jerk"]
+  rollout_steps = trace["errors"].shape[1]
+  delayed_path = delayed_reference(
+    batch["path"], current_index, rollout_steps + 1,
+    response_delay_s, sample_period_s, first_offset=0,
+  )
+  previous_desired = delayed_path[:, 0]
+  desired = delayed_path[:, 1:]
+  jerk = torch.diff(
+    torch.cat((previous_desired[:, None], desired), dim=1), dim=1,
+  ) / sample_period_s
+  jerk = torch.clamp(jerk, -2.5, 2.5)
   speed = batch["v_ego"]
   error = trace["errors"]
   commands = trace["commands"]
-  curvature = torch.stack([
-    batch["curvature"][:, current_index + step + 1]
-    for step in range(trace["errors"].shape[1])
-  ], dim=1)
-  current_curvature = batch["curvature"][:, current_index]
+  delayed_curvature = delayed_reference(
+    batch["curvature"], current_index, rollout_steps + 1,
+    response_delay_s, sample_period_s, first_offset=0,
+  )
+  current_curvature = delayed_curvature[:, 0]
+  curvature = delayed_curvature[:, 1:]
   curvature_rate = torch.diff(
     torch.cat((current_curvature[:, None], curvature), dim=1),
     dim=1,
@@ -473,6 +552,32 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
   unwind = turn_signal < -0.01
   steady = (~center) & torch.where(low_speed, curvature_rate.abs() < 0.005, jerk.abs() < 0.08)
   steady_curve = steady & (curvature.abs() >= 0.003)
+  command_desired = batch["path"][:, current_index:current_index + rollout_steps]
+  command_jerk = batch["jerk"][:, :rollout_steps]
+  command_curvature = batch["curvature"][:, current_index:current_index + rollout_steps]
+  prior_command_curvature = batch["curvature"][:, current_index - 1]
+  command_curvature_rate = torch.diff(
+    torch.cat((prior_command_curvature[:, None], command_curvature), dim=1),
+    dim=1,
+  ) / sample_period_s
+  command_turn_signal = torch.where(
+    low_speed,
+    100.0 * command_curvature * command_curvature_rate,
+    command_desired * command_jerk,
+  )
+  command_turn_in = command_turn_signal > 0.01
+  command_sharp_turn_in = (
+    command_turn_in
+    & (
+      (command_desired.abs() >= 0.30)
+      | (command_jerk.abs() >= 0.55)
+      | (
+        low_speed
+        & ((command_curvature.abs() >= 0.01) | (command_curvature_rate.abs() >= 0.02))
+      )
+    )
+    & (speed < 18.0)
+  )
   signed_error = torch.sign(desired) * error
   inside = signed_error > 0.0
   weights = (
@@ -490,7 +595,11 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
   initial_command = batch["history"][:, 0, plant_data.BASE_FEATURES.index("applied_torque")]
   command_delta = torch.diff(torch.cat((initial_command[:, None], commands), dim=1), dim=1)
   normalized_delta = command_delta / max(command_rate_limit_per_s * sample_period_s, 1e-6)
-  slew_gate = torch.where(sharp_turn_in, 0.20, torch.where(turn_in, 0.55, torch.ones_like(error)))
+  slew_gate = torch.where(
+    command_sharp_turn_in,
+    0.20,
+    torch.where(command_turn_in, 0.55, torch.ones_like(error)),
+  )
   slew = (slew_gate * normalized_delta.square()).mean()
   effort = commands.square().mean()
   saturation = torch.relu(commands.abs() - 0.90).square().mean()
@@ -613,6 +722,7 @@ def policy_loss(trace: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
     "wobble": float(wobble.detach().cpu()),
     "uncertainty": float(uncertainty.detach().cpu()),
     "inside_bias_penalty": float(inside_bias.detach().cpu()),
+    "response_delay_s": float(torch.as_tensor(response_delay_s).detach().cpu()),
   }
 
 
@@ -620,7 +730,8 @@ def evaluate_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
                     policy_mean: torch.Tensor, policy_std: torch.Tensor,
                     windows: PolicyWindows, args: argparse.Namespace,
                     offsets: tuple[int, ...], sample_period_s: float,
-                    seed: int, low_speed_angle_assist_gain: float | None = None) -> dict[str, float]:
+                    seed: int, low_speed_angle_assist_gain: float | None = None,
+                    response_delay_s: float | torch.Tensor | None = None) -> dict[str, float]:
   rng = np.random.default_rng(seed)
   indexes = balanced_indexes(
     windows.regimes,
@@ -629,6 +740,8 @@ def evaluate_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
     windows.v_ego[:, 0],
   )
   totals: dict[str, list[tuple[float, int]]] = {}
+  if response_delay_s is None:
+    response_delay_s = args.response_delay_s
   policy.eval()
   with torch.no_grad():
     for start in range(0, len(indexes), args.policy_batch_size):
@@ -636,7 +749,7 @@ def evaluate_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
       batch = tensor_batch(windows, selected, args.torch_device)
       trace = rollout_policy(
         policy, plant, policy_mean, policy_std, batch, offsets,
-        sample_period_s, args.command_rate_limit_per_s,
+        sample_period_s, response_delay_s, args.command_rate_limit_per_s,
         (
           args.low_speed_angle_assist_gain
           if low_speed_angle_assist_gain is None
@@ -644,8 +757,23 @@ def evaluate_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
         ),
         args.low_speed_angle_assist_max,
       )
+      nonfinite_trace = {
+        name: torch.nonzero(~torch.isfinite(values), as_tuple=False)[:20].detach().cpu().tolist()
+        for name, values in trace.items()
+        if values.ndim > 0 and not torch.isfinite(values).all()
+      }
+      if nonfinite_trace:
+        selected_indexes = selected.detach().cpu().tolist() if torch.is_tensor(selected) else selected.tolist()
+        selected_segments = [windows.segments[index] for index in selected_indexes]
+        failure = {
+          "window_indexes": selected_indexes,
+          "segments": selected_segments,
+          "trace_rows": nonfinite_trace,
+        }
+        raise FloatingPointError(f"Non-finite neural-plant evaluation rollout: {failure}.")
       _, metrics = policy_loss(
-        trace, batch, offsets, sample_period_s, args.command_rate_limit_per_s,
+        trace, batch, offsets, sample_period_s, response_delay_s,
+        args.command_rate_limit_per_s,
         args.wobble_weight, args.uncertainty_weight, args.slew_weight,
         args.inside_bias_weight, args.low_speed_angle_weight,
         args.low_speed_rate_weight,
@@ -658,23 +786,138 @@ def evaluate_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
   }
 
 
+def baseline_stable_subset(
+  policy: legacy.FluxPolicy,
+  plant: PlantPredictor,
+  policy_mean: torch.Tensor,
+  policy_std: torch.Tensor,
+  windows: PolicyWindows,
+  args: argparse.Namespace,
+  offsets: tuple[int, ...],
+  sample_period_s: float,
+  seed: int,
+) -> tuple[PolicyWindows, dict[str, Any]]:
+  """Keep the balanced evaluation windows the frozen plant can simulate."""
+  rng = np.random.default_rng(seed)
+  indexes = balanced_indexes(
+    windows.regimes,
+    min(len(windows), args.max_policy_validation_windows),
+    rng,
+    windows.v_ego[:, 0],
+  )
+  stable_indexes: list[int] = []
+  excluded: list[dict[str, Any]] = []
+  policy.eval()
+  with torch.no_grad():
+    for start in range(0, len(indexes), args.policy_batch_size):
+      selected = indexes[start:start + args.policy_batch_size]
+      batch = tensor_batch(windows, selected, args.torch_device)
+      trace = rollout_policy(
+        policy, plant, policy_mean, policy_std, batch, offsets,
+        sample_period_s, args.response_delay_s, args.command_rate_limit_per_s,
+        0.0, args.low_speed_angle_assist_max,
+      )
+      stable = torch.ones(len(selected), dtype=torch.bool, device=args.torch_device)
+      for name in ("errors", "commands", "states", "disagreement"):
+        values = trace[name]
+        stable &= torch.isfinite(values).flatten(1).all(dim=1)
+      stable_rows = stable.detach().cpu().numpy()
+      stable_indexes.extend(selected[stable_rows].tolist())
+      for row in np.flatnonzero(~stable_rows):
+        window_index = int(selected[row])
+        excluded.append({
+          "window_index": window_index,
+          "segment": windows.segments[window_index],
+        })
+  if not stable_indexes:
+    raise FloatingPointError("The neural plant could not simulate any baseline evaluation windows.")
+  report = {
+    "selected_windows": len(indexes),
+    "stable_windows": len(stable_indexes),
+    "excluded_windows": len(excluded),
+    "excluded": excluded,
+  }
+  summary = " ".join([
+    f"baseline_stability selected={len(indexes)}",
+    f"stable={len(stable_indexes)}",
+    f"excluded={len(excluded)}",
+  ])
+  print(summary, flush=True)
+  return windows.subset(np.asarray(stable_indexes, dtype=np.int64)), report
+
+
+def validation_safety_checks(
+  validation: dict[str, float],
+  baseline: dict[str, float],
+  args: argparse.Namespace,
+) -> dict[str, bool]:
+  return {
+    "sharp_turn_in": validation["sharp_turn_in_rmse"]
+    <= baseline["sharp_turn_in_rmse"] * (1.0 + args.max_turn_in_accel_regression),
+    "turn_in": validation["turn_in_rmse"]
+    <= baseline["turn_in_rmse"] * (1.0 + args.max_turn_in_accel_regression),
+    "center": validation["center_rmse"]
+    <= baseline["center_rmse"] * (1.0 + args.max_center_regression),
+    "unwind": validation["unwind_rmse"]
+    <= baseline["unwind_rmse"] * (1.0 + args.max_unwind_regression),
+    "turn_in_bias": validation["turn_in_bias"]
+    <= max(baseline["turn_in_bias"] + args.max_inside_bias_increase, 0.01),
+    "unwind_bias": validation["unwind_bias"]
+    <= max(baseline["unwind_bias"] + args.max_inside_bias_increase, 0.01),
+    "wobble": validation["wobble"]
+    <= baseline["wobble"] * (1.0 + args.max_wobble_regression),
+    "slew": validation["slew"]
+    <= baseline["slew"] * (1.0 + args.max_slew_regression),
+    "uncertainty": validation["uncertainty"]
+    <= baseline["uncertainty"] * (1.0 + args.max_uncertainty_regression),
+    "intersection_angle": validation["intersection_angle_rmse_deg"]
+    <= baseline["intersection_angle_rmse_deg"]
+    * (1.0 - args.min_intersection_angle_improvement),
+    "low_speed_rate": validation["low_speed_rate_rmse_deg_s"]
+    <= baseline["low_speed_rate_rmse_deg_s"] * (1.0 + args.max_low_speed_rate_regression),
+    "steady_curve_inside": validation["steady_curve_inside_rmse"]
+    <= baseline["steady_curve_inside_rmse"] * (1.0 + args.max_steady_curve_inside_regression),
+    "steady_curve_bias": abs(validation["steady_curve_bias"])
+    <= abs(baseline["steady_curve_bias"])
+    * (1.0 - args.min_steady_curve_bias_improvement),
+  }
+
+
 def train_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
                   policy_mean: torch.Tensor, policy_std: torch.Tensor,
                   train_windows: PolicyWindows, validation_windows: PolicyWindows,
                   args: argparse.Namespace, offsets: tuple[int, ...],
-                  sample_period_s: float,
+                  sample_period_s: float, response_delay: LearnedResponseDelay,
                   baseline_policy: legacy.FluxPolicy | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
   baseline_policy = baseline_policy or policy
   initial = evaluate_policy(
     baseline_policy, plant, policy_mean, policy_std, validation_windows,
     args, offsets, sample_period_s, args.random_state + 2, 0.0,
+    args.response_delay_s,
   )
-  optimizer = torch.optim.AdamW(policy.parameters(), lr=args.policy_learning_rate, weight_decay=2e-5)
+  parameter_groups: list[dict[str, Any]] = [{
+    "params": list(policy.parameters()),
+    "lr": args.policy_learning_rate,
+    "weight_decay": 2e-5,
+  }]
+  if response_delay.raw.requires_grad:
+    parameter_groups.append({
+      "params": [response_delay.raw],
+      "lr": args.response_delay_learning_rate,
+      "weight_decay": 0.0,
+    })
+  optimizer = torch.optim.AdamW(parameter_groups)
+  trainable_parameters = list(policy.parameters())
+  if response_delay.raw.requires_grad:
+    trainable_parameters.append(response_delay.raw)
   rng = np.random.default_rng(args.random_state)
   best_state = copy.deepcopy(baseline_policy.state_dict())
+  best_delay_state = response_delay.raw.detach().clone()
   best_loss = initial["loss"]
   best_metrics = dict(initial)
+  best_safety_checks = validation_safety_checks(initial, initial, args)
   patience = 0
+  skipped_updates = 0
   started = perf_counter()
   epoch = 0
   for epoch in range(1, args.policy_epochs + 1):
@@ -688,51 +931,36 @@ def train_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
         train_windows.v_ego[:, 0],
       )
       batch = tensor_batch(train_windows, indexes, args.torch_device)
+      current_response_delay = response_delay()
       trace = rollout_policy(
         policy, plant, policy_mean, policy_std, batch, offsets,
-        sample_period_s, args.command_rate_limit_per_s,
+        sample_period_s, current_response_delay, args.command_rate_limit_per_s,
         args.low_speed_angle_assist_gain, args.low_speed_angle_assist_max,
       )
       loss, metrics = policy_loss(
-        trace, batch, offsets, sample_period_s, args.command_rate_limit_per_s,
+        trace, batch, offsets, sample_period_s, current_response_delay,
+        args.command_rate_limit_per_s,
         args.wobble_weight, args.uncertainty_weight, args.slew_weight,
         args.inside_bias_weight, args.low_speed_angle_weight,
         args.low_speed_rate_weight,
       )
       optimizer.zero_grad(set_to_none=True)
       loss.backward()
-      torch.nn.utils.clip_grad_norm_(policy.parameters(), 5.0)
-      optimizer.step()
+      if optimizer_step_if_finite(optimizer, trainable_parameters, 5.0) is None:
+        skipped_updates += 1
       train_losses.append(metrics["loss"])
     validation = evaluate_policy(
       policy, plant, policy_mean, policy_std, validation_windows,
       args, offsets, sample_period_s, args.random_state + 2,
+      response_delay_s=response_delay(),
     )
-    constrained = (
-      validation["sharp_turn_in_rmse"]
-      <= initial["sharp_turn_in_rmse"] * (1.0 + args.max_turn_in_accel_regression)
-      and validation["turn_in_rmse"]
-      <= initial["turn_in_rmse"] * (1.0 + args.max_turn_in_accel_regression)
-      and validation["center_rmse"] <= initial["center_rmse"] * (1.0 + args.max_center_regression)
-      and validation["unwind_rmse"] <= initial["unwind_rmse"] * (1.0 + args.max_unwind_regression)
-      and validation["turn_in_bias"] <= max(initial["turn_in_bias"] + args.max_inside_bias_increase, 0.01)
-      and validation["unwind_bias"] <= max(initial["unwind_bias"] + args.max_inside_bias_increase, 0.01)
-      and validation["wobble"] <= initial["wobble"] * (1.0 + args.max_wobble_regression)
-      and validation["slew"] <= initial["slew"] * (1.0 + args.max_slew_regression)
-      and validation["uncertainty"] <= initial["uncertainty"] * (1.0 + args.max_uncertainty_regression)
-      and validation["intersection_angle_rmse_deg"]
-      <= initial["intersection_angle_rmse_deg"] * (1.0 - args.min_intersection_angle_improvement)
-      and validation["low_speed_rate_rmse_deg_s"]
-      <= initial["low_speed_rate_rmse_deg_s"] * (1.0 + args.max_low_speed_rate_regression)
-      and validation["steady_curve_inside_rmse"]
-      <= initial["steady_curve_inside_rmse"] * (1.0 + args.max_steady_curve_inside_regression)
-      and abs(validation["steady_curve_bias"])
-      <= abs(initial["steady_curve_bias"]) * (1.0 - args.min_steady_curve_bias_improvement)
-    )
-    if constrained and validation["loss"] < best_loss - 2e-5:
+    safety_checks = validation_safety_checks(validation, initial, args)
+    if validation["loss"] < best_loss - 2e-5:
       best_loss = validation["loss"]
       best_metrics = dict(validation)
+      best_safety_checks = dict(safety_checks)
       best_state = copy.deepcopy(policy.state_dict())
+      best_delay_state = response_delay.raw.detach().clone()
       patience = 0
     else:
       patience += 1
@@ -746,15 +974,38 @@ def train_policy(policy: legacy.FluxPolicy, plant: PlantPredictor,
           f"intersection_angle={validation['intersection_angle_rmse_deg']:.3f}",
           f"low_speed_rate={validation['low_speed_rate_rmse_deg_s']:.3f}",
           f"unwind_bias={validation['unwind_bias']:+.6f}",
+          f"delay={validation['response_delay_s']:.4f}s",
+          f"skipped={skipped_updates}",
         ])
         print(progress, flush=True)
     if patience >= args.policy_patience:
       break
   policy.load_state_dict(best_state)
+  with torch.no_grad():
+    response_delay.raw.copy_(best_delay_state)
   policy.eval()
+  optimized_delay_s = float(response_delay().detach().cpu())
+  aligned_initial = evaluate_policy(
+    baseline_policy, plant, policy_mean, policy_std, validation_windows,
+    args, offsets, sample_period_s, args.random_state + 2, 0.0,
+    optimized_delay_s,
+  )
   return (
-    {"initial": initial, "optimized": best_metrics},
-    {"epochs": epoch, "fit_seconds": perf_counter() - started},
+    {
+      "initial": aligned_initial,
+      "initial_at_seed_delay": initial,
+      "optimized": best_metrics,
+      "optimized_safe": all(best_safety_checks.values()),
+      "optimized_safety_checks": best_safety_checks,
+    },
+    {
+      "epochs": epoch,
+      "fit_seconds": perf_counter() - started,
+      "initial_response_delay_s": args.response_delay_s,
+      "optimized_response_delay_s": optimized_delay_s,
+      "response_delay_learned": response_delay.raw.requires_grad,
+      "skipped_nonfinite_updates": skipped_updates,
+    },
   )
 
 
@@ -778,6 +1029,8 @@ def export_policy(policy: legacy.FluxPolicy, mean: np.ndarray, std: np.ndarray,
     "output_size": 1,
     "training_car": "HYUNDAI_IONIQ_5",
     "training_method": report.get("method", "goal_based_speed_conditioned_plant"),
+    "response_delay_s": objective.get("optimized_response_delay_s", 0.0),
+    "response_delay_samples": objective.get("optimized_response_delay_samples", 0.0),
     "low_speed_angle_assist_gain": objective.get("low_speed_angle_assist_gain", 0.0),
     "low_speed_angle_assist_max": objective.get("low_speed_angle_assist_max", 0.0),
     "training_rows": report["data"]["train_windows"],
@@ -823,6 +1076,28 @@ def main() -> None:
   parser.add_argument("--max-policy-validation-windows", type=int, default=2000)
   parser.add_argument("--policy-stats-rows", type=int, default=20000)
   parser.add_argument("--command-rate-limit-per-s", type=float, default=1.5)
+  parser.add_argument(
+    "--response-delay-s",
+    type=float,
+    default=delay_alignment.DEFAULT_RESPONSE_DELAY_S,
+    help="Initial physical command-to-response delay for joint optimization.",
+  )
+  parser.add_argument(
+    "--response-delay-min-s",
+    type=float,
+    default=delay_alignment.DEFAULT_RESPONSE_DELAY_MIN_S,
+  )
+  parser.add_argument(
+    "--response-delay-max-s",
+    type=float,
+    default=delay_alignment.DEFAULT_RESPONSE_DELAY_MAX_S,
+  )
+  parser.add_argument("--response-delay-learning-rate", type=float, default=5e-3)
+  parser.add_argument(
+    "--fixed-response-delay",
+    action="store_true",
+    help="Keep --response-delay-s fixed instead of learning it with the policy.",
+  )
   parser.add_argument("--wobble-weight", type=float, default=0.003)
   parser.add_argument("--uncertainty-weight", type=float, default=0.01)
   parser.add_argument("--slew-weight", type=float, default=0.01)
@@ -838,10 +1113,10 @@ def main() -> None:
   parser.add_argument("--max-turn-in-accel-regression", type=float, default=0.05)
   parser.add_argument("--max-uncertainty-regression", type=float, default=0.10)
   parser.add_argument("--max-inside-bias-increase", type=float, default=0.01)
-  parser.add_argument("--min-intersection-angle-improvement", type=float, default=0.01)
+  parser.add_argument("--min-intersection-angle-improvement", type=float, default=0.0)
   parser.add_argument("--max-low-speed-rate-regression", type=float, default=0.02)
   parser.add_argument("--max-steady-curve-inside-regression", type=float, default=0.02)
-  parser.add_argument("--min-steady-curve-bias-improvement", type=float, default=0.01)
+  parser.add_argument("--min-steady-curve-bias-improvement", type=float, default=0.0)
   parser.add_argument(
     "--hidden-sizes",
     type=int,
@@ -882,12 +1157,26 @@ def main() -> None:
   config = neural_plant.ModelConfig(**plant_payload["config"])
   sample_period_s = config.sample_period_s
   offsets = path_offsets(sample_period_s)
+  current_index = -min(offsets)
+  try:
+    max_response_delay_steps = delay_alignment.validate_response_delay_range(
+      args.response_delay_s,
+      args.response_delay_min_s,
+      args.response_delay_max_s,
+      sample_period_s,
+      current_index,
+    )
+  except ValueError as e:
+    raise SystemExit(str(e)) from e
   plant_summary = " ".join([
     f"plant={config.name}",
     f"device={args.torch_device}",
     f"history={config.history_s:.2f}s",
     f"rollout={args.rollout_steps * sample_period_s:.2f}s",
     f"offsets={offsets}",
+    f"response_delay={args.response_delay_s:.3f}s",
+    f"delay_range={args.response_delay_min_s:.3f}-{args.response_delay_max_s:.3f}s",
+    f"learn_delay={not args.fixed_response_delay}",
   ])
   print(plant_summary, flush=True)
   train_trajectories = discover_trajectories(args.log_root, args.train_route_prefix, config.sample_step)
@@ -900,14 +1189,17 @@ def main() -> None:
   train_windows = build_windows(
     train_trajectories, config.history_steps, args.rollout_steps, offsets,
     args.window_stride, args.max_train_windows, args.random_state,
+    max_response_delay_steps,
   )
   validation_windows = build_windows(
     validation_trajectories, config.history_steps, args.rollout_steps, offsets,
     args.window_stride, args.max_validation_windows, args.random_state + 1,
+    max_response_delay_steps,
   )
   holdout_windows = build_windows(
     holdout_trajectories, config.history_steps, args.rollout_steps, offsets,
     args.window_stride, args.max_holdout_windows, args.random_state + 2,
+    max_response_delay_steps,
   )
 
   policy_mean_np, policy_std_np = policy_input_stats(
@@ -961,21 +1253,46 @@ def main() -> None:
     )
     baseline_policy.eval()
 
-  holdout_initial = evaluate_policy(
+  response_delay = LearnedResponseDelay(
+    args.response_delay_s,
+    args.response_delay_min_s,
+    args.response_delay_max_s,
+    learnable=not args.fixed_response_delay,
+  ).to(args.torch_device)
+
+  validation_windows, validation_stability = baseline_stable_subset(
+    baseline_policy, plant, policy_mean, policy_std, validation_windows,
+    args, offsets, sample_period_s, args.random_state + 2,
+  )
+  holdout_windows, holdout_stability = baseline_stable_subset(
+    baseline_policy, plant, policy_mean, policy_std, holdout_windows,
+    args, offsets, sample_period_s, args.random_state + 3,
+  )
+  holdout_initial_at_seed_delay = evaluate_policy(
     baseline_policy, plant, policy_mean, policy_std, holdout_windows,
     args, offsets, sample_period_s, args.random_state + 3, 0.0,
+    args.response_delay_s,
   )
   validation_report, policy_fit = train_policy(
     policy, plant, policy_mean, policy_std,
     train_windows, validation_windows, args, offsets, sample_period_s,
+    response_delay,
     baseline_policy,
+  )
+  optimized_response_delay_s = float(response_delay().detach().cpu())
+  holdout_initial = evaluate_policy(
+    baseline_policy, plant, policy_mean, policy_std, holdout_windows,
+    args, offsets, sample_period_s, args.random_state + 3, 0.0,
+    optimized_response_delay_s,
   )
   holdout_optimized = evaluate_policy(
     policy, plant, policy_mean, policy_std, holdout_windows,
     args, offsets, sample_period_s, args.random_state + 3,
+    response_delay_s=optimized_response_delay_s,
   )
   accepted = (
-    validation_report["optimized"]["loss"] < validation_report["initial"]["loss"]
+    validation_report["optimized_safe"]
+    and validation_report["optimized"]["loss"] < validation_report["initial"]["loss"]
     and holdout_optimized["rmse"] <= holdout_initial["rmse"] * 1.02
     and holdout_optimized["sharp_turn_in_rmse"]
     <= holdout_initial["sharp_turn_in_rmse"] * (1.0 + args.max_turn_in_accel_regression)
@@ -1022,8 +1339,20 @@ def main() -> None:
       "train_regimes": dict(Counter(train_windows.regimes)),
       "validation_regimes": dict(Counter(validation_windows.regimes)),
       "holdout_regimes": dict(Counter(holdout_windows.regimes)),
+      "baseline_stability": {
+        "validation": validation_stability,
+        "holdout": holdout_stability,
+      },
     },
     "objective": {
+      "alignment": "predicted response at time t is scored against the command reference at t minus response_delay_s",
+      "response_delay_learned": not args.fixed_response_delay,
+      "initial_response_delay_s": args.response_delay_s,
+      "minimum_response_delay_s": args.response_delay_min_s,
+      "maximum_response_delay_s": args.response_delay_max_s,
+      "optimized_response_delay_s": optimized_response_delay_s,
+      "optimized_response_delay_samples": optimized_response_delay_s / sample_period_s,
+      "response_delay_learning_rate": args.response_delay_learning_rate,
       "balanced_regimes": list(REGIMES),
       "sharp_turn_in_extra_weight": 3.0,
       "inside_error_extra_weight": 0.75,
@@ -1053,6 +1382,7 @@ def main() -> None:
     "validation": validation_report,
     "holdout": {
       "initial": holdout_initial,
+      "initial_at_seed_delay": holdout_initial_at_seed_delay,
       "optimized": holdout_optimized,
     },
     "policy_fit": policy_fit,

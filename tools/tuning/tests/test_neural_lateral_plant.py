@@ -653,6 +653,179 @@ def test_nnff_policy_offsets_preserve_runtime_horizons() -> None:
   assert nnff_policy.path_offsets(0.01) == (-30, -20, -10, 40, 70, 110, 160)
 
 
+def test_nnff_policy_rollout_scores_response_against_delayed_reference() -> None:
+  class ZeroPolicy(torch.nn.Module):
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+      return torch.zeros((len(values), 1), dtype=values.dtype, device=values.device)
+
+  class ZeroPlant:
+    stats = {"state_std": torch.ones(len(plant_data.STATE_FEATURES))}
+
+    def predict(self, history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+      shape = (len(history), len(plant_data.STATE_FEATURES))
+      zeros = torch.zeros(shape, dtype=history.dtype, device=history.device)
+      return zeros, zeros
+
+  offsets = nnff_policy.path_offsets(0.05)
+  current_index = -min(offsets)
+  rollout_steps = 3
+  history = torch.zeros((1, 2, len(plant_data.BASE_FEATURES)))
+  path = torch.arange(50, dtype=torch.float32)[None, :] / 10.0
+  batch = {
+    "history": history,
+    "path": path,
+    "curvature": torch.zeros_like(path),
+    "jerk": torch.zeros((1, rollout_steps)),
+    "v_ego": torch.full((1, rollout_steps), 10.0),
+    "a_ego": torch.zeros((1, rollout_steps)),
+  }
+  trace = nnff_policy.rollout_policy(
+    ZeroPolicy(), ZeroPlant(),
+    torch.zeros(len(nnff_policy.INPUT_VARS)),
+    torch.ones(len(nnff_policy.INPUT_VARS)),
+    batch, offsets, 0.05, 0.10, 1.5, 0.0, 0.25,
+  )
+
+  expected_reference = path[:, current_index - 1:current_index + 2]
+  assert torch.allclose(trace["errors"], -expected_reference)
+
+
+def test_nnff_policy_interpolates_fractional_response_delay() -> None:
+  values = torch.arange(20, dtype=torch.float32)[None, :]
+  reference = nnff_policy.delayed_reference(
+    values, current_index=6, rollout_steps=3,
+    response_delay_s=torch.tensor(0.075), sample_period_s=0.05,
+  )
+  assert torch.allclose(reference, torch.tensor([[5.5, 6.5, 7.5]]))
+
+
+def test_nnff_policy_can_learn_continuous_response_delay() -> None:
+  values = torch.arange(30, dtype=torch.float32)[None, :]
+  target = nnff_policy.delayed_reference(
+    values, current_index=6, rollout_steps=5,
+    response_delay_s=0.22, sample_period_s=0.05,
+  )
+  response_delay = nnff_policy.LearnedResponseDelay(0.05, 0.0, 0.30)
+  optimizer = torch.optim.Adam([response_delay.raw], lr=0.1)
+  for _ in range(100):
+    prediction = nnff_policy.delayed_reference(
+      values, current_index=6, rollout_steps=5,
+      response_delay_s=response_delay(), sample_period_s=0.05,
+    )
+    loss = (prediction - target).square().mean()
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+  assert float(response_delay().detach()) == pytest.approx(0.22, abs=2e-3)
+
+
+def test_optimizer_step_rejects_nonfinite_gradients() -> None:
+  parameter = torch.nn.Parameter(torch.tensor(1.0))
+  optimizer = torch.optim.SGD([parameter], lr=0.1)
+
+  parameter.grad = torch.tensor(2.0)
+  grad_norm = nnff_policy.optimizer_step_if_finite(optimizer, [parameter], 5.0)
+  assert grad_norm == pytest.approx(2.0)
+  assert float(parameter.detach()) == pytest.approx(0.8)
+
+  parameter.grad = torch.tensor(float("inf"))
+  before = parameter.detach().clone()
+  assert nnff_policy.optimizer_step_if_finite(optimizer, [parameter], 5.0) is None
+  assert torch.equal(parameter.detach(), before)
+  assert parameter.grad is None
+
+
+def test_baseline_stability_excludes_only_nonfinite_windows(monkeypatch) -> None:
+  window_count = 4
+  histories = np.zeros(
+    (window_count, 1, len(plant_data.BASE_FEATURES)), dtype=np.float32,
+  )
+  histories[:, 0, 0] = np.arange(window_count)
+  windows = nnff_policy.PolicyWindows(
+    history=histories,
+    path=np.zeros((window_count, 1), dtype=np.float32),
+    curvature=np.zeros((window_count, 1), dtype=np.float32),
+    jerk=np.zeros((window_count, 1), dtype=np.float32),
+    v_ego=np.ones((window_count, 1), dtype=np.float32),
+    a_ego=np.zeros((window_count, 1), dtype=np.float32),
+    regimes=np.asarray(["steady"] * window_count),
+    segments=[f"segment-{index}" for index in range(window_count)],
+  )
+
+  def fake_rollout(*_args, **_kwargs):
+    batch = _args[4]
+    rows = len(batch["history"])
+    states = torch.zeros((rows, 1, len(plant_data.STATE_FEATURES)))
+    invalid = batch["history"][:, 0, 0] == 2
+    states[invalid] = float("nan")
+    return {
+      "errors": states[:, :, 0],
+      "commands": torch.zeros((rows, 1)),
+      "states": states,
+      "disagreement": torch.zeros_like(states),
+    }
+
+  monkeypatch.setattr(nnff_policy, "rollout_policy", fake_rollout)
+  args = SimpleNamespace(
+    max_policy_validation_windows=window_count,
+    policy_batch_size=window_count,
+    torch_device=torch.device("cpu"),
+    response_delay_s=0.1,
+    command_rate_limit_per_s=1.5,
+    low_speed_angle_assist_max=0.25,
+  )
+  stable, report = nnff_policy.baseline_stable_subset(
+    torch.nn.Identity(), None,
+    torch.zeros(len(nnff_policy.INPUT_VARS)),
+    torch.ones(len(nnff_policy.INPUT_VARS)),
+    windows, args, (0,), 0.01, 23,
+  )
+
+  assert len(stable) == 3
+  assert report["excluded_windows"] == 1
+  assert report["excluded"] == [{"window_index": 2, "segment": "segment-2"}]
+
+
+def test_validation_safety_gate_allows_baseline_at_zero_minimum_improvement() -> None:
+  metrics = {
+    "sharp_turn_in_rmse": 1.0,
+    "turn_in_rmse": 1.0,
+    "center_rmse": 1.0,
+    "unwind_rmse": 1.0,
+    "turn_in_bias": -0.1,
+    "unwind_bias": -0.1,
+    "wobble": 1.0,
+    "slew": 1.0,
+    "uncertainty": 1.0,
+    "intersection_angle_rmse_deg": 1.0,
+    "low_speed_rate_rmse_deg_s": 1.0,
+    "steady_curve_inside_rmse": 1.0,
+    "steady_curve_bias": -0.1,
+  }
+  args = SimpleNamespace(
+    max_turn_in_accel_regression=0.0,
+    max_center_regression=0.0,
+    max_unwind_regression=0.0,
+    max_inside_bias_increase=0.0,
+    max_wobble_regression=0.0,
+    max_slew_regression=0.0,
+    max_uncertainty_regression=0.0,
+    min_intersection_angle_improvement=0.0,
+    max_low_speed_rate_regression=0.0,
+    max_steady_curve_inside_regression=0.0,
+    min_steady_curve_bias_improvement=0.0,
+  )
+
+  checks = nnff_policy.validation_safety_checks(metrics, metrics, args)
+
+  assert all(checks.values())
+  args.min_intersection_angle_improvement = 0.01
+  args.min_steady_curve_bias_improvement = 0.01
+  checks = nnff_policy.validation_safety_checks(metrics, metrics, args)
+  assert not checks["intersection_angle"]
+  assert not checks["steady_curve_bias"]
+
+
 def test_nnff_policy_export_matches_runtime_schema() -> None:
   report = {
     "validation": {"optimized": {"rmse": 0.1}},
@@ -674,6 +847,8 @@ def test_nnff_policy_export_matches_runtime_schema() -> None:
   assert payload["input_vars"] == list(nnff_policy.INPUT_VARS)
   assert payload["input_vars"][-1] == "desired_curvature"
   assert payload["low_speed_angle_assist_gain"] == 0.0
+  assert payload["response_delay_s"] == 0.0
+  assert payload["response_delay_samples"] == 0.0
 
 
 def test_nnff_policy_regime_sampler_balances_rare_turns() -> None:

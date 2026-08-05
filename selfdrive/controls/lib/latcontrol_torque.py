@@ -223,7 +223,14 @@ class LatControlTorque(LatControl):
 
     if turn_exit and self.ioniq_5_reversal_damping_timer > 0.0:
       return -measurement_rate * IONIQ_5_REVERSAL_DAMPING_GAIN / IONIQ_5_DAMPING_GAIN
-    return -measurement_rate
+    if turn_exit:
+      return -measurement_rate
+    damping_gain = np.interp(
+      v_ego,
+      [IONIQ_5_HIGHWAY_DAMPING_START_SPEED, IONIQ_5_HIGHWAY_DAMPING_FULL_SPEED],
+      [IONIQ_5_DAMPING_GAIN, IONIQ_5_HIGHWAY_DAMPING_GAIN],
+    )
+    return -measurement_rate * damping_gain / IONIQ_5_DAMPING_GAIN
 
   def update(self, active, CS, VM, params, steer_limited_by_safety, desired_curvature, curvature_limited, lat_delay, calibrated_pose, model_data, starpilot_toggles):
     pid_log = log.ControlsState.LateralTorqueState.new_message()
@@ -448,7 +455,11 @@ class LatControlTorque(LatControl):
       if ioniq_6_active:
         # planner jerk noise on straights (< ~0.3 m/s^3) chatters the friction compensation
         friction_jerk = math.copysign(max(abs(desired_lateral_jerk) - IONIQ_6_FRICTION_JERK_DEADZONE, 0.0), desired_lateral_jerk)
-      ff += friction_scale * get_friction(error_with_lsf + JERK_GAIN * friction_jerk, lateral_accel_deadzone, friction_threshold, self.torque_params)
+      friction_jerk_gain = IONIQ_5_FRICTION_JERK_GAIN if ioniq_5_active else JERK_GAIN
+      ff += friction_scale * get_friction(
+        error_with_lsf + friction_jerk_gain * friction_jerk,
+        lateral_accel_deadzone, friction_threshold, self.torque_params,
+      )
       deadzone_boost_active = False
       if self.torque_deadzone_boost > 0.0 and abs(gravity_adjusted_future_lateral_accel) < DEADZONE_BOOST_LAT_ACCEL:
         boost_scale = np.interp(abs(gravity_adjusted_future_lateral_accel), [0.0, DEADZONE_BOOST_LAT_ACCEL], [1.0, 0.0])

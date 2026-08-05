@@ -71,6 +71,7 @@ class Tune:
   steady_high_lat_width: float = 0.12
   steady_jerk_width: float = 0.08
   hkg_friction_threshold: bool = False
+  friction_jerk_gain: float = JERK_GAIN
 
 
 LOGGED_TUNE = Tune(
@@ -184,7 +185,9 @@ def tune_terms(tune: Tune, desired: np.ndarray, jerk: np.ndarray, speed: np.ndar
   friction_scale *= tune.friction_scale_mult
 
   lat_factor = BASE_LAT_ACCEL_FACTOR * tune.base_lat_accel_factor_mult
-  friction = np.clip((error + JERK_GAIN * jerk) / threshold, -1.0, 1.0) * BASE_FRICTION * lat_factor
+  friction = np.clip(
+    (error + tune.friction_jerk_gain * jerk) / threshold, -1.0, 1.0,
+  ) * BASE_FRICTION * lat_factor
   feedforward = desired * ff_scale * center_taper + friction_scale * friction
   return feedforward, np.full_like(desired, lat_factor)
 

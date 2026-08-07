@@ -2,6 +2,8 @@ package journal
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,6 +139,220 @@ func TestFailedUpdateDoesNotCommit(t *testing.T) {
 	}
 	if store.Snapshot().Paused {
 		t.Fatal("failed update mutated in-memory journal")
+	}
+}
+
+func TestViewRemainsStableAcrossUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(func(data *state.Journal) error {
+		data.Files["file"] = state.File{ID: "file", State: state.FileSpooled}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view := store.View()
+	if err := store.Update(func(data *state.Journal) error {
+		file := data.Files["file"]
+		file.State = state.FileDurable
+		data.Files["file"] = file
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if view.Files["file"].State != state.FileSpooled {
+		t.Fatalf("read-only view changed with later generation: %#v", view.Files["file"])
+	}
+	if store.View().Files["file"].State != state.FileDurable {
+		t.Fatal("updated generation was not installed")
+	}
+}
+
+func TestUpdateFileUsesWriteAheadLogAndReplays(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(func(data *state.Journal) error {
+		data.Files["file"] = state.File{
+			ID: "file", State: state.FileSpooled, CompletionEvidence: []string{"route_closed"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	baseBefore, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := store.View()
+	if err := store.UpdateFile("file", func(
+		file *state.File,
+		counters *state.Counters,
+	) (bool, error) {
+		file.State = state.FileUploading
+		file.UploadID = "session"
+		file.UploadOffset = 8 * 1024 * 1024
+		counters.BytesUploaded += 8 * 1024 * 1024
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	baseAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(baseAfter) != string(baseBefore) {
+		t.Fatal("single-file update rewrote the journal snapshot")
+	}
+	if view.Files["file"].State != state.FileSpooled {
+		t.Fatal("single-file update mutated an existing read-only generation")
+	}
+	if info, err := os.Stat(path + ".wal"); err != nil || info.Size() == 0 {
+		t.Fatalf("file mutation WAL was not written: info=%v err=%v", info, err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := reopened.View().Files["file"]
+	if file.State != state.FileUploading || file.UploadID != "session" ||
+		file.UploadOffset != 8*1024*1024 {
+		t.Fatalf("file mutation was not replayed: %#v", file)
+	}
+	if reopened.View().Counters.BytesUploaded != 8*1024*1024 ||
+		reopened.View().MutationSequence != 1 {
+		t.Fatalf("mutation metadata was not replayed: %#v", reopened.View())
+	}
+	if err := reopened.Checkpoint(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + ".wal"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("checkpoint retained the WAL: %v", err)
+	}
+	baseOnly, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseOnly.View().Files["file"].UploadOffset != 8*1024*1024 ||
+		baseOnly.View().MutationSequence != 1 {
+		t.Fatalf("checkpoint did not preserve the WAL state: %#v", baseOnly.View())
+	}
+}
+
+func TestFullUpdateMakesStaleFileMutationLogHarmless(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(func(data *state.Journal) error {
+		data.Files["file"] = state.File{ID: "file", State: state.FileSpooled}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateFile("file", func(
+		file *state.File,
+		_ *state.Counters,
+	) (bool, error) {
+		file.State = state.FileUploading
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	staleWAL, err := os.ReadFile(path + ".wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(func(data *state.Journal) error {
+		file := data.Files["file"]
+		file.State = state.FileDurable
+		data.Files["file"] = file
+		data.Paused = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Model a crash after the new snapshot was renamed but before its stale WAL
+	// could be unlinked.
+	if err := os.WriteFile(path+".wal", staleWAL, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reopened.View().Paused || reopened.View().Files["file"].State != state.FileDurable {
+		t.Fatalf("stale WAL overrode the checkpoint: %#v", reopened.View())
+	}
+}
+
+func TestReplayIgnoresIncompleteFinalFileMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(func(data *state.Journal) error {
+		data.Files["file"] = state.File{ID: "file", State: state.FileSpooled}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateFile("file", func(
+		file *state.File,
+		_ *state.Counters,
+	) (bool, error) {
+		file.State = state.FileUploading
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wal, err := os.OpenFile(path+".wal", os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wal.WriteString(`{"version":1,"sequence":2`); err != nil {
+		wal.Close()
+		t.Fatal(err)
+	}
+	if err := wal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.View().MutationSequence != 1 ||
+		reopened.View().Files["file"].State != state.FileUploading {
+		t.Fatalf("valid WAL prefix was not retained: %#v", reopened.View())
+	}
+}
+
+func TestViewDoesNotAllocateByJournalSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(func(data *state.Journal) error {
+		for index := 0; index < 1_000; index++ {
+			id := fmt.Sprintf("file-%04d", index)
+			data.Files[id] = state.File{ID: id, State: state.FileSpooled}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if allocations := testing.AllocsPerRun(100, func() {
+		_ = store.View()
+	}); allocations != 0 {
+		t.Fatalf("journal view allocated %.1f objects per read", allocations)
 	}
 }
 

@@ -164,15 +164,16 @@ type Counters struct {
 }
 
 type Journal struct {
-	Version       int                           `json:"version"`
-	Paused        bool                          `json:"paused"`
-	Observations  map[string]Observation        `json:"observations"`
-	Files         map[string]File               `json:"files"`
-	Cancellations map[string]UploadCancellation `json:"upload_cancellations"`
-	Inventories   map[string]RouteInventory     `json:"route_inventories"`
-	Commands      map[string]CommandRecord      `json:"commands"`
-	Counters      Counters                      `json:"counters"`
-	LastScanAt    time.Time                     `json:"last_scan_at,omitempty"`
+	Version          int                           `json:"version"`
+	MutationSequence uint64                        `json:"mutation_sequence,omitempty"`
+	Paused           bool                          `json:"paused"`
+	Observations     map[string]Observation        `json:"observations"`
+	Files            map[string]File               `json:"files"`
+	Cancellations    map[string]UploadCancellation `json:"upload_cancellations"`
+	Inventories      map[string]RouteInventory     `json:"route_inventories"`
+	Commands         map[string]CommandRecord      `json:"commands"`
+	Counters         Counters                      `json:"counters"`
+	LastScanAt       time.Time                     `json:"last_scan_at,omitempty"`
 }
 
 func EmptyJournal() Journal {

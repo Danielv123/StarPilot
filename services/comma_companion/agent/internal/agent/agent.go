@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"starpilot.local/comma-companion-agent/internal/api"
@@ -44,6 +45,8 @@ type Agent struct {
 	rescan    chan struct{}
 	actions   chan commands.ActionRequest
 	reconcile spoolreconcile.Result
+	scanMu    sync.RWMutex
+	lastScan  scanner.Result
 	ready     bool
 }
 
@@ -154,14 +157,33 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Agent, error) 
 	return result, nil
 }
 
-func (a *Agent) Run(ctx context.Context) error {
+func (a *Agent) Run(ctx context.Context) (result error) {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	defer a.lock.Close()
+	var workers sync.WaitGroup
+	defer func() {
+		cancel()
+		workers.Wait()
+		if err := a.journal.Checkpoint(); err != nil {
+			checkpointError := fmt.Errorf("checkpoint journal during shutdown: %w", err)
+			if errors.Is(result, context.Canceled) {
+				result = checkpointError
+			} else {
+				result = errors.Join(result, checkpointError)
+			}
+		}
+		_ = a.lock.Close()
+	}()
 	a.storage.Enforce()
-	go a.scanLoop(ctx)
-	go a.uploadLoop(ctx)
-	go a.heartbeatLoop(ctx)
+	start := func(loop func(context.Context)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			loop(ctx)
+		}()
+	}
+	start(a.scanLoop)
+	start(a.uploadLoop)
+	start(a.heartbeatLoop)
 
 	for {
 		select {
@@ -223,17 +245,20 @@ func (a *Agent) scanLoop(ctx context.Context) {
 			timer.Reset(a.config.ScanInterval.Duration)
 			continue
 		}
-		if a.config.Policy.UploadOnlyOffroad &&
-			(!status.OffroadKnown || !status.Offroad || !status.OffroadSourceFresh) {
-			timer.Reset(a.config.ScanInterval.Duration)
-			continue
-		}
+		policyAllowsSpooling := !a.config.Policy.UploadOnlyOffroad ||
+			(status.OffroadKnown && status.Offroad && status.OffroadSourceFresh)
+		allowSpooling := storageStatus.AllowNew && policyAllowsSpooling
 		if !storageStatus.AllowNew {
 			a.logger.Printf("scan: storage safety blocked new spool links: %s", storageStatus.Reason)
-			timer.Reset(a.config.ScanInterval.Duration)
-			continue
 		}
-		result := a.scanner.Scan(ctx, status.OffroadKnown && status.Offroad && status.OffroadSourceFresh)
+		result := a.scanner.ScanWithOptions(
+			ctx,
+			status.OffroadKnown && status.Offroad && status.OffroadSourceFresh,
+			scanner.ScanOptions{AllowSpooling: allowSpooling},
+		)
+		a.scanMu.Lock()
+		a.lastScan = result
+		a.scanMu.Unlock()
 		a.storage.Enforce()
 		if compacted, err := a.journal.CompactTerminalRecords(256); err != nil {
 			a.logger.Printf("journal: compact terminal records: %v", err)
@@ -380,7 +405,10 @@ func heartbeatBackoff(minimum time.Duration, failures int) time.Duration {
 }
 
 func (a *Agent) heartbeat(policyStatus policy.Status) api.HeartbeatRequest {
-	snapshot := a.journal.Snapshot()
+	snapshot := a.journal.View()
+	a.scanMu.RLock()
+	lastScan := a.lastScan
+	a.scanMu.RUnlock()
 	uploadMetrics := a.uploader.SnapshotMetrics()
 	storageStatus := a.storage.Snapshot()
 	hostStatus := a.host.Collect()
@@ -435,6 +463,7 @@ func (a *Agent) heartbeat(policyStatus policy.Status) api.HeartbeatRequest {
 		"resumable_upload_v1",
 		"sha256",
 		"hardlink_spool",
+		"full_backlog_v1",
 		"typed_commands_v1",
 		"storage_guard_v1",
 		"route_inventory_v1",
@@ -447,6 +476,11 @@ func (a *Agent) heartbeat(policyStatus policy.Status) api.HeartbeatRequest {
 	}
 	if a.config.Commands.AllowAgentRestart {
 		capabilities = append(capabilities, "command_restart_agent")
+	}
+	var unuploadedScanAt *time.Time
+	if !lastScan.ScannedAt.IsZero() {
+		value := lastScan.ScannedAt
+		unuploadedScanAt = &value
 	}
 	var offroad *bool
 	if policyStatus.OffroadKnown && policyStatus.OffroadSourceFresh {
@@ -465,6 +499,10 @@ func (a *Agent) heartbeat(policyStatus policy.Status) api.HeartbeatRequest {
 			"agent_build_version":        a.version,
 			"file_counts":                counts,
 			"pending_bytes":              pendingBytes,
+			"unuploaded_bytes":           lastScan.UnuploadedBytes,
+			"unuploaded_files":           lastScan.UnuploadedFiles,
+			"unuploaded_scan_at":         unuploadedScanAt,
+			"unuploaded_scan_complete":   lastScan.ScanComplete,
 			"spool_bytes":                storageStatus.RetainedBytes,
 			"spool_capacity_bytes":       a.config.Storage.MaxRetainedBytes,
 			"bytes_uploaded_total":       snapshot.Counters.BytesUploaded,

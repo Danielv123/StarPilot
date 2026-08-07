@@ -26,7 +26,8 @@
     {
       "artifact_type": "video",
       "camera": "driver",
-      "root_name": "realdata"
+      "root_name": "realdata",
+      "optional_until_observed": true
     },
     {
       "artifact_type": "qlog",
@@ -54,7 +55,8 @@
     {
       "artifact_type": "video",
       "camera": "driver",
-      "root_name": "realdata_HD"
+      "root_name": "realdata_HD",
+      "optional_until_observed": true
     },
     {
       "artifact_type": "qlog",
@@ -82,7 +84,8 @@
     {
       "artifact_type": "video",
       "camera": "driver",
-      "root_name": "realdata_konik"
+      "root_name": "realdata_konik",
+      "optional_until_observed": true
     }
   ]
 }

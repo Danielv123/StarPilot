@@ -1,6 +1,8 @@
 package journal
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,18 @@ type Store struct {
 	path string
 	mu   sync.RWMutex
 	data state.Journal
+}
+
+var ErrFileNotFound = errors.New("journal file does not exist")
+
+const fileMutationVersion = 1
+
+type fileMutation struct {
+	Version  int            `json:"version"`
+	Sequence uint64         `json:"sequence"`
+	FileID   string         `json:"file_id"`
+	File     state.File     `json:"file"`
+	Counters state.Counters `json:"counters"`
 }
 
 func Open(path string) (*Store, error) {
@@ -39,6 +53,9 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("parse journal %s: %w", path, err)
 	}
 	store.data.Normalize()
+	if err := store.replayFileMutations(); err != nil {
+		return nil, err
+	}
 	switch store.data.Version {
 	case 1, 2, 3:
 		store.data.Version = state.CurrentVersion
@@ -95,6 +112,16 @@ func (s *Store) Snapshot() state.Journal {
 	return clone(s.data)
 }
 
+// View returns the current immutable journal generation without copying its
+// maps. Callers must treat the result as read-only. Update always clones the
+// current generation before changing it, so a view remains stable while a
+// later generation is persisted and installed.
+func (s *Store) View() state.Journal {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.data
+}
+
 func (s *Store) Update(update func(*state.Journal) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -107,14 +134,69 @@ func (s *Store) Update(update func(*state.Journal) error) error {
 		return err
 	}
 	s.data = next
+	s.clearFileMutationsLocked()
 	return nil
+}
+
+// UpdateFile durably changes one file record without rewriting the complete
+// journal. Mutations are appended to an fsynced write-ahead log and replayed
+// at startup. A later full Update checkpoints the current generation and
+// clears the log. The callback returns whether it changed the record.
+func (s *Store) UpdateFile(
+	fileID string,
+	update func(*state.File, *state.Counters) (bool, error),
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, exists := s.data.Files[fileID]
+	if !exists {
+		return fmt.Errorf("%w: %q", ErrFileNotFound, fileID)
+	}
+	current.CompletionEvidence = append([]string(nil), current.CompletionEvidence...)
+	counters := s.data.Counters
+	changed, err := update(&current, &counters)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	next := s.data
+	next.Files = make(map[string]state.File, len(s.data.Files))
+	for key, value := range s.data.Files {
+		next.Files[key] = value
+	}
+	next.Files[fileID] = current
+	next.Counters = counters
+	next.MutationSequence++
+	record := fileMutation{
+		Version:  fileMutationVersion,
+		Sequence: next.MutationSequence,
+		FileID:   fileID,
+		File:     current,
+		Counters: counters,
+	}
+	if err := appendFileMutation(s.fileMutationPath(), record); err != nil {
+		return err
+	}
+	s.data = next
+	return nil
+}
+
+// Checkpoint writes the current generation to the base journal and clears the
+// replay log. It is used during graceful shutdown so an older rollback binary,
+// which does not know about the WAL, still sees every committed mutation.
+func (s *Store) Checkpoint() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistLocked()
 }
 
 func (s *Store) CompactTerminalRecords(limit int) (int, error) {
 	if limit <= 0 {
 		limit = 256
 	}
-	snapshot := s.Snapshot()
+	snapshot := s.View()
 	type candidate struct {
 		id       string
 		finished time.Time
@@ -219,7 +301,103 @@ func hasFileCancellation(data state.Journal, fileID string) bool {
 }
 
 func (s *Store) persistLocked() error {
-	return persist(s.path, s.data)
+	if err := persist(s.path, s.data); err != nil {
+		return err
+	}
+	s.clearFileMutationsLocked()
+	return nil
+}
+
+func (s *Store) fileMutationPath() string {
+	return s.path + ".wal"
+}
+
+func (s *Store) replayFileMutations() error {
+	path := s.fileMutationPath()
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read journal file mutations: %w", err)
+	}
+	// A crash can leave a partial final append without a newline. That record
+	// was never acknowledged as durable to the caller, so ignore the tail.
+	if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+		lastNewline := bytes.LastIndexByte(raw, '\n')
+		if lastNewline < 0 {
+			return nil
+		}
+		raw = raw[:lastNewline+1]
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	line := 0
+	for scanner.Scan() {
+		line++
+		var record fileMutation
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			return fmt.Errorf("parse journal file mutation line %d: %w", line, err)
+		}
+		if record.Version != fileMutationVersion {
+			return fmt.Errorf(
+				"unsupported journal file mutation version %d on line %d",
+				record.Version,
+				line,
+			)
+		}
+		if record.Sequence <= s.data.MutationSequence {
+			continue
+		}
+		if record.Sequence != s.data.MutationSequence+1 {
+			return fmt.Errorf(
+				"journal file mutation sequence gap: got %d after %d",
+				record.Sequence,
+				s.data.MutationSequence,
+			)
+		}
+		s.data.Files[record.FileID] = record.File
+		s.data.Counters = record.Counters
+		s.data.MutationSequence = record.Sequence
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan journal file mutations: %w", err)
+	}
+	return nil
+}
+
+func appendFileMutation(path string, record fileMutation) error {
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("encode journal file mutation: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open journal file mutations: %w", err)
+	}
+	if _, err := file.Write(encoded); err != nil {
+		file.Close()
+		return fmt.Errorf("append journal file mutation: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return fmt.Errorf("sync journal file mutation: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close journal file mutation: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) clearFileMutationsLocked() {
+	if err := os.Remove(s.fileMutationPath()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	if directory, err := os.Open(filepath.Dir(s.path)); err == nil {
+		_ = directory.Sync()
+		_ = directory.Close()
+	}
 }
 
 func clone(input state.Journal) state.Journal {

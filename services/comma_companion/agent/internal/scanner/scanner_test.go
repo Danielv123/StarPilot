@@ -122,6 +122,142 @@ func TestFairBatchReservesMediaSlot(t *testing.T) {
 	}
 }
 
+func TestScanReportsFullUnuploadedBacklogWithoutGrowingSpool(t *testing.T) {
+	base := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "realdata")
+	spool := filepath.Join(filepath.Dir(root), "spool")
+	segment := filepath.Join(root, "route--0")
+	mustMkdir(t, segment)
+	writeAt(t, filepath.Join(segment, "qlog"), []byte("queued"), base.Add(-time.Hour))
+	writeAt(t, filepath.Join(segment, "rlog"), []byte("backlog"), base.Add(-time.Hour))
+
+	cfg := testConfig(root, spool)
+	store, err := journal.Open(cfg.JournalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := New(cfg, store, testLogger{t})
+	subject.now = func() time.Time { return base }
+
+	result := subject.ScanWithOptions(
+		context.Background(),
+		true,
+		ScanOptions{AllowSpooling: false},
+	)
+	if !result.ScanComplete || result.UnuploadedFiles != 2 || result.UnuploadedBytes != 13 {
+		t.Fatalf("full backlog was not measured: %#v", result)
+	}
+	snapshot := store.Snapshot()
+	if result.FilesSpooled != 0 || len(snapshot.Files) != 0 {
+		t.Fatalf("measurement-only scan grew the protected spool: %#v", result)
+	}
+	if len(snapshot.Observations) != 0 || !snapshot.LastScanAt.IsZero() {
+		t.Fatalf("measurement-only scan rewrote stability journal: %#v", snapshot)
+	}
+}
+
+func TestStorageBlockedScanStillCapturesInventory(t *testing.T) {
+	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "realdata")
+	spool := filepath.Join(filepath.Dir(root), "spool")
+	writeRouteFiles(t, root, "route", 0, base.Add(-time.Hour), "qlog", "rlog")
+	cfg := testConfig(root, spool)
+	cfg.MaxFilesPerScan = 100
+	cfg.Inventory.ExpectedStreams = []config.InventoryStream{
+		{RootName: "realdata", ArtifactType: "qlog"},
+		{RootName: "realdata", ArtifactType: "rlog"},
+	}
+	store, err := journal.Open(cfg.JournalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := New(cfg, store, testLogger{t})
+	now := base
+	subject.now = func() time.Time { return now }
+	subject.Scan(context.Background(), true)
+	now = base.Add(2 * time.Second)
+	subject.Scan(context.Background(), true)
+	if err := store.Update(func(data *state.Journal) error {
+		data.Inventories = make(map[string]state.RouteInventory)
+		data.Observations = make(map[string]state.Observation)
+		data.LastScanAt = time.Time{}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	subject = New(cfg, store, testLogger{t})
+	now = base.Add(4 * time.Second)
+	subject.now = func() time.Time { return now }
+	first := subject.ScanWithOptions(context.Background(), true, ScanOptions{AllowSpooling: false})
+	now = base.Add(6 * time.Second)
+	second := subject.ScanWithOptions(context.Background(), true, ScanOptions{AllowSpooling: false})
+	if first.FilesSpooled != 0 || second.FilesSpooled != 0 {
+		t.Fatalf("storage-blocked scan changed the spool: first=%#v second=%#v", first, second)
+	}
+	if _, found := latestRouteInventory(store.Snapshot(), "route"); !found {
+		t.Fatalf(
+			"storage-blocked scan did not capture a stable route inventory: observations=%#v files=%#v",
+			subject.observations,
+			store.Snapshot().Files,
+		)
+	}
+}
+
+func TestPrunedDurableRouteInventoryIsRecoveredFromJournal(t *testing.T) {
+	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "realdata")
+	spool := filepath.Join(filepath.Dir(root), "spool")
+	writeRouteFiles(t, root, "route", 0, base.Add(-time.Hour), "qlog", "rlog")
+	cfg := testConfig(root, spool)
+	cfg.MaxFilesPerScan = 100
+	cfg.Inventory.ExpectedStreams = []config.InventoryStream{
+		{RootName: "realdata", ArtifactType: "qlog"},
+		{RootName: "realdata", ArtifactType: "rlog"},
+	}
+	store, err := journal.Open(cfg.JournalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := New(cfg, store, testLogger{t})
+	now := base
+	subject.now = func() time.Time { return now }
+	subject.Scan(context.Background(), true)
+	now = base.Add(2 * time.Second)
+	subject.Scan(context.Background(), true)
+	if err := store.Update(func(data *state.Journal) error {
+		for id, file := range data.Files {
+			file.State = state.FileDurable
+			file.DurableAt = now
+			data.Files[id] = file
+		}
+		data.Inventories = make(map[string]state.RouteInventory)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "route--0")); err != nil {
+		t.Fatal(err)
+	}
+
+	subject = New(cfg, store, testLogger{t})
+	now = base.Add(4 * time.Second)
+	subject.now = func() time.Time { return now }
+	result := subject.ScanWithOptions(context.Background(), true, ScanOptions{AllowSpooling: false})
+	if result.Errors != 0 {
+		t.Fatalf("journal-only recovery failed: %#v", result)
+	}
+	inventory, found := latestRouteInventory(store.Snapshot(), "route")
+	if !found || inventory.Manifest.State != "complete" {
+		t.Fatalf(
+			"durable pruned route was not recovered: found=%v inventory=%#v files=%#v",
+			found,
+			inventory,
+			store.Snapshot().Files,
+		)
+	}
+}
+
 func TestParsesObservedFrogPilotSegmentName(t *testing.T) {
 	relative := filepath.Join("000000dc--fe7070223b--99", "rlog")
 	route, segment, directory := parseSegment(relative)
@@ -466,6 +602,104 @@ func TestRouteInventoryMakesGapsAndWholeRouteMissingStreamsExplicit(t *testing.T
 		}
 		if !foundMissingRoad {
 			t.Fatalf("segment %d lacks a null missing road row: %#v", segment.Number, segment.Streams)
+		}
+	}
+}
+
+func TestOptionalStreamBecomesRequiredOnlyAfterItIsObserved(t *testing.T) {
+	streams := []config.InventoryStream{
+		{RootName: "realdata", ArtifactType: "rlog"},
+		{
+			RootName:              "realdata",
+			ArtifactType:          "video",
+			Camera:                "driver",
+			OptionalUntilObserved: true,
+		},
+	}
+	withoutDriver := captureTestRouteInventory(
+		t,
+		streams,
+		map[int][]string{0: {"rlog.zst"}, 1: {"rlog.zst"}},
+	)
+	if withoutDriver.State != "complete" ||
+		contains(withoutDriver.ClosureEvidence, "missing_expected_streams") {
+		t.Fatalf("never-observed optional stream made route partial: %#v", withoutDriver)
+	}
+	for _, expected := range withoutDriver.ExpectedStreams {
+		if expected.Role == "realdata|video|driver" {
+			t.Fatalf("never-observed optional stream was declared: %#v", withoutDriver.ExpectedStreams)
+		}
+	}
+
+	intermittentDriver := captureTestRouteInventory(
+		t,
+		streams,
+		map[int][]string{
+			0: {"rlog.zst", "dcamera.hevc"},
+			1: {"rlog.zst"},
+		},
+	)
+	if intermittentDriver.State != "partial" ||
+		!contains(intermittentDriver.ClosureEvidence, "missing_expected_streams") {
+		t.Fatalf("observed optional stream did not become route-required: %#v", intermittentDriver)
+	}
+}
+
+func TestPrunedRouteDropsStaleNeverObservedOptionalStream(t *testing.T) {
+	base := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	root := filepath.Join(t.TempDir(), "realdata")
+	spool := filepath.Join(filepath.Dir(root), "spool")
+	writeRouteFiles(t, root, "route", 0, base.Add(-time.Hour), "rlog.zst")
+	cfg := testConfig(root, spool)
+	cfg.MaxFilesPerScan = 100
+	cfg.Inventory.ExpectedStreams = []config.InventoryStream{
+		{RootName: "realdata", ArtifactType: "rlog"},
+		{RootName: "realdata", ArtifactType: "video", Camera: "driver"},
+	}
+	store, err := journal.Open(cfg.JournalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := New(cfg, store, testLogger{t})
+	now := base
+	subject.now = func() time.Time { return now }
+	subject.Scan(context.Background(), true)
+	now = base.Add(2 * time.Second)
+	subject.Scan(context.Background(), true)
+	first, found := latestRouteInventory(store.Snapshot(), "route")
+	if !found || first.Manifest.State != "partial" || first.Manifest.Generation != 1 {
+		t.Fatalf("required absent stream did not create the expected legacy inventory: %#v", first)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "route--0")); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Inventory.ExpectedStreams[1].OptionalUntilObserved = true
+	subject = New(cfg, store, testLogger{t})
+	now = base.Add(4 * time.Second)
+	subject.now = func() time.Time { return now }
+	result := subject.ScanWithOptions(
+		context.Background(),
+		true,
+		ScanOptions{AllowSpooling: false},
+	)
+	if result.Errors != 0 {
+		t.Fatalf("optional-stream migration failed: %#v", result)
+	}
+	second, found := latestRouteInventory(store.Snapshot(), "route")
+	if !found || second.Manifest.Generation != 2 || second.Manifest.State != "complete" {
+		t.Fatalf("stale optional stream was not superseded: %#v", second)
+	}
+	if second.Manifest.PreviousManifestSHA256 == nil ||
+		*second.Manifest.PreviousManifestSHA256 != first.ManifestSHA256 {
+		t.Fatalf("optional-stream migration broke the generation chain: %#v", second.Manifest)
+	}
+	if contains(second.Manifest.ClosureEvidence, "missing_expected_streams") {
+		t.Fatalf("stale missing-stream evidence survived migration: %#v", second.Manifest)
+	}
+	for _, expected := range second.Manifest.ExpectedStreams {
+		if expected.Role == "realdata|video|driver" {
+			t.Fatalf("never-observed optional role survived migration: %#v", second.Manifest)
 		}
 	}
 }

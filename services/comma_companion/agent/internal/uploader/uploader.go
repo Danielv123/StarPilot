@@ -71,7 +71,7 @@ func (u *Uploader) SnapshotMetrics() Metrics {
 }
 
 func (u *Uploader) ProcessOnce(ctx context.Context) (bool, error) {
-	snapshot := u.journal.Snapshot()
+	snapshot := u.journal.View()
 	now := u.now().UTC()
 	if cancellation, found := nextCancellation(snapshot, now); found {
 		u.setActive(cancellation.FileID, 0)
@@ -380,7 +380,7 @@ func (u *Uploader) cancel(ctx context.Context, cancellation state.UploadCancella
 	if err != nil {
 		if head, headErr := u.client.HeadUpload(ctx, cancellation.UploadID); headErr == nil {
 			if head.Durable {
-				snapshot := u.journal.Snapshot()
+				snapshot := u.journal.View()
 				if current, exists := snapshot.Files[cancellation.FileID]; exists {
 					if durableErr := u.finishDurable(current, head); durableErr != nil {
 						return durableErr
@@ -402,7 +402,7 @@ func (u *Uploader) cancel(ctx context.Context, cancellation state.UploadCancella
 
 func (u *Uploader) completeCancellation(cancellation state.UploadCancellation) error {
 	now := u.now().UTC()
-	snapshot := u.journal.Snapshot()
+	snapshot := u.journal.View()
 	if file, exists := snapshot.Files[cancellation.FileID]; exists &&
 		file.State == state.FileCancelPending &&
 		file.UploadID == cancellation.UploadID &&
@@ -607,13 +607,12 @@ func (u *Uploader) finishDurable(file state.File, status api.UploadStatus) error
 	}
 	now := u.now().UTC()
 	newlyDurable := false
-	if err := u.journal.Update(func(data *state.Journal) error {
-		current, ok := data.Files[file.ID]
-		if !ok {
-			return errors.New("file disappeared from journal")
-		}
+	if err := u.journal.UpdateFile(file.ID, func(
+		current *state.File,
+		counters *state.Counters,
+	) (bool, error) {
 		if current.State == state.FileDurable {
-			return nil
+			return false, nil
 		}
 		current.State = state.FileDurable
 		current.UploadOffset = current.Size
@@ -624,10 +623,9 @@ func (u *Uploader) finishDurable(file state.File, status api.UploadStatus) error
 		current.CancelNextState = ""
 		current.CancelDeleteRecord = false
 		current.NeedsRespool = false
-		data.Files[file.ID] = current
-		data.Counters.FilesDurable++
+		counters.FilesDurable++
 		newlyDurable = true
-		return nil
+		return true, nil
 	}); err != nil {
 		return err
 	}
@@ -644,6 +642,35 @@ func (u *Uploader) finishDurable(file state.File, status api.UploadStatus) error
 }
 
 func (u *Uploader) bindUpload(fileID string, expectedAttempt int, uploadID string, offset int64) error {
+	err := u.journal.UpdateFile(fileID, func(
+		file *state.File,
+		_ *state.Counters,
+	) (bool, error) {
+		if file.UploadAttempt != expectedAttempt ||
+			file.State == state.FileReleased ||
+			file.State == state.FileCancelPending ||
+			file.State == state.FileCanceled ||
+			file.State == state.FileDurable ||
+			file.State == state.FileFailed {
+			return false, errUploadStopped
+		}
+		file.UploadID = uploadID
+		file.UploadOffset = offset
+		file.State = state.FileUploading
+		file.LastError = ""
+		file.NextAttemptAt = time.Time{}
+		return true, nil
+	})
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, errUploadStopped) && !errors.Is(err, journal.ErrFileNotFound) {
+		return err
+	}
+	return u.bindUploadFallback(fileID, expectedAttempt, uploadID, offset)
+}
+
+func (u *Uploader) bindUploadFallback(fileID string, expectedAttempt int, uploadID string, offset int64) error {
 	stopped := false
 	now := u.now().UTC()
 	err := u.journal.Update(func(data *state.Journal) error {
@@ -691,64 +718,58 @@ func (u *Uploader) bindUpload(fileID string, expectedAttempt int, uploadID strin
 }
 
 func (u *Uploader) updateProgress(fileID, uploadID string, offset int64, fileState state.FileState) error {
-	return u.journal.Update(func(data *state.Journal) error {
-		file, ok := data.Files[fileID]
-		if !ok {
-			return errors.New("file disappeared from journal")
-		}
+	return u.journal.UpdateFile(fileID, func(
+		file *state.File,
+		_ *state.Counters,
+	) (bool, error) {
 		if file.State == state.FileReleased || file.State == state.FileCancelPending ||
 			file.State == state.FileCanceled || file.State == state.FileDurable {
-			return errUploadStopped
+			return false, errUploadStopped
 		}
 		file.UploadID = uploadID
 		file.UploadOffset = offset
 		file.State = fileState
 		file.LastError = ""
 		file.NextAttemptAt = time.Time{}
-		data.Files[fileID] = file
-		return nil
+		return true, nil
 	})
 }
 
 func (u *Uploader) updateChunk(fileID string, offset, bytes int64) error {
-	return u.journal.Update(func(data *state.Journal) error {
-		file, ok := data.Files[fileID]
-		if !ok {
-			return errors.New("file disappeared from journal")
-		}
+	return u.journal.UpdateFile(fileID, func(
+		file *state.File,
+		counters *state.Counters,
+	) (bool, error) {
 		if file.State == state.FileReleased || file.State == state.FileCancelPending ||
 			file.State == state.FileCanceled || file.State == state.FileDurable {
-			return errUploadStopped
+			return false, errUploadStopped
 		}
 		file.UploadOffset = offset
 		file.State = state.FileUploading
 		file.LastError = ""
 		file.NextAttemptAt = time.Time{}
-		data.Files[fileID] = file
-		data.Counters.BytesUploaded += bytes
-		return nil
+		counters.BytesUploaded += bytes
+		return true, nil
 	})
 }
 
 func (u *Uploader) recordFailure(fileID string, uploadError error) {
 	now := u.now().UTC()
-	_ = u.journal.Update(func(data *state.Journal) error {
-		file, ok := data.Files[fileID]
-		if !ok {
-			return nil
-		}
+	_ = u.journal.UpdateFile(fileID, func(
+		file *state.File,
+		counters *state.Counters,
+	) (bool, error) {
 		if file.State == state.FileReleased || file.State == state.FileCancelPending ||
 			file.State == state.FileDurable || file.State == state.FileCanceled ||
 			file.State == state.FileFailed {
-			return nil
+			return false, nil
 		}
 		file.Attempts++
 		file.State = state.FileRetry
 		file.LastError = uploadError.Error()
 		file.NextAttemptAt = now.Add(backoff(file.Attempts))
-		data.Files[fileID] = file
-		data.Counters.UploadErrors++
-		return nil
+		counters.UploadErrors++
+		return true, nil
 	})
 	u.mu.Lock()
 	u.metrics.LastError = uploadError.Error()

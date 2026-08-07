@@ -43,10 +43,18 @@ type candidate struct {
 }
 
 type Result struct {
-	FilesSeen    int
-	FilesSpooled int
-	BytesSpooled int64
-	Errors       int
+	FilesSeen       int
+	FilesSpooled    int
+	BytesSpooled    int64
+	UnuploadedFiles int
+	UnuploadedBytes int64
+	ScanComplete    bool
+	ScannedAt       time.Time
+	Errors          int
+}
+
+type ScanOptions struct {
+	AllowSpooling bool
 }
 
 type SuggestedCoverage struct {
@@ -63,25 +71,38 @@ type StreamSuggestion struct {
 }
 
 type Scanner struct {
-	config  config.Config
-	journal *journal.Store
-	logger  Logger
-	now     func() time.Time
+	config              config.Config
+	journal             *journal.Store
+	logger              Logger
+	now                 func() time.Time
+	observations        map[string]state.Observation
+	lastObservationScan time.Time
 }
 
 func New(cfg config.Config, store *journal.Store, logger Logger) *Scanner {
+	snapshot := store.View()
+	observations := make(map[string]state.Observation, len(snapshot.Observations))
+	for path, observation := range snapshot.Observations {
+		observations[path] = observation
+	}
 	return &Scanner{
-		config:  cfg,
-		journal: store,
-		logger:  logger,
-		now:     time.Now,
+		config:              cfg,
+		journal:             store,
+		logger:              logger,
+		now:                 time.Now,
+		observations:        observations,
+		lastObservationScan: snapshot.LastScanAt,
 	}
 }
 
 func (s *Scanner) Scan(ctx context.Context, offroad bool) Result {
+	return s.ScanWithOptions(ctx, offroad, ScanOptions{AllowSpooling: true})
+}
+
+func (s *Scanner) ScanWithOptions(ctx context.Context, offroad bool, options ScanOptions) Result {
 	now := s.now().UTC()
 	all := make([]candidate, 0)
-	result := Result{}
+	result := Result{ScannedAt: now}
 	for _, root := range s.config.Roots {
 		candidates, errorsFound := walkRoot(ctx, root)
 		for index := range candidates {
@@ -92,14 +113,42 @@ func (s *Scanner) Scan(ctx context.Context, offroad bool) Result {
 	}
 	rootWalksComplete := result.Errors == 0
 	result.FilesSeen = len(all)
+	result.ScanComplete = rootWalksComplete
+	observations := s.observe(all, now)
 
-	if err := s.recordObservations(all, now, result.Errors); err != nil {
-		s.logger.Printf("scan: persist observations: %v", err)
-		result.Errors++
-		return result
+	if options.AllowSpooling {
+		if err := s.recordObservations(all, now, result.Errors); err != nil {
+			s.logger.Printf("scan: persist observations: %v", err)
+			result.Errors++
+			result.ScanComplete = false
+			return result
+		}
 	}
 
-	snapshot := s.journal.Snapshot()
+	snapshot := s.journal.View()
+	inventorySnapshot := snapshot
+	inventorySnapshot.Observations = observations
+	for _, item := range all {
+		file, found := snapshot.Files[fileID(item)]
+		if found && file.State == state.FileDurable {
+			continue
+		}
+		remaining := item.size
+		if found && file.State != state.FileCanceled && file.UploadOffset > 0 {
+			remaining = max(0, item.size-file.UploadOffset)
+		}
+		result.UnuploadedFiles++
+		result.UnuploadedBytes += remaining
+	}
+	if rootWalksComplete && !options.AllowSpooling {
+		if err := s.recordRouteInventories(all, now, offroad, inventorySnapshot); err != nil {
+			s.logger.Printf("scan: capture route inventory: %v", err)
+			result.Errors++
+		}
+	}
+	if !options.AllowSpooling {
+		return result
+	}
 	eligible := selectEligible(all, snapshot, now, offroad, s.config)
 	if len(eligible) > s.config.MaxFilesPerScan {
 		eligible = fairBatch(eligible, s.config.MaxFilesPerScan)
@@ -122,10 +171,55 @@ func (s *Scanner) Scan(ctx context.Context, offroad bool) Result {
 		}
 	}
 	if rootWalksComplete {
-		if err := s.recordRouteInventories(all, now, offroad); err != nil {
+		updatedSnapshot := s.journal.View()
+		updatedSnapshot.Observations = observations
+		if err := s.recordRouteInventories(all, now, offroad, updatedSnapshot); err != nil {
 			s.logger.Printf("scan: capture route inventory: %v", err)
 			result.Errors++
 		}
+	}
+	return result
+}
+
+func (s *Scanner) observe(items []candidate, now time.Time) map[string]state.Observation {
+	previousScan := s.lastObservationScan
+	maxGap := 10 * time.Minute
+	if configuredGap := 3 * s.config.ScanInterval.Duration; configuredGap > maxGap {
+		maxGap = configuredGap
+	}
+	for _, item := range items {
+		previous, found := s.observations[item.sourcePath]
+		stable := 1
+		stableSince := now
+		gap := now.Sub(previous.LastSeenAt)
+		if found && previous.Size == item.size && previous.ModTimeNS == item.modTimeNS &&
+			previous.LastSeenAt.Equal(previousScan) && gap >= 0 && gap <= maxGap {
+			stable = previous.StableCount + 1
+			stableSince = previous.StableSince
+			if stableSince.IsZero() {
+				stableSince = previous.LastSeenAt
+			}
+		}
+		s.observations[item.sourcePath] = state.Observation{
+			SourcePath:   item.sourcePath,
+			RootName:     item.rootName,
+			RelativePath: item.relativePath,
+			Size:         item.size,
+			ModTimeNS:    item.modTimeNS,
+			StableCount:  stable,
+			StableSince:  stableSince,
+			LastSeenAt:   now,
+		}
+	}
+	for path, observation := range s.observations {
+		if now.Sub(observation.LastSeenAt) > 7*24*time.Hour {
+			delete(s.observations, path)
+		}
+	}
+	s.lastObservationScan = now
+	result := make(map[string]state.Observation, len(s.observations))
+	for path, observation := range s.observations {
+		result[path] = observation
 	}
 	return result
 }
@@ -545,8 +639,12 @@ type routeManifestCandidate struct {
 	manifest      state.RouteManifest
 }
 
-func (s *Scanner) recordRouteInventories(items []candidate, now time.Time, offroad bool) error {
-	snapshot := s.journal.Snapshot()
+func (s *Scanner) recordRouteInventories(
+	items []candidate,
+	now time.Time,
+	offroad bool,
+	snapshot state.Journal,
+) error {
 	captured := make(map[string]state.File, len(snapshot.Files))
 	for _, file := range snapshot.Files {
 		if file.CancelDeleteRecord || !validSHA256(file.SHA256) {
@@ -561,7 +659,68 @@ func (s *Scanner) recordRouteInventories(items []candidate, now time.Time, offro
 		}
 		routeItems[item.routeName] = append(routeItems[item.routeName], item)
 	}
+	// A logger route may be pruned after every file has become durable. Its
+	// immutable file metadata remains in the journal, so use that metadata to
+	// recover a route inventory instead of waiting for source paths that can
+	// never reappear.
+	unsafeArchivedRoutes := make(map[string]bool)
+	for _, file := range snapshot.Files {
+		if file.RouteName == "" || file.SegmentNumber == nil {
+			continue
+		}
+		if file.State != state.FileDurable || file.CancelDeleteRecord || !validSHA256(file.SHA256) {
+			unsafeArchivedRoutes[file.RouteName] = true
+		}
+	}
+	for _, file := range snapshot.Files {
+		if len(routeItems[file.RouteName]) != 0 || unsafeArchivedRoutes[file.RouteName] ||
+			file.RouteName == "" || file.SegmentNumber == nil || file.State != state.FileDurable ||
+			file.CancelDeleteRecord || !validSHA256(file.SHA256) {
+			continue
+		}
+		if _, found := latestRouteInventory(snapshot, file.RouteName); found {
+			continue
+		}
+		item := candidate{
+			sourcePath:       file.SourcePath,
+			rootName:         file.RootName,
+			relativePath:     file.RelativePath,
+			routeName:        file.RouteName,
+			segmentNumber:    file.SegmentNumber,
+			artifactType:     file.ArtifactType,
+			camera:           file.Camera,
+			size:             file.Size,
+			modTimeNS:        file.ModTimeNS,
+			rootScanComplete: true,
+		}
+		routeItems[file.RouteName] = append(routeItems[file.RouteName], item)
+		snapshot.Observations[file.SourcePath] = state.Observation{
+			SourcePath:   file.SourcePath,
+			RootName:     file.RootName,
+			RelativePath: file.RelativePath,
+			Size:         file.Size,
+			ModTimeNS:    file.ModTimeNS,
+			StableCount:  s.config.StableObservations,
+			StableSince:  now.Add(-s.config.StableDuration.Duration),
+			LastSeenAt:   now,
+		}
+	}
 	candidates := make(map[string]routeManifestCandidate)
+	for routeName := range latestInventoryRoutes(snapshot) {
+		latest, _ := latestRouteInventory(snapshot, routeName)
+		manifest, changed := s.withUnobservedOptionalStreamsRemoved(latest.Manifest)
+		if !changed {
+			continue
+		}
+		contentSHA256, err := inventorycontract.ContentSHA256(manifest)
+		if err != nil {
+			return err
+		}
+		candidates[routeName] = routeManifestCandidate{
+			contentSHA256: contentSHA256,
+			manifest:      manifest,
+		}
+	}
 	for routeName, route := range routeItems {
 		candidateManifest, ready, err := s.buildRouteManifest(
 			routeName,
@@ -635,6 +794,106 @@ func (s *Scanner) recordRouteInventories(items []candidate, now time.Time, offro
 		}
 		return nil
 	})
+}
+
+func latestInventoryRoutes(snapshot state.Journal) map[string]bool {
+	routes := make(map[string]bool)
+	for _, record := range snapshot.Inventories {
+		if record.Manifest.RouteName != "" {
+			routes[record.Manifest.RouteName] = true
+		}
+	}
+	return routes
+}
+
+func (s *Scanner) withUnobservedOptionalStreamsRemoved(
+	original state.RouteManifest,
+) (state.RouteManifest, bool) {
+	optionalRoles := make(map[string]bool)
+	for _, configured := range s.config.Inventory.ExpectedStreams {
+		if !configured.OptionalUntilObserved {
+			continue
+		}
+		optionalRoles[inventorycontract.StreamRole(
+			configured.RootName,
+			configured.ArtifactType,
+			configured.Camera,
+		)] = true
+	}
+	if len(optionalRoles) == 0 {
+		return original, false
+	}
+
+	observed := make(map[string]bool)
+	for _, segment := range original.Segments {
+		for _, stream := range segment.Streams {
+			if stream.Status == "present" {
+				observed[stream.Role] = true
+			}
+		}
+	}
+	remove := make(map[string]bool)
+	for _, expected := range original.ExpectedStreams {
+		if optionalRoles[expected.Role] && !observed[expected.Role] {
+			remove[expected.Role] = true
+		}
+	}
+	if len(remove) == 0 {
+		return original, false
+	}
+
+	manifest := original
+	manifest.ExpectedStreams = make([]state.ExpectedStream, 0, len(original.ExpectedStreams))
+	for _, expected := range original.ExpectedStreams {
+		if !remove[expected.Role] {
+			manifest.ExpectedStreams = append(manifest.ExpectedStreams, expected)
+		}
+	}
+	manifest.Segments = make([]state.InventorySegment, len(original.Segments))
+	missingStreams := false
+	for index, originalSegment := range original.Segments {
+		segment := originalSegment
+		segment.Streams = make([]state.InventoryStream, 0, len(originalSegment.Streams))
+		for _, stream := range originalSegment.Streams {
+			if remove[stream.Role] {
+				continue
+			}
+			segment.Streams = append(segment.Streams, stream)
+			if stream.Status == "missing" {
+				missingStreams = true
+			}
+		}
+		manifest.Segments[index] = segment
+	}
+	if !missingStreams {
+		manifest.ClosureEvidence = withoutString(
+			manifest.ClosureEvidence,
+			"missing_expected_streams",
+		)
+	}
+	manifest.State = "complete"
+	for _, reason := range manifest.ClosureEvidence {
+		switch reason {
+		case "missing_expected_streams", "missing_segment_numbers",
+			"multiple_active_log_roots", "expected_streams_unconfigured",
+			"active_root_expected_streams_unconfigured", "rlog_stream_unconfigured":
+			manifest.State = "partial"
+		}
+	}
+	if len(manifest.MissingSegmentNumbers) > 0 || missingStreams {
+		manifest.State = "partial"
+	}
+	return manifest, true
+}
+
+func withoutString(values []string, unwanted string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != unwanted {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func (s *Scanner) buildRouteManifest(
@@ -720,6 +979,16 @@ func (s *Scanner) buildRouteManifest(
 	expectedByRole := make(map[string]state.ExpectedStream)
 	configuredRoots := make(map[string]bool)
 	configuredRLogRoots := make(map[string]bool)
+	observedRoles := make(map[string]bool)
+	for _, source := range sources {
+		if repeatableStream(source.file.ArtifactType) {
+			observedRoles[inventorycontract.StreamRole(
+				source.file.RootName,
+				source.file.ArtifactType,
+				source.file.Camera,
+			)] = true
+		}
+	}
 	for _, configured := range s.config.Inventory.ExpectedStreams {
 		if !rootNames[configured.RootName] {
 			continue
@@ -729,6 +998,9 @@ func (s *Scanner) buildRouteManifest(
 			configured.ArtifactType,
 			configured.Camera,
 		)
+		if configured.OptionalUntilObserved && !observedRoles[expected.Role] {
+			continue
+		}
 		expectedByRole[expected.Role] = expected
 		configuredRoots[configured.RootName] = true
 		if configured.ArtifactType == "rlog" {

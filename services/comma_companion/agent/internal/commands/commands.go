@@ -75,7 +75,7 @@ func (h *Handler) Handle(ctx context.Context, command api.Command) ActionRequest
 		return ActionRequest{}
 	}
 	fingerprint, fingerprintErr := commandFingerprint(command)
-	if existing, ok := h.journal.Snapshot().Commands[command.ID]; ok {
+	if existing, ok := h.journal.View().Commands[command.ID]; ok {
 		if existing.Fingerprint != "" && (fingerprintErr != nil || existing.Fingerprint != fingerprint) {
 			h.logger.Printf("command: ignored reused ID %s with different immutable fields", command.ID)
 			return ActionRequest{}
@@ -131,7 +131,7 @@ func (h *Handler) Handle(ctx context.Context, command api.Command) ActionRequest
 }
 
 func (h *Handler) FlushPending(ctx context.Context) ActionRequest {
-	snapshot := h.journal.Snapshot()
+	snapshot := h.journal.View()
 	records := make([]state.CommandRecord, 0, len(snapshot.Commands))
 	for _, record := range snapshot.Commands {
 		if !record.Reported {
@@ -159,7 +159,7 @@ func (h *Handler) FlushPending(ctx context.Context) ActionRequest {
 func (h *Handler) execute(command api.Command) (string, string, Action) {
 	switch command.Type {
 	case "status":
-		snapshot := h.journal.Snapshot()
+		snapshot := h.journal.View()
 		counts := make(map[state.FileState]int)
 		var pendingBytes int64
 		for _, file := range snapshot.Files {

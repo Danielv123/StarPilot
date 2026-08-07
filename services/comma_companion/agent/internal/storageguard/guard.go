@@ -58,7 +58,7 @@ func (g *Guard) Snapshot() Status {
 
 func (g *Guard) Enforce() Status {
 	now := time.Now().UTC()
-	snapshot := g.journal.Snapshot()
+	snapshot := g.journal.View()
 	retained, candidates := retainedFiles(snapshot, filepath.Join(g.spool, "files"))
 	quarantineBytes, quarantineFiles, quarantineTruncated, quarantineErr := quarantineUsage(
 		filepath.Join(g.spool, "quarantine"),

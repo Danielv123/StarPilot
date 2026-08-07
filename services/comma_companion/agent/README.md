@@ -92,8 +92,10 @@ For the first install:
    `inventory.openpilot-all-cameras.json` profile into `config.json` instead
    of relying only on historical stream discovery. Discovery cannot advertise
    `driver` until at least one closed segment already contains
-   `dcamera.hevc`; the explicit profile makes the first newly recorded driver
-   segment eligible for upload and route completeness accounting.
+   `dcamera.hevc`. The checked-in profile marks driver video as
+   `optional_until_observed`: routes recorded before front-camera capture was
+   enabled remain complete, while a route that contains driver video in any
+   segment must contain it in every segment.
 4. Put the separately generated bearer token in `device-token`, with no
    trailing commentary, and run `chmod 0600 device-token`.
 5. Run the staging directory's `install-device.sh` as `comma`.
@@ -181,7 +183,7 @@ every upload chunk.
 
 The optional Wi-Fi-only mode is a fail-closed route gate, not a privileged socket binding. There is a
 small race if the kernel changes its selected route after the per-chunk check
-but before or during the HTTP request. At most one configured chunk (512 KiB
+but before or during the HTTP request. At most one configured chunk (8 MiB
 by default) can already be in flight when that happens. Enforcing
 `SO_BINDTODEVICE` would remove that race but would require granting the agent
 an additional Linux capability; the supplied service deliberately runs without
@@ -242,6 +244,12 @@ explicitly enable only `restart_agent`; systemd then performs the actual
 restart under the same unprivileged unit and sandbox. The updater rejects
 `allow_starpilot_restart=true` and `allow_power_commands=true`.
 
+The service sets Go's soft heap limit to 160 MiB beneath systemd's 192 MiB
+memory-high and 256 MiB hard limit. Journal reads use immutable generations so
+heartbeat and upload selection do not duplicate the complete journal. When
+storage pressure blocks new spool links, full-backlog scans remain read-only
+and do not rewrite the stability journal every scan interval.
+
 StarPilot restart, reboot, and shutdown are unavailable in this release. They
 are not advertised in heartbeat capabilities, and no root helper service,
 credential, socket, or panda-state producer is installed. The source tree
@@ -286,6 +294,7 @@ Content-Type: application/json
     "resumable_upload_v1",
     "sha256",
     "hardlink_spool",
+    "full_backlog_v1",
     "typed_commands_v1",
     "storage_guard_v1",
     "route_inventory_v1",
@@ -298,6 +307,10 @@ Content-Type: application/json
   ],
   "metrics": {
     "pending_bytes": 0,
+    "unuploaded_bytes": 0,
+    "unuploaded_files": 0,
+    "unuploaded_scan_at": "2026-07-28T21:59:50Z",
+    "unuploaded_scan_complete": true,
     "spool_bytes": 0,
     "storage_free_bytes": 9999999999,
     "storage_pressure": false,
@@ -307,6 +320,12 @@ Content-Type: application/json
   "network_type": "wifi"
 }
 ```
+
+`pending_bytes` is the resumable remainder already represented in the upload
+journal. `unuploaded_bytes` and `unuploaded_files` cover the complete recognized
+logging tree, including files that have not entered the bounded protected spool.
+The full-backlog values are refreshed by the normal filesystem scan and are a
+lower bound when `unuploaded_scan_complete` is false.
 
 The response is:
 
@@ -473,9 +492,12 @@ The response headers are `Upload-Offset`, `Upload-Length`, `Upload-State`,
 `Upload-Durable`, `Upload-Terminal`, `Upload-Retry-Action`, and, after
 verification, `Upload-SHA256`.
 
-The production agent uses 512-KiB chunks so active-transfer progress can
-advance at roughly one-second intervals on the expected uplink. The server
-continues to enforce a 16-MiB maximum:
+The production agent uses 8-MiB chunks. Per-chunk offsets are durably appended
+to a small write-ahead log and replayed over the journal snapshot at startup,
+so resumability does not require rewriting and syncing the complete journal
+for every chunk. Graceful shutdown checkpoints the WAL into the base journal
+before exit, preserving rollback compatibility with older agent releases. The
+server continues to enforce a 16-MiB maximum:
 
 ```http
 PATCH /api/v1/uploads/{upload_id}
@@ -483,7 +505,7 @@ Content-Type: application/offset+octet-stream
 Upload-Offset: 0
 Upload-Length: 74973184
 Upload-Checksum: sha256 <base64 SHA-256 of this chunk>
-Content-Length: 524288
+Content-Length: 8388608
 ```
 
 An offset mismatch returns `409`; the agent reconciles through `HEAD`.

@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	DefaultChunkSize = 512 * 1024
+	DefaultChunkSize = 8 * 1024 * 1024
 )
 
 type Duration struct {
@@ -74,9 +74,10 @@ type Storage struct {
 }
 
 type InventoryStream struct {
-	RootName     string `json:"root_name"`
-	ArtifactType string `json:"artifact_type"`
-	Camera       string `json:"camera,omitempty"`
+	RootName              string `json:"root_name"`
+	ArtifactType          string `json:"artifact_type"`
+	Camera                string `json:"camera,omitempty"`
+	OptionalUntilObserved bool   `json:"optional_until_observed,omitempty"`
 }
 
 type Inventory struct {

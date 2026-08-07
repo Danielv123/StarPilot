@@ -12,6 +12,7 @@ import (
 	"starpilot.local/comma-companion-agent/internal/hoststats"
 	"starpilot.local/comma-companion-agent/internal/journal"
 	"starpilot.local/comma-companion-agent/internal/policy"
+	"starpilot.local/comma-companion-agent/internal/scanner"
 	"starpilot.local/comma-companion-agent/internal/state"
 	"starpilot.local/comma-companion-agent/internal/storageguard"
 	"starpilot.local/comma-companion-agent/internal/uploader"
@@ -63,16 +64,28 @@ func TestHeartbeatAdvertisesInventoryAndSpoolCapacity(t *testing.T) {
 		storage:  storageguard.New(cfg.Storage, spool, store, logger),
 		host:     hoststats.New(),
 	}
+	subject.lastScan = scanner.Result{
+		UnuploadedBytes: 987654321,
+		UnuploadedFiles: 42,
+		ScanComplete:    true,
+		ScannedAt:       now,
+	}
 	heartbeat := subject.heartbeat(policy.Status{})
 	if !containsCapability(heartbeat.Capabilities, "route_inventory_v1") {
 		t.Fatalf("route inventory capability missing: %#v", heartbeat.Capabilities)
 	}
 	if heartbeat.Metrics["spool_capacity_bytes"] != int64(123456789) ||
+		heartbeat.Metrics["unuploaded_bytes"] != int64(987654321) ||
+		heartbeat.Metrics["unuploaded_files"] != 42 ||
+		heartbeat.Metrics["unuploaded_scan_complete"] != true ||
 		heartbeat.Metrics["route_inventories_pending"] != 1 ||
 		heartbeat.Metrics["inventories_captured_total"] != int64(2) ||
 		heartbeat.Metrics["inventories_declared_total"] != int64(1) ||
 		heartbeat.Metrics["inventory_errors_total"] != int64(3) {
 		t.Fatalf("inventory heartbeat metrics missing: %#v", heartbeat.Metrics)
+	}
+	if !containsCapability(heartbeat.Capabilities, "full_backlog_v1") {
+		t.Fatalf("full backlog capability missing: %#v", heartbeat.Capabilities)
 	}
 	latest, ok := heartbeat.Metrics["route_inventory_latest"].(map[string]int)
 	if !ok || latest["complete"] != 1 || latest["partial"] != 0 {

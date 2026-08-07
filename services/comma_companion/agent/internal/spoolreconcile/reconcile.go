@@ -76,7 +76,7 @@ func Reconcile(
 	if err := os.MkdirAll(r.quarantineDir, 0o700); err != nil {
 		return Result{}, fmt.Errorf("create spool quarantine directory: %w", err)
 	}
-	for _, file := range store.Snapshot().Files {
+	for _, file := range store.View().Files {
 		path, pathErr := filepath.Abs(file.SpoolPath)
 		if pathErr != nil || !within(r.filesDir, path) {
 			r.invalid[file.ID] = true

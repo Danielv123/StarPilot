@@ -34,6 +34,7 @@ require_line \
   "ConditionFileIsExecutable=/data/private-pond-agent/current/comma-companion-agent" \
   "$unit"
 require_line "NoNewPrivileges=true" "$unit"
+require_line "Environment=GOMEMLIMIT=160MiB" "$unit"
 require_line \
   "LoadCredential=device-token:/data/private-pond-agent-secrets/device-token" \
   "$unit"

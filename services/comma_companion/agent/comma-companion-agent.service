@@ -16,6 +16,7 @@ RuntimeDirectoryMode=0750
 LoadCredential=device-token:/data/private-pond-agent-secrets/device-token
 Environment=COMMA_COMPANION_TOKEN_FILE=%d/device-token
 Environment=COMMA_COMPANION_READY_FILE=%t/comma-companion-agent/ready
+Environment=GOMEMLIMIT=160MiB
 ExecStart=/data/private-pond-agent/current/comma-companion-agent -config /data/private-pond-agent/current/config.json
 Restart=always
 RestartSec=10s

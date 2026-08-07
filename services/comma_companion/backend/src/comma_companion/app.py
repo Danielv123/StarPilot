@@ -128,7 +128,14 @@ def _telemetry_status(row: Mapping[str, Any] | sqlite3.Row) -> str:
   if expected_rlogs == 0 or archived_rlogs < expected_rlogs:
     return "awaiting_rlogs"
   if not inventory_present:
-    return "awaiting_inventory"
+    # Legacy routes may already have a valid telemetry generation from all
+    # archived rlogs even though they predate immutable route inventories.
+    # Do not hide that completed work behind an inventory-only status.
+    if row["telemetry_source_fingerprint"] is None:
+      return "awaiting_inventory"
+    if bool(row["telemetry_ready"]):
+      return "ready"
+    return "finalizing"
   if row["telemetry_source_fingerprint"] is None:
     return "extracting"
   if (
@@ -351,7 +358,21 @@ DRIVE_SELECT = """
             )
             AND COALESCE(archived.camera, '') =
               COALESCE(declared.camera, '')
-            AND archived.status IN ('stored', 'verified', 'ready')
+            AND (
+              archived.status IN ('stored', 'verified', 'ready')
+              OR (
+                declared.artifact_type = 'video'
+                AND archived.status = 'raw_video_pruned'
+                AND EXISTS (
+                  SELECT 1
+                  FROM artifacts retained_media
+                  WHERE retained_media.source_artifact_id = archived.id
+                    AND retained_media.kind = 'derived_video'
+                    AND LOWER(retained_media.codec) = 'av1'
+                    AND retained_media.status = 'ready'
+                )
+              )
+            )
         )
     ) AS inventory_archived_file_count,
     (
@@ -390,7 +411,9 @@ DRIVE_SELECT = """
             )
             AND COALESCE(source.camera, '') =
               COALESCE(expected.camera, '')
-            AND source.status IN ('stored', 'verified', 'ready')
+            AND source.status IN (
+              'stored', 'verified', 'ready', 'raw_video_pruned'
+            )
             AND derived.kind = 'derived_video'
             AND LOWER(derived.codec) = 'av1'
             AND derived.status = 'ready'
@@ -456,7 +479,21 @@ DRIVE_SELECT = """
                   )
                   AND COALESCE(archived.camera, '') =
                     COALESCE(expected.camera, '')
-                  AND archived.status IN ('stored', 'verified', 'ready')
+                  AND (
+                    archived.status IN ('stored', 'verified', 'ready')
+                    OR (
+                      expected.artifact_type = 'video'
+                      AND archived.status = 'raw_video_pruned'
+                      AND EXISTS (
+                        SELECT 1
+                        FROM artifacts retained_media
+                        WHERE retained_media.source_artifact_id = archived.id
+                          AND retained_media.kind = 'derived_video'
+                          AND LOWER(retained_media.codec) = 'av1'
+                          AND retained_media.status = 'ready'
+                      )
+                    )
+                  )
               )
               OR (
                 expected.is_stream = 1
@@ -486,7 +523,7 @@ DRIVE_SELECT = """
                     AND COALESCE(media_source.camera, '') =
                       COALESCE(expected.camera, '')
                     AND media_source.status IN (
-                      'stored', 'verified', 'ready'
+                      'stored', 'verified', 'ready', 'raw_video_pruned'
                     )
                     AND media_derived.kind = 'derived_video'
                     AND LOWER(media_derived.codec) = 'av1'
@@ -3265,6 +3302,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   application.add_middleware(
     RequestBodyLimitMiddleware,
     json_max_bytes=resolved.max_json_body_bytes,
+    inventory_json_max_bytes=resolved.max_inventory_body_bytes,
     upload_patch_max_bytes=resolved.max_chunk_bytes,
   )
 

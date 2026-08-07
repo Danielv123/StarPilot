@@ -143,7 +143,17 @@ def test_telemetry_status_distinguishes_rlog_backup_from_indexing() -> None:
   assert _telemetry_status({
     **row,
     "inventory_id": None,
+  }) == "finalizing"
+  assert _telemetry_status({
+    **row,
+    "inventory_id": None,
+    "telemetry_source_fingerprint": None,
   }) == "awaiting_inventory"
+  assert _telemetry_status({
+    **row,
+    "inventory_id": None,
+    "telemetry_ready": 1,
+  }) == "ready"
   assert _telemetry_status({
     **row,
     "telemetry_source_fingerprint": None,
@@ -339,6 +349,14 @@ def test_successful_media_retry_clears_historical_failure(
       WHERE sha256 IN (?, ?)
       """,
       (now, source_sha, duplicate_source_sha),
+    )
+    connection.execute(
+      """
+      UPDATE artifacts
+      SET status = 'raw_video_pruned'
+      WHERE id = ?
+      """,
+      (source_id,),
     )
     connection.execute(
       """

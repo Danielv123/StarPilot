@@ -1069,7 +1069,21 @@ def latest_inventory_view(
             )
             AND COALESCE(archived.camera, '') =
               COALESCE(declared.camera, '')
-            AND archived.status IN ('stored', 'verified', 'ready')
+            AND (
+              archived.status IN ('stored', 'verified', 'ready')
+              OR (
+                declared.artifact_type = 'video'
+                AND archived.status = 'raw_video_pruned'
+                AND EXISTS (
+                  SELECT 1
+                  FROM artifacts retained_media
+                  WHERE retained_media.source_artifact_id = archived.id
+                    AND retained_media.kind = 'derived_video'
+                    AND LOWER(retained_media.codec) = 'av1'
+                    AND retained_media.status = 'ready'
+                )
+              )
+            )
         ) THEN declared.location_key || ':' || declared.role
       END) AS archived_file_count,
       COUNT(DISTINCT CASE
@@ -1094,7 +1108,21 @@ def latest_inventory_view(
               )
               AND COALESCE(archived.camera, '') =
                 COALESCE(declared.camera, '')
-              AND archived.status IN ('stored', 'verified', 'ready')
+              AND (
+                archived.status IN ('stored', 'verified', 'ready')
+                OR (
+                  declared.artifact_type = 'video'
+                  AND archived.status = 'raw_video_pruned'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM artifacts retained_media
+                    WHERE retained_media.source_artifact_id = archived.id
+                      AND retained_media.kind = 'derived_video'
+                      AND LOWER(retained_media.codec) = 'av1'
+                      AND retained_media.status = 'ready'
+                  )
+                )
+              )
           )
         ) THEN declared.location_key || ':' || declared.role
       END) AS missing_file_count
@@ -1206,7 +1234,9 @@ def segment_expected_streams(
         )
       )
       AND COALESCE(source.camera, '') = COALESCE(expected.camera, '')
-      AND source.status IN ('stored', 'verified', 'ready')
+      AND source.status IN (
+        'stored', 'verified', 'ready', 'raw_video_pruned'
+      )
     WHERE inventory.id = ?
     ORDER BY expected.segment_number, expected.role
     """,
@@ -1215,7 +1245,13 @@ def segment_expected_streams(
   result: dict[int, list[dict[str, Any]]] = {}
   for row in rows:
     source_status = row["source_status"]
-    archive_status = source_status if source_status in {"stored", "verified", "ready"} else "missing"
+    archive_status = (
+      "verified"
+      if source_status == "raw_video_pruned"
+      else source_status
+      if source_status in {"stored", "verified", "ready"}
+      else "missing"
+    )
     if row["artifact_type"] != "video":
       media_status = "not_required"
     elif row["media_status"] == "ready":

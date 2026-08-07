@@ -259,6 +259,8 @@ class UploadCreate(StrictModel):
       "stable_duration",
       "newer_segment",
       "offroad_grace",
+      "final_segment_grace",
+      "non_segment_grace",
       "historical_import",
       "manual",
     }

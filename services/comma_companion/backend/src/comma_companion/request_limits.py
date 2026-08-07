@@ -27,6 +27,7 @@ class RequestBodyLimitMiddleware:
     *,
     json_max_bytes: int,
     upload_patch_max_bytes: int,
+    inventory_json_max_bytes: int | None = None,
     default_max_bytes: int = 64 * 1024,
     api_path_prefix: str = "/api/",
     upload_path_prefix: str = "/api/v1/uploads/",
@@ -36,6 +37,14 @@ class RequestBodyLimitMiddleware:
     self.upload_patch_max_bytes = self._validate_limit(
       "upload_patch_max_bytes",
       upload_patch_max_bytes,
+    )
+    self.inventory_json_max_bytes = self._validate_limit(
+      "inventory_json_max_bytes",
+      (
+        json_max_bytes
+        if inventory_json_max_bytes is None
+        else inventory_json_max_bytes
+      ),
     )
     self.default_max_bytes = self._validate_limit(
       "default_max_bytes",
@@ -136,6 +145,12 @@ class RequestBodyLimitMiddleware:
 
     if method == "PATCH" and path.startswith(self.upload_path_prefix) and media_type == b"application/offset+octet-stream":
       return self.upload_patch_max_bytes
+    if (
+      method == "POST"
+      and path == "/api/v1/route-inventories"
+      and media_type == b"application/json"
+    ):
+      return self.inventory_json_max_bytes
     if path.startswith(self.api_path_prefix) and (media_type == b"application/json" or media_type.endswith(b"+json")):
       return self.json_max_bytes
     return self.default_max_bytes

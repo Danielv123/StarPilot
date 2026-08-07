@@ -47,6 +47,7 @@ class Settings:
   max_log_artifact_bytes: int = 64 * 1024 * 1024
   max_other_artifact_bytes: int = 256 * 1024 * 1024
   max_json_body_bytes: int = 1024 * 1024
+  max_inventory_body_bytes: int = 8 * 1024 * 1024
   max_active_uploads_per_device: int = 4
   max_pending_upload_bytes_per_device: int = 128 * 1024 * 1024 * 1024
   max_active_uploads_global: int = 32
@@ -170,6 +171,10 @@ class Settings:
         "COMPANION_MAX_JSON_BODY_BYTES",
         str(1024 * 1024),
       )),
+      max_inventory_body_bytes=int(os.getenv(
+        "COMPANION_MAX_INVENTORY_BODY_BYTES",
+        str(8 * 1024 * 1024),
+      )),
       max_active_uploads_per_device=int(os.getenv(
         "COMPANION_MAX_ACTIVE_UPLOADS_PER_DEVICE",
         "4",
@@ -290,6 +295,8 @@ class Settings:
       )
     if self.max_json_body_bytes <= 0:
       raise ValueError("COMPANION_MAX_JSON_BODY_BYTES must be positive")
+    if self.max_inventory_body_bytes <= 0:
+      raise ValueError("COMPANION_MAX_INVENTORY_BODY_BYTES must be positive")
     if not 1 <= self.max_active_uploads_per_device <= 128:
       raise ValueError(
         "COMPANION_MAX_ACTIVE_UPLOADS_PER_DEVICE must be between 1 and 128",

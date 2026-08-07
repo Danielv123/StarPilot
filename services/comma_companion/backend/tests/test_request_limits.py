@@ -245,6 +245,37 @@ def test_chunked_body_cannot_bypass_limit_with_lying_content_length() -> None:
   )
 
 
+def test_route_inventory_uses_its_larger_json_limit() -> None:
+  app = RecordingApp()
+  middleware = RequestBodyLimitMiddleware(
+    app,
+    json_max_bytes=10,
+    inventory_json_max_bytes=20,
+    upload_patch_max_bytes=30,
+  )
+  sent = asyncio.run(
+    _invoke(
+      middleware,
+      scope=_scope(
+        path="/api/v1/route-inventories",
+        headers=[
+          (b"content-type", b"application/json"),
+          (b"content-length", b"15"),
+        ],
+      ),
+      incoming=[
+        {
+          "type": "http.request",
+          "body": b"123456789012345",
+          "more_body": False,
+        },
+      ],
+    )
+  )
+  assert app.calls == 1
+  assert _response(sent) == (204, None)
+
+
 def test_accepted_messages_are_replayed_unchanged() -> None:
   app = RecordingApp()
   middleware = RequestBodyLimitMiddleware(

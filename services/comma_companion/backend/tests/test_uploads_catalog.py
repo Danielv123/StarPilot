@@ -458,6 +458,28 @@ def test_agent_file_id_rejects_non_sha256_identifiers(
   assert response.json()["error"]["code"] == "validation_error"
 
 
+@pytest.mark.parametrize(
+  "evidence",
+  ("final_segment_grace", "non_segment_grace"),
+)
+def test_agent_completion_grace_evidence_is_accepted(
+  admin_client: TestClient,
+  evidence: str,
+) -> None:
+  declaration = _declaration(
+    evidence.encode(),
+    relative_path=f"completion-evidence/0/{evidence}.bin",
+  )
+  declaration["completion_evidence"] = ["no_lock", "stable_duration", evidence]
+  response = admin_client.post(
+    "/api/v1/uploads",
+    headers=device_headers(idempotency_key=f"completion-evidence-{evidence}"),
+    json=declaration,
+  )
+  assert response.status_code == 201, response.text
+  assert response.json()["completion_evidence"] == declaration["completion_evidence"]
+
+
 def test_upload_snapshot_pending_bytes_counts_only_remaining_data(
   admin_client: TestClient,
 ) -> None:

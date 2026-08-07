@@ -513,6 +513,13 @@ export function normalizeDevice(raw: RawDevice): Device {
     network_metered: metrics.network_metered === true,
     upload_bps: metricNumber(metrics, 'upload_bps', 'bytes_per_second'),
     queue_bytes: metricNumber(metrics, 'queue_bytes', 'pending_bytes'),
+    unuploaded_bytes: metricNumber(metrics, 'unuploaded_bytes'),
+    unuploaded_files: metricNumber(metrics, 'unuploaded_files'),
+    backlog_scanned_at: metricString(metrics, 'unuploaded_scan_at'),
+    backlog_scan_complete:
+      typeof metrics.unuploaded_scan_complete === 'boolean'
+        ? metrics.unuploaded_scan_complete
+        : undefined,
     spool_bytes: metricNumber(metrics, 'spool_bytes'),
     spool_capacity_bytes: metricNumber(metrics, 'spool_capacity_bytes'),
     free_space_bytes:
@@ -1413,6 +1420,22 @@ export const api = {
       (total, device) => total + Math.max(0, device.queue_bytes ?? 0),
       0,
     )
+    const hasFullBacklog = devices.length > 0 && devices.every(
+      (device) => device.unuploaded_bytes != null && device.backlog_scanned_at != null,
+    )
+    const unuploadedBytes = hasFullBacklog
+      ? devices.reduce((total, device) => total + Math.max(0, device.unuploaded_bytes ?? 0), 0)
+      : Math.max(deviceQueueBytes, snapshot.pending_bytes)
+    const unuploadedFiles = hasFullBacklog
+      ? devices.reduce((total, device) => total + Math.max(0, device.unuploaded_files ?? 0), 0)
+      : 0
+    const protectedSpoolBytes = devices.reduce(
+      (total, device) => total + Math.max(0, device.spool_bytes ?? device.queue_bytes ?? 0),
+      0,
+    )
+    const deviceMetricsAt = devices
+      .flatMap((device) => device.last_seen_at ? [device.last_seen_at] : [])
+      .sort((left, right) => Date.parse(right) - Date.parse(left))[0]
     const devicesOnroad = onlineDevices.filter((device) => device.onroad === true).length
     const devicesParked = onlineDevices.filter((device) => device.offroad === true).length
     return {
@@ -1423,7 +1446,16 @@ export const api = {
       devices_parked: devicesParked,
       devices_road_state_unknown: onlineDevices.length - devicesOnroad - devicesParked,
       upload_bps: snapshot.bytes_per_second_60s,
-      pending_upload_bytes: Math.max(deviceQueueBytes, snapshot.pending_bytes),
+      pending_upload_bytes: unuploadedBytes,
+      unuploaded_bytes: unuploadedBytes,
+      unuploaded_files: unuploadedFiles,
+      protected_spool_bytes: protectedSpoolBytes,
+      backlog_scope: hasFullBacklog ? 'full' : devices.length ? 'protected' : 'server',
+      backlog_scan_complete: hasFullBacklog && devices.every(
+        (device) => device.backlog_scan_complete === true,
+      ),
+      device_metrics_at: deviceMetricsAt,
+      device_metrics_stale: devices.some((device) => !device.online),
       server_pending_bytes: snapshot.pending_bytes,
       bytes_received: snapshot.bytes_received,
     }

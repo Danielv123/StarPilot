@@ -25,7 +25,7 @@ import {
 } from '../components/ui'
 import { useApi } from '../hooks/useApi'
 import { useVisibilityPolling } from '../hooks/useVisibilityPolling'
-import { formatBitrate, formatBytes, formatEta, percent } from '../utils'
+import { formatBitrate, formatBytes, formatRelativeTime, percent } from '../utils'
 
 const SPEED_HISTORY_LENGTH = 60
 export const ACTIVE_PIPELINE_POLL_INTERVAL_MS = 1_000
@@ -73,6 +73,29 @@ export function deviceRoadStateDetail(
   return details.join(' · ')
 }
 
+export function backlogDetail(inbound: InboundStatus, now = Date.now()): string {
+  const details: string[] = []
+  if (inbound.backlog_scope === 'full') {
+    details.push(`${inbound.unuploaded_files.toLocaleString()} files`)
+    if (!inbound.backlog_scan_complete) details.push('partial scan')
+  } else if (inbound.backlog_scope === 'protected') {
+    details.push('protected spool only; agent update pending')
+  } else {
+    details.push('server sessions only')
+  }
+  if (inbound.protected_spool_bytes > 0) {
+    details.push(`${formatBytes(inbound.protected_spool_bytes)} protected`)
+  }
+  if (inbound.server_pending_bytes > 0) {
+    details.push(`${formatBytes(inbound.server_pending_bytes)} server-active`)
+  }
+  details.push(formatBitrate(inbound.upload_bps))
+  if (inbound.device_metrics_stale && inbound.device_metrics_at) {
+    details.push(`device report ${formatRelativeTime(inbound.device_metrics_at, now)}`)
+  }
+  return details.join(' · ')
+}
+
 function SpeedSparkline({ values }: { values: number[] }) {
   const line = sparklinePath(values)
   if (!line) return null
@@ -113,8 +136,7 @@ export default function OverviewPage() {
   const inbound = inboundState.data
   const activeUploads = activeUploadsState.data ?? overview.active_uploads
   const uploadBps = inbound?.upload_bps ?? overview.upload_bps
-  const pendingUploadBytes = inbound?.pending_upload_bytes ?? overview.pending_upload_bytes
-  const etaSeconds = uploadBps > 0 ? pendingUploadBytes / uploadBps : undefined
+  const pendingUploadBytes = inbound?.unuploaded_bytes ?? overview.pending_upload_bytes
   const devicesOnline = inbound?.devices_online ?? overview.devices_online
   const devicesTotal = inbound?.devices_total ?? overview.devices_total
   const hasStorageCapacity = Boolean(overview.storage.capacity_bytes && overview.storage.capacity_bytes > 0)
@@ -131,7 +153,7 @@ export default function OverviewPage() {
         actions={
           <div className="header-status">
             <span className="live-indicator"><i /> LIVE</span>
-            <LastUpdated value={inbound?.generated_at ?? overview.generated_at} />
+            <LastUpdated value={inbound?.device_metrics_at ?? inbound?.generated_at ?? overview.generated_at} />
           </div>
         }
       />
@@ -145,10 +167,16 @@ export default function OverviewPage() {
           icon={<CarFront size={18} />}
         />
         <Metric
-          label="Inbound"
-          value={formatBitrate(uploadBps)}
-          detail={`${formatBytes(pendingUploadBytes)} queued · ETA ${formatEta(etaSeconds)}`}
-          tone={uploadBps > 0 ? 'info' : undefined}
+          label={inbound?.backlog_scope === 'full'
+            ? 'Unuploaded'
+            : inbound?.backlog_scope === 'protected'
+              ? 'Protected queue'
+              : 'Server pending'}
+          value={formatBytes(pendingUploadBytes)}
+          detail={inbound
+            ? backlogDetail(inbound)
+            : `${formatBytes(overview.pending_upload_bytes)} server-active`}
+          tone={inbound?.device_metrics_stale ? 'warn' : uploadBps > 0 ? 'info' : undefined}
           icon={<HardDriveUpload size={18} />}
           background={<SpeedSparkline values={speedHistory} />}
         />

@@ -42,6 +42,13 @@ export interface InboundStatus {
   devices_road_state_unknown: number
   upload_bps: number
   pending_upload_bytes: number
+  unuploaded_bytes: number
+  unuploaded_files: number
+  protected_spool_bytes: number
+  backlog_scope: 'full' | 'protected' | 'server'
+  backlog_scan_complete: boolean
+  device_metrics_at?: string
+  device_metrics_stale: boolean
   server_pending_bytes: number
   bytes_received: number
 }
@@ -65,6 +72,10 @@ export interface Device {
   network_metered?: boolean
   upload_bps?: number
   queue_bytes?: number
+  unuploaded_bytes?: number
+  unuploaded_files?: number
+  backlog_scanned_at?: string
+  backlog_scan_complete?: boolean
   spool_bytes?: number
   spool_capacity_bytes?: number
   free_space_bytes?: number

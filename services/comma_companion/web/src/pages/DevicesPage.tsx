@@ -67,8 +67,8 @@ export default function DevicesPage() {
                 </div>
                 <div>
                   <HardDrive size={16} />
-                  <span>Upload queue</span>
-                  <strong>{formatBytes(device.queue_bytes)}</strong>
+                  <span>{device.unuploaded_bytes != null ? 'Unuploaded' : 'Protected queue'}</span>
+                  <strong>{formatBytes(device.unuploaded_bytes ?? device.queue_bytes)}</strong>
                 </div>
                 <div>
                   <Radio size={16} />
@@ -98,9 +98,16 @@ export default function DevicesPage() {
           icon={<ShieldCheck size={18} />}
         />
         <Metric
-          label="Combined queue"
-          value={formatBytes(devices.reduce((sum, device) => sum + (device.queue_bytes ?? 0), 0))}
-          detail="durably protected on-device"
+          label={devices.every((device) => device.unuploaded_bytes != null)
+            ? 'Unuploaded'
+            : 'Protected queue'}
+          value={formatBytes(devices.reduce(
+            (sum, device) => sum + (device.unuploaded_bytes ?? device.queue_bytes ?? 0),
+            0,
+          ))}
+          detail={devices.every((device) => device.unuploaded_bytes != null)
+            ? 'complete on-device scan'
+            : 'protected queue only until agent update'}
           icon={<HardDrive size={18} />}
         />
         <Metric

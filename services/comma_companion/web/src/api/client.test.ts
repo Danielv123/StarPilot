@@ -171,6 +171,10 @@ describe('device normalization', () => {
       capabilities: ['command_rescan'],
       metrics: {
         pending_bytes: 12,
+        unuploaded_bytes: 34,
+        unuploaded_files: 2,
+        unuploaded_scan_at: '2026-07-29T09:59:30Z',
+        unuploaded_scan_complete: true,
         host: {
           data_free_bytes: 345,
           current_route: 'route-1',
@@ -190,6 +194,10 @@ describe('device normalization', () => {
       git_commit: 'abc123',
       current_drive_id: 'route-1',
       queue_bytes: 12,
+      unuploaded_bytes: 34,
+      unuploaded_files: 2,
+      backlog_scanned_at: '2026-07-29T09:59:30Z',
+      backlog_scan_complete: true,
       free_space_bytes: 345,
       temperature_c: 61.5,
       battery_percent: 78,
@@ -224,7 +232,14 @@ describe('device normalization', () => {
           network_type: 'wifi',
           state: 'uploading',
           capabilities: [],
-          metrics: { pending_bytes: 7_000_000_000 },
+          metrics: {
+            pending_bytes: 7_000_000_000,
+            spool_bytes: 7_100_000_000,
+            unuploaded_bytes: 19_000_000_000,
+            unuploaded_files: 321,
+            unuploaded_scan_at: '2026-07-29T09:59:30Z',
+            unuploaded_scan_complete: true,
+          },
         }]), { status: 200, headers: { 'content-type': 'application/json' } })
       }
       throw new Error(`Unexpected request ${url}`)
@@ -239,7 +254,14 @@ describe('device normalization', () => {
         devices_parked: 1,
         devices_road_state_unknown: 0,
         upload_bps: 1_875_000,
-        pending_upload_bytes: 7_000_000_000,
+        pending_upload_bytes: 19_000_000_000,
+        unuploaded_bytes: 19_000_000_000,
+        unuploaded_files: 321,
+        protected_spool_bytes: 7_100_000_000,
+        backlog_scope: 'full',
+        backlog_scan_complete: true,
+        device_metrics_at: '2026-07-29T10:00:00Z',
+        device_metrics_stale: false,
         server_pending_bytes: 55_000_000,
         bytes_received: 100_000_000,
       })

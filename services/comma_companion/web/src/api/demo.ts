@@ -42,6 +42,10 @@ export const demoDevices: Device[] = [
     network_metered: false,
     upload_bps: 5_900_000,
     queue_bytes: 18_420_000_000,
+    unuploaded_bytes: 42_700_000_000,
+    unuploaded_files: 642,
+    backlog_scanned_at: isoAgo(0.3),
+    backlog_scan_complete: true,
     spool_bytes: 21_200_000_000,
     spool_capacity_bytes: 231_000_000_000,
     free_space_bytes: 91_700_000_000,
@@ -557,8 +561,21 @@ export const demoApi = {
       upload_bps: demoOverview.upload_bps,
       pending_upload_bytes: Math.max(
         demoOverview.pending_upload_bytes,
-        demoDevices.reduce((total, device) => total + (device.queue_bytes ?? 0), 0),
+        demoDevices.reduce((total, device) => total + (device.unuploaded_bytes ?? device.queue_bytes ?? 0), 0),
       ),
+      unuploaded_bytes: demoDevices.reduce(
+        (total, device) => total + (device.unuploaded_bytes ?? device.queue_bytes ?? 0),
+        0,
+      ),
+      unuploaded_files: demoDevices.reduce((total, device) => total + (device.unuploaded_files ?? 0), 0),
+      protected_spool_bytes: demoDevices.reduce(
+        (total, device) => total + (device.spool_bytes ?? device.queue_bytes ?? 0),
+        0,
+      ),
+      backlog_scope: 'full',
+      backlog_scan_complete: true,
+      device_metrics_at: demoDevices[0]?.last_seen_at,
+      device_metrics_stale: demoDevices.some((device) => !device.online),
       server_pending_bytes: demoOverview.pending_upload_bytes,
       bytes_received: demoUploads.reduce((total, upload) => total + upload.received_bytes, 0),
     }

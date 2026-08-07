@@ -198,7 +198,7 @@ export default function DeviceDetailPage() {
 
       <div className="metric-grid metric-grid-five">
         <Metric label="Network" value={device.network_type ?? '—'} detail={device.ip_address} icon={<Wifi size={18} />} />
-        <Metric label="Transfer" value={formatBitrate(device.upload_bps)} detail={`${formatBytes(device.queue_bytes)} queued`} icon={<Network size={18} />} />
+        <Metric label="Transfer" value={formatBitrate(device.upload_bps)} detail={`${formatBytes(device.unuploaded_bytes ?? device.queue_bytes)} ${device.unuploaded_bytes != null ? 'unuploaded' : 'protected queue'}`} icon={<Network size={18} />} />
         <Metric label="Free space" value={formatBytes(device.free_space_bytes)} detail="on device" icon={<HardDrive size={18} />} />
         <Metric label="Thermal" value={device.temperature_c != null ? `${device.temperature_c.toFixed(1)} °C` : '—'} detail="device temperature" tone={(device.temperature_c ?? 0) > 70 ? 'warn' : undefined} icon={<Thermometer size={18} />} />
         <Metric label="Battery" value={device.battery_percent != null ? `${device.battery_percent}%` : '—'} detail="reported level" icon={<BatteryCharging size={18} />} />

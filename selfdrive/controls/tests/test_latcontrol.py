@@ -951,6 +951,23 @@ class TestLatControl:
 
     assert captured["error"] - lac_log.error == pytest.approx(2.0 * IONIQ_5_FRICTION_JERK_GAIN)
 
+  def test_ioniq_5_can_disable_friction_jerk_gain(self, monkeypatch):
+    controller, VM, CS, params, starpilot_toggles = self._build_torque_controller(HYUNDAI.HYUNDAI_IONIQ_5)
+    starpilot_toggles.friction_jerk_gain = 0.0
+    monkeypatch.setattr(controller.jerk_filter, "update", lambda _raw_jerk: 2.0)
+    captured = {}
+
+    def fake_get_friction(error, _deadzone, _threshold, _torque_params):
+      captured["error"] = error
+      return 0.0
+
+    monkeypatch.setattr(latcontrol_torque, "get_friction", fake_get_friction)
+    _, _, lac_log = controller.update(
+      True, CS, VM, params, False, 0.0025, False, 0.2, None, None, starpilot_toggles,
+    )
+
+    assert captured["error"] - lac_log.error == pytest.approx(0.0)
+
   def test_ioniq_6_default_update_path(self):
     controller, VM, CS, params, starpilot_toggles = self._build_torque_controller(HYUNDAI.HYUNDAI_IONIQ_6)
 

@@ -50,6 +50,7 @@ class StarPilotCarState:
     # ========== Car Values for Range Calculation ==========
     steerActuatorDelay: float = 0.0
     friction: float = 0.0
+    frictionJerkGainDefault: float = 0.0
     steerKp: float = 0.6
     latAccelFactor: float = 0.0
     steerRatio: float = 0.0
@@ -130,6 +131,7 @@ class StarPilotState:
             starpilot_toggles = json.loads(self.params.get("StarPilotToggles") or "{}")
         except:
             starpilot_toggles = {}
+        self.car_state.frictionJerkGainDefault = float(starpilot_toggles.get("friction_jerk_gain_default", 0.0) or 0.0)
 
         # 1. Parse CarParamsPersistent
         cp_bytes = self.params.get("CarParamsPersistent")

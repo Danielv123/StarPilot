@@ -332,6 +332,7 @@ SteerDelay
 SteerDelayModeMigrated
 SteerDelayStock
 SteerFriction
+SteerFrictionJerkGain
 SteerFrictionStock
 SteerKP
 SteerKPStock

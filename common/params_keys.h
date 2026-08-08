@@ -596,6 +596,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SteerDelayModeMigrated", {PERSISTENT, BOOL}},
     {"SteerDelayStock", {PERSISTENT, FLOAT, "0.0", "0.0", 3}},
     {"SteerFriction", {PERSISTENT, FLOAT, "0.0", "0.0", 3}},
+    {"SteerFrictionJerkGain", {PERSISTENT, FLOAT, "0.10", "0.10", 3}},
     {"SteerFrictionStock", {PERSISTENT, FLOAT, "0.0", "0.0", 3}},
     {"SteerKP", {PERSISTENT, FLOAT, "0.0", "0.0", 3}},
     {"SteerKPStock", {PERSISTENT, FLOAT, "0.0", "0.0", 3}},

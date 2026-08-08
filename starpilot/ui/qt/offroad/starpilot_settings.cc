@@ -322,6 +322,7 @@ void StarPilotSettingsWindow::updateVariables() {
   StarPilotUIScene &starpilot_scene = fs.starpilot_scene;
   QJsonObject &starpilot_toggles = starpilot_scene.starpilot_toggles;
   const bool showAllToggles = showAllTogglesEnabled();
+  frictionJerkGainDefault = starpilot_toggles.value("friction_jerk_gain_default").toDouble();
 
   auto applyDesktopVehicleFallback = [&]() {
     QString fallbackMake = starpilot_toggles.value("car_make").toString();

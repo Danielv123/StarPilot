@@ -30,6 +30,7 @@ SAFE_MODE_MANAGED_KEYS = (
   "ForceTorqueController",
   "SteerDelay",
   "SteerFriction",
+  "SteerFrictionJerkGain",
   "SteerKP",
   "SteerLatAccel",
   "SteerRatio",

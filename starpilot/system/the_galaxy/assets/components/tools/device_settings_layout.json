@@ -64,6 +64,19 @@
         "settings_tier": "advanced"
       },
       {
+        "key": "SteerFrictionJerkGain",
+        "label": "Friction Jerk Gain",
+        "description": "How strongly changes in requested lateral acceleration affect friction compensation. 0 disables the jerk contribution.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.0,
+        "max": 0.1,
+        "step": 0.01,
+        "precision": 2,
+        "parent_key": "AdvancedLateralTune",
+        "settings_tier": "advanced"
+      },
+      {
         "key": "SteerKP",
         "label": "Kp Factor",
         "description": "Kp Factor",

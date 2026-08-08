@@ -280,6 +280,13 @@ class StarPilotLateralLayout(_SettingsPage):
         visible=lambda: alt_on() and cs.friction != 0 and cs.isTorqueCar and not cs.isAngleCar,
       ),
       SettingRow(
+        "SteerFrictionJerkGain", "value", tr_noop("Friction Jerk Gain"),
+        subtitle=tr_noop("How strongly changes in requested lateral acceleration affect friction compensation. 0 disables the jerk contribution."),
+        get_value=lambda: f"{p.get_float('SteerFrictionJerkGain'):.2f}",
+        on_click=lambda: self._show_slider("SteerFrictionJerkGain", 0.0, cs.frictionJerkGainDefault, step=0.01, value_type="float"),
+        visible=lambda: alt_on() and cs.frictionJerkGainDefault > 0.0 and cs.isTorqueCar and not cs.isAngleCar,
+      ),
+      SettingRow(
         "SteerKP", "value", tr_noop("Kp Factor"),
         subtitle=tr_noop("How strongly openpilot corrects lateral position."),
         get_value=lambda: f"{p.get_float('SteerKP'):.2f}",

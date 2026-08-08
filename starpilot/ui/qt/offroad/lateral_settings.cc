@@ -34,6 +34,7 @@ StarPilotLateralPanel::StarPilotLateralPanel(StarPilotSettingsWindow *parent, bo
     {"AdvancedLateralTune", tr("Advanced Lateral Tuning"), tr("<b>Advanced steering control changes to fine-tune how openpilot drives.</b>"), "../../starpilot/assets/toggle_icons/icon_advanced_lateral_tune.png"},
     {"SteerDelay", parent->steerActuatorDelay != 0 ? QString(tr("Actuator Delay (Default: %1)")).arg(QString::number(parent->steerActuatorDelay, 'f', 2)) : tr("Actuator Delay"), tr("<b>The time between openpilot's steering command and the vehicle's response.</b> Increase if the vehicle reacts late; decrease if it feels jumpy. Auto-learned by default."), ""},
     {"SteerFriction", parent->friction != 0 ? QString(tr("Friction (Default: %1)")).arg(QString::number(parent->friction, 'f', 2)) : tr("Friction"), tr("<b>Compensates for steering friction.</b> Increase if the wheel sticks near center; decrease if it jitters. Auto-learned by default."), ""},
+    {"SteerFrictionJerkGain", QString(tr("Friction Jerk Gain (Default: %1)")).arg(QString::number(parent->frictionJerkGainDefault, 'f', 2)), tr("<b>Controls how strongly changes in requested lateral acceleration affect friction compensation.</b> Set to 0 to disable the jerk contribution."), ""},
     {"SteerKP", parent->steerKp != 0 ? QString(tr("Kp Factor (Default: %1)")).arg(QString::number(parent->steerKp, 'f', 2)) : tr("Kp Factor"), tr("<b>How strongly openpilot corrects lane position.</b> Higher is tighter but twitchier; lower is smoother but slower. Auto-learned by default."), ""},
     {"SteerLatAccel", parent->latAccelFactor != 0 ? QString(tr("Lateral Acceleration (Default: %1)")).arg(QString::number(parent->latAccelFactor, 'f', 2)) : tr("Lateral Acceleration"), tr("<b>Maps steering torque to turning response.</b> Increase for sharper turns; decrease for gentler steering. Auto-learned by default."), ""},
     {"SteerRatio", parent->steerRatio != 0 ? QString(tr("Steer Ratio (Default: %1)")).arg(QString::number(parent->steerRatio, 'f', 2)) : tr("Steer Ratio"), tr("<b>The relationship between steering wheel rotation and road wheel angle.</b> Increase if steering feels too quick or twitchy; decrease if it feels too slow or weak. Auto-learned by default."), ""},
@@ -78,6 +79,9 @@ StarPilotLateralPanel::StarPilotLateralPanel(StarPilotSettingsWindow *parent, bo
     } else if (param == "SteerFriction") {
       std::vector<QString> steerFrictionButton{"Reset"};
       lateralToggle = new StarPilotParamValueButtonControl(param, title, desc, icon, 0, 1, QString(), std::map<float, QString>(), 0.01, false, {}, steerFrictionButton, false, false);
+    } else if (param == "SteerFrictionJerkGain") {
+      std::vector<QString> steerFrictionJerkGainButton{"Reset"};
+      lateralToggle = new StarPilotParamValueButtonControl(param, title, desc, icon, 0, parent->frictionJerkGainDefault, QString(), std::map<float, QString>(), 0.01, false, {}, steerFrictionJerkGainButton, false, false);
     } else if (param == "SteerKP") {
       std::vector<QString> steerKPButton{"Reset"};
       lateralToggle = new StarPilotParamValueButtonControl(param, title, desc, icon, parent->steerKp * 0.5, parent->steerKp * 1.5, QString(), std::map<float, QString>(), 0.01, false, {}, steerKPButton, false, false);
@@ -220,6 +224,14 @@ StarPilotLateralPanel::StarPilotLateralPanel(StarPilotSettingsWindow *parent, bo
     }
   });
 
+  steerFrictionJerkGainToggle = static_cast<StarPilotParamValueButtonControl*>(toggles["SteerFrictionJerkGain"]);
+  QObject::connect(steerFrictionJerkGainToggle, &StarPilotParamValueButtonControl::buttonClicked, [parent, this]() {
+    if (StarPilotConfirmationDialog::yesorno(tr("Reset <b>Friction Jerk Gain</b> to its default value?"), this)) {
+      params.putFloat("SteerFrictionJerkGain", parent->frictionJerkGainDefault);
+      steerFrictionJerkGainToggle->refresh();
+    }
+  });
+
   steerKPToggle = static_cast<StarPilotParamValueButtonControl*>(toggles["SteerKP"]);
   QObject::connect(steerKPToggle, &StarPilotParamValueButtonControl::buttonClicked, [parent, this]() {
     if (StarPilotConfirmationDialog::yesorno(tr("Reset <b>Kp Factor</b> to its default value?"), this)) {
@@ -257,6 +269,8 @@ StarPilotLateralPanel::StarPilotLateralPanel(StarPilotSettingsWindow *parent, bo
 void StarPilotLateralPanel::showEvent(QShowEvent *event) {
   steerDelayToggle->setTitle(QString(tr("Actuator Delay (Default: %1)")).arg(QString::number(parent->steerActuatorDelay, 'f', 2)));
   steerFrictionToggle->setTitle(QString(tr("Friction (Default: %1)")).arg(QString::number(parent->friction, 'f', 2)));
+  steerFrictionJerkGainToggle->setTitle(QString(tr("Friction Jerk Gain (Default: %1)")).arg(QString::number(parent->frictionJerkGainDefault, 'f', 2)));
+  steerFrictionJerkGainToggle->updateControl(0, parent->frictionJerkGainDefault);
   steerKPToggle->setTitle(QString(tr("Kp Factor (Default: %1)")).arg(QString::number(parent->steerKp, 'f', 2)));
   steerKPToggle->updateControl(parent->steerKp * 0.5, parent->steerKp * 1.5);
   steerLatAccelToggle->setTitle(QString(tr("Lateral Accel (Default: %1)")).arg(QString::number(parent->latAccelFactor, 'f', 2)));
@@ -403,6 +417,12 @@ void StarPilotLateralPanel::updateToggles() {
         setVisible &= parent->hasAutoTune ? forcingAutoTuneOff : !forcingAutoTune;
         setVisible &= parent->isTorqueCar || forcingTorqueController || usingNNFF;
         setVisible &= !usingNNFF;
+      }
+
+      else if (key == "SteerFrictionJerkGain") {
+        setVisible &= parent->frictionJerkGainDefault > 0.0f;
+        setVisible &= parent->isTorqueCar;
+        setVisible &= !parent->isAngleCar;
       }
 
       else if (key == "SteerKP") {

@@ -50,6 +50,7 @@ public:
   bool openpilotLongitudinalControlDisabled = false;
 
   float friction;
+  float frictionJerkGainDefault = 0.0f;
   float latAccelFactor;
   float longitudinalActuatorDelay;
   float startAccel;

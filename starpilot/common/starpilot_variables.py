@@ -27,6 +27,7 @@ from openpilot.common.basedir import BASEDIR
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
 from openpilot.selfdrive.controls.lib.latcontrol_torque import KP
+from openpilot.selfdrive.controls.lib.latcontrol_vehicle_tunes import IONIQ_5_CARS, IONIQ_5_FRICTION_JERK_GAIN
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.starpilot.common.model_versions import is_tinygrad_model_version
 from openpilot.starpilot.common.lateral_delay import full_lateral_delay
@@ -722,6 +723,12 @@ class StarPilotVariables:
     toggle.use_custom_steerActuatorDelay = advanced_lateral_tuning and not toggle.use_auto_steer_delay
     toggle.friction = self.get_value("SteerFriction", cast=float, condition=advanced_lateral_tuning, default=friction, min=0, max=1)
     toggle.use_custom_friction = bool(round(toggle.friction, 2) != round(friction, 2)) and is_torque_car and not toggle.force_auto_tune or toggle.force_auto_tune_off
+    toggle.friction_jerk_gain_default = IONIQ_5_FRICTION_JERK_GAIN if car_model in IONIQ_5_CARS else 0.0
+    toggle.friction_jerk_gain = self.get_value(
+      "SteerFrictionJerkGain", cast=float,
+      condition=advanced_lateral_tuning and toggle.friction_jerk_gain_default > 0.0,
+      default=toggle.friction_jerk_gain_default, min=0.0, max=toggle.friction_jerk_gain_default,
+    )
     toggle.steerKp = [[0], [self.get_value("SteerKP", cast=float, condition=advanced_lateral_tuning and is_torque_car and not is_angle_car, default=steerKp, min=steerKp * 0.5, max=steerKp * 1.5)]]
     toggle.latAccelFactor = self.get_value("SteerLatAccel", cast=float, condition=advanced_lateral_tuning, default=latAccelFactor, min=latAccelFactor * 0.5, max=latAccelFactor * 1.5)
     toggle.use_custom_latAccelFactor = bool(round(toggle.latAccelFactor, 2) != round(latAccelFactor, 2)) and is_torque_car and not toggle.force_auto_tune or toggle.force_auto_tune_off

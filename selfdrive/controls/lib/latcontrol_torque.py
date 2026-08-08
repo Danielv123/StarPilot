@@ -455,7 +455,12 @@ class LatControlTorque(LatControl):
       if ioniq_6_active:
         # planner jerk noise on straights (< ~0.3 m/s^3) chatters the friction compensation
         friction_jerk = math.copysign(max(abs(desired_lateral_jerk) - IONIQ_6_FRICTION_JERK_DEADZONE, 0.0), desired_lateral_jerk)
-      friction_jerk_gain = IONIQ_5_FRICTION_JERK_GAIN if ioniq_5_active else JERK_GAIN
+      friction_jerk_gain = JERK_GAIN
+      if ioniq_5_active:
+        friction_jerk_gain = float(np.clip(
+          getattr(starpilot_toggles, "friction_jerk_gain", IONIQ_5_FRICTION_JERK_GAIN),
+          0.0, IONIQ_5_FRICTION_JERK_GAIN,
+        ))
       ff += friction_scale * get_friction(
         error_with_lsf + friction_jerk_gain * friction_jerk,
         lateral_accel_deadzone, friction_threshold, self.torque_params,

@@ -84,6 +84,8 @@ def test_requested_simple_and_advanced_settings_tiers():
     assert lateral[key]["settings_tier"] == "simple"
   for key in ("AdvancedLateralTune", "LateralTune", "NavDesiresAllowed"):
     assert lateral[key]["settings_tier"] == "advanced"
+  assert lateral["SteerFrictionJerkGain"]["min"] == 0.0
+  assert lateral["SteerFrictionJerkGain"]["max"] == 0.1
 
   for key in (
     "ConditionalExperimental",

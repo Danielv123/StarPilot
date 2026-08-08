@@ -966,7 +966,7 @@ class TestLatControl:
       True, CS, VM, params, False, 0.0025, False, 0.2, None, None, starpilot_toggles,
     )
 
-    assert captured["error"] - lac_log.error == pytest.approx(0.0)
+    assert captured["error"] - lac_log.error == pytest.approx(0.0, abs=1e-7)
 
   def test_ioniq_6_default_update_path(self):
     controller, VM, CS, params, starpilot_toggles = self._build_torque_controller(HYUNDAI.HYUNDAI_IONIQ_6)

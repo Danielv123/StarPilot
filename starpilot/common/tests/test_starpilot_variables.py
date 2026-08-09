@@ -19,6 +19,11 @@ def test_jeep_brake_hold_scope_is_grand_cherokee_only():
   }
 
 
+def test_friction_jerk_gain_default_uses_detected_car_model():
+  assert spv.default_friction_jerk_gain(next(iter(spv.IONIQ_5_CARS))) == spv.IONIQ_5_FRICTION_JERK_GAIN
+  assert spv.default_friction_jerk_gain("MOCK") == 0.0
+
+
 def test_get_starpilot_toggles_uses_last_non_empty_broadcast(monkeypatch):
   params = SimpleNamespace(get_bool=lambda _key: False)
   monkeypatch.setattr(spv.get_starpilot_toggles, "_params", params, raising=False)

@@ -325,6 +325,10 @@ def normalize_legacy_car_model(car_model):
   normalized = LEGACY_CARMODEL_MIGRATIONS.get(car_model, car_model)
   return normalized
 
+
+def default_friction_jerk_gain(car_model):
+  return IONIQ_5_FRICTION_JERK_GAIN if car_model in IONIQ_5_CARS else 0.0
+
 def default_ev_tuning_enabled(CP):
   car_make = str(getattr(CP, "brand", "") or "")
   car_model = normalize_legacy_car_model(getattr(CP, "carFingerprint", "")) or ""
@@ -723,7 +727,7 @@ class StarPilotVariables:
     toggle.use_custom_steerActuatorDelay = advanced_lateral_tuning and not toggle.use_auto_steer_delay
     toggle.friction = self.get_value("SteerFriction", cast=float, condition=advanced_lateral_tuning, default=friction, min=0, max=1)
     toggle.use_custom_friction = bool(round(toggle.friction, 2) != round(friction, 2)) and is_torque_car and not toggle.force_auto_tune or toggle.force_auto_tune_off
-    toggle.friction_jerk_gain_default = IONIQ_5_FRICTION_JERK_GAIN if car_model in IONIQ_5_CARS else 0.0
+    toggle.friction_jerk_gain_default = default_friction_jerk_gain(toggle.car_model)
     toggle.friction_jerk_gain = self.get_value(
       "SteerFrictionJerkGain", cast=float,
       condition=advanced_lateral_tuning and toggle.friction_jerk_gain_default > 0.0,

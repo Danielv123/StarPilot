@@ -686,12 +686,12 @@ IONIQ_5_STEADY_JERK_WIDTH = 0.08
 IONIQ_5_FRICTION_JERK_GAIN = 0.10
 IONIQ_5_DAMPING_GAIN = 0.02
 # Extra measured-response damping is blended in only at highway speed.
-IONIQ_5_HIGHWAY_DAMPING_GAIN = 0.07
+IONIQ_5_HIGHWAY_DAMPING_GAIN = 0.08
 IONIQ_5_HIGHWAY_DAMPING_START_SPEED = 18.0
 IONIQ_5_HIGHWAY_DAMPING_FULL_SPEED = 22.0
 # Preserve nominal damping through a smooth unwind, then soften it briefly after
 # a measured wheel-rate reversal to reduce the following oscillation.
-IONIQ_5_REVERSAL_DAMPING_GAIN = 0.0175
+IONIQ_5_REVERSAL_DAMPING_GAIN = 0.015
 IONIQ_5_REVERSAL_DAMPING_HOLD_SECONDS = 0.60
 IONIQ_5_TURN_EXIT_HOLD_SECONDS = 0.75
 IONIQ_5_TURN_EXIT_MIN_SPEED = 8.0

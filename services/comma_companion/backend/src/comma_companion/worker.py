@@ -192,6 +192,14 @@ def main() -> None:
   lock_path = settings.session_dir / "worker.lock"
   try:
     with SingletonWorkerLock(lock_path):
+      pruned = integrations.prune_superseded_telemetry_generations()
+      if pruned["generations"]:
+        LOGGER.info(
+          "Removed %d superseded telemetry generations (%d files, %d bytes)",
+          pruned["generations"],
+          pruned["files"],
+          pruned["bytes"],
+        )
       _refresh_model_registry(database, integrations)
       LOGGER.info(
         "Worker started with concurrency=%d",

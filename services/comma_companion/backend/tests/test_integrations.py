@@ -2540,6 +2540,20 @@ def test_extract_telemetry_installs_and_indexes_canonical_stream(
     archive_root,
     process_runner=rlog_runner,
   )
+  generation_directory = (
+    archive_root / "telemetry" / DEVICE_ID / ROUTE_NAME / "v1"
+  )
+  generation_directory.mkdir(parents=True)
+  superseded_sha256 = "f" * 64
+  superseded_paths = [
+    generation_directory / f"telemetry.{superseded_sha256}.ndjson",
+    generation_directory / f"manifest.{superseded_sha256}.json",
+    generation_directory / f"signal-catalog.{superseded_sha256}.json",
+  ]
+  for path in superseded_paths:
+    path.write_text("superseded\n", encoding="utf-8")
+  unrelated_path = generation_directory / "telemetry.notes.ndjson"
+  unrelated_path.write_text("keep\n", encoding="utf-8")
   source_fingerprint = telemetry_source_fingerprint(
     [
       {
@@ -2565,6 +2579,23 @@ def test_extract_telemetry_installs_and_indexes_canonical_stream(
   assert ndjson.parent == (archive_root / "telemetry" / DEVICE_ID / ROUTE_NAME / "v1")
   index = json.loads((ndjson.parent / "index.json").read_text(encoding="utf-8"))
   assert index["ndjson_sha256"] == result["ndjson_sha256"]
+  assert all(not path.exists() for path in superseded_paths)
+  assert unrelated_path.read_text(encoding="utf-8") == "keep\n"
+  assert (
+    ndjson.parent / f"manifest.{result['ndjson_sha256']}.json"
+  ).is_file()
+  assert (
+    ndjson.parent / f"signal-catalog.{result['ndjson_sha256']}.json"
+  ).is_file()
+  for path in superseded_paths:
+    path.write_text("superseded\n", encoding="utf-8")
+  assert handlers.prune_superseded_telemetry_generations() == {
+    "files": 3,
+    "bytes": 33,
+    "generations": 1,
+  }
+  assert all(not path.exists() for path in superseded_paths)
+  assert ndjson.is_file()
   indexed = database.query_one(
     "SELECT * FROM telemetry_indexes WHERE drive_id = ?",
     (DRIVE_ID,),

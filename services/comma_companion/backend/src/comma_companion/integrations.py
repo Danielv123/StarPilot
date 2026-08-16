@@ -386,6 +386,15 @@ def strict_json_loads(value: str | bytes) -> Any:
   return json.loads(value, parse_constant=_reject_nonfinite_constant)
 
 
+def _valid_sha256(value: Any) -> bool:
+  return (
+    isinstance(value, str)
+    and len(value) == 64
+    and value == value.lower()
+    and all(character in "0123456789abcdef" for character in value)
+  )
+
+
 def telemetry_source_fingerprint(
   sources: Sequence[Mapping[str, Any] | tuple[int, str]],
 ) -> str:
@@ -3258,72 +3267,83 @@ class IntegrationHandlers:
         expected_route=route_name,
       )
       _context_progress(context, 0.72)
-      installed = self._install_telemetry_files(
-        drive,
-        route_name,
-        sources,
-        document,
-        canonical_output,
-      )
-      _context_progress(context, 0.8)
-      missing_tables = sorted(
-        TELEMETRY_TABLES - self._existing_tables(),
-      )
-      missing_reference_columns = self._missing_reference_columns()
-      if missing_tables or missing_reference_columns:
-        self._update_segment_timing(drive_id, document.manifest)
-        result: dict[str, Any] = {
-          "status": "stored_unindexed",
-          "drive_id": drive_id,
-          "source_fingerprint": sources.fingerprint,
-          "ndjson_path": installed["ndjson_path"],
-          "ndjson_sha256": document.sha256,
-          "manifest": document.manifest,
-          "migration_required": {
-            "missing_tables": missing_tables,
-            "missing_reference_columns": missing_reference_columns,
-            "sql": REQUIRED_TELEMETRY_SCHEMA_SQL,
-          },
-        }
-      else:
-        counts = self._index_telemetry(
+      route_lock_sha256 = hashlib.sha256(
+        f"telemetry-generation\0{drive_id}".encode("utf-8"),
+      ).hexdigest()
+      with ObjectLock(
+        self.archive_root / "telemetry" / ".locks",
+        route_lock_sha256,
+      ):
+        installed = self._install_telemetry_files(
           drive,
+          route_name,
           sources,
           document,
-          Path(installed["ndjson_absolute"]),
-          installed["ndjson_path"],
+          canonical_output,
         )
-        result = {
-          "status": document.manifest["state"],
-          "drive_id": drive_id,
-          "source_fingerprint": sources.fingerprint,
-          "ndjson_path": installed["ndjson_path"],
-          "ndjson_sha256": document.sha256,
-          "record_count": document.record_count,
-          "manifest": document.manifest,
-          "index_counts": counts,
-        }
-        result["media_sync"] = self._build_drive_media_sync(
-          context,
-          drive_id,
+        _context_progress(context, 0.8)
+        missing_tables = sorted(
+          TELEMETRY_TABLES - self._existing_tables(),
         )
-      self._atomic_write_json(
-        Path(installed["index_path"]),
-        installed["index"],
-      )
-      latest_sources = self._telemetry_sources(drive_id)
-      comparison_fingerprint = requested_fingerprint if isinstance(requested_fingerprint, str) else sources.fingerprint
-      if latest_sources.fingerprint != comparison_fingerprint:
-        self._invalidate_drive_telemetry_publication(drive_id)
-        follow_up = self._enqueue_telemetry_follow_up(
-          context,
-          drive_id,
-          route_name,
-          latest_sources.fingerprint,
+        missing_reference_columns = self._missing_reference_columns()
+        if missing_tables or missing_reference_columns:
+          self._update_segment_timing(drive_id, document.manifest)
+          result: dict[str, Any] = {
+            "status": "stored_unindexed",
+            "drive_id": drive_id,
+            "source_fingerprint": sources.fingerprint,
+            "ndjson_path": installed["ndjson_path"],
+            "ndjson_sha256": document.sha256,
+            "manifest": document.manifest,
+            "migration_required": {
+              "missing_tables": missing_tables,
+              "missing_reference_columns": missing_reference_columns,
+              "sql": REQUIRED_TELEMETRY_SCHEMA_SQL,
+            },
+          }
+        else:
+          counts = self._index_telemetry(
+            drive,
+            sources,
+            document,
+            Path(installed["ndjson_absolute"]),
+            installed["ndjson_path"],
+          )
+          result = {
+            "status": document.manifest["state"],
+            "drive_id": drive_id,
+            "source_fingerprint": sources.fingerprint,
+            "ndjson_path": installed["ndjson_path"],
+            "ndjson_sha256": document.sha256,
+            "record_count": document.record_count,
+            "manifest": document.manifest,
+            "index_counts": counts,
+          }
+          result["media_sync"] = self._build_drive_media_sync(
+            context,
+            drive_id,
+          )
+        self._atomic_write_json(
+          Path(installed["index_path"]),
+          installed["index"],
         )
-        result["follow_up"] = follow_up
-      _context_progress(context, 1.0)
-      return result
+        self._prune_superseded_telemetry_files(
+          Path(installed["ndjson_absolute"]).parent,
+          document.sha256,
+        )
+        latest_sources = self._telemetry_sources(drive_id)
+        comparison_fingerprint = requested_fingerprint if isinstance(requested_fingerprint, str) else sources.fingerprint
+        if latest_sources.fingerprint != comparison_fingerprint:
+          self._invalidate_drive_telemetry_publication(drive_id)
+          follow_up = self._enqueue_telemetry_follow_up(
+            context,
+            drive_id,
+            route_name,
+            latest_sources.fingerprint,
+          )
+          result["follow_up"] = follow_up
+        _context_progress(context, 1.0)
+        return result
     finally:
       if staging.exists() and staging.is_relative_to(staging_parent.resolve()):
         shutil.rmtree(staging)
@@ -3753,6 +3773,128 @@ class IntegrationHandlers:
       "index_path": str(final_directory / "index.json"),
       "index": index,
     }
+
+  def _prune_superseded_telemetry_files(
+    self,
+    generation_directory: Path,
+    current_sha256: str,
+  ) -> dict[str, int]:
+    if not _valid_sha256(current_sha256):
+      raise IntegrationError(
+        "invalid_telemetry_generation",
+        "The current telemetry generation has an invalid digest.",
+      )
+    telemetry_root = (self.archive_root / "telemetry").resolve()
+    resolved_directory = generation_directory.resolve()
+    if (
+      resolved_directory == telemetry_root
+      or not resolved_directory.is_relative_to(telemetry_root)
+    ):
+      raise IntegrationError(
+        "unsafe_output_path",
+        "The telemetry generation directory escapes its authorized archive root.",
+      )
+    generation_names = {
+      f"telemetry.{current_sha256}.ndjson",
+      f"manifest.{current_sha256}.json",
+      f"signal-catalog.{current_sha256}.json",
+    }
+    removed_files = 0
+    removed_bytes = 0
+    removed_generations = 0
+    for candidate in resolved_directory.iterdir():
+      name = candidate.name
+      if name in generation_names:
+        continue
+      digest: str | None = None
+      for prefix, suffix in (
+        ("telemetry.", ".ndjson"),
+        ("manifest.", ".json"),
+        ("signal-catalog.", ".json"),
+      ):
+        if name.startswith(prefix) and name.endswith(suffix):
+          digest = name[len(prefix):-len(suffix)]
+          break
+      if digest is None or not _valid_sha256(digest):
+        continue
+      if candidate.is_symlink() or not candidate.is_file():
+        raise IntegrationError(
+          "unsafe_telemetry_generation_file",
+          "A superseded telemetry generation path is not a regular file.",
+          details={"path": str(candidate)},
+        )
+      size = candidate.stat().st_size
+      candidate.unlink()
+      removed_files += 1
+      removed_bytes += size
+      if name.startswith("telemetry."):
+        removed_generations += 1
+    return {
+      "files": removed_files,
+      "bytes": removed_bytes,
+      "generations": removed_generations,
+    }
+
+  def prune_superseded_telemetry_generations(self) -> dict[str, int]:
+    totals = {"files": 0, "bytes": 0, "generations": 0}
+    if "telemetry_indexes" not in self._existing_tables():
+      return totals
+    rows = self.database.query_all(
+      "SELECT drive_id FROM telemetry_indexes ORDER BY drive_id",
+    )
+    for row in rows:
+      drive_id = row["drive_id"]
+      if not isinstance(drive_id, str) or not drive_id:
+        raise IntegrationError(
+          "invalid_telemetry_generation",
+          "A telemetry index has an invalid drive identifier.",
+        )
+      route_lock_sha256 = hashlib.sha256(
+        f"telemetry-generation\0{drive_id}".encode("utf-8"),
+      ).hexdigest()
+      with ObjectLock(
+        self.archive_root / "telemetry" / ".locks",
+        route_lock_sha256,
+      ):
+        current = self.database.query_one(
+          """
+          SELECT ndjson_path, ndjson_sha256
+          FROM telemetry_indexes
+          WHERE drive_id = ?
+          """,
+          (drive_id,),
+        )
+        if current is None:
+          continue
+        ndjson_path = current["ndjson_path"]
+        current_sha256 = current["ndjson_sha256"]
+        if (
+          not isinstance(ndjson_path, str)
+          or "\\" in ndjson_path
+          or not _valid_sha256(current_sha256)
+        ):
+          raise IntegrationError(
+            "invalid_telemetry_generation",
+            "A telemetry index has invalid generation identity.",
+            details={"drive_id": drive_id},
+          )
+        current_file = self._archive_path(
+          ndjson_path,
+          required_root=self.archive_root / "telemetry",
+        )
+        if current_file.name != f"telemetry.{current_sha256}.ndjson":
+          raise IntegrationError(
+            "invalid_telemetry_generation",
+            "A telemetry index path does not match its generation digest.",
+            details={"drive_id": drive_id},
+          )
+        removed = self._prune_superseded_telemetry_files(
+          current_file.parent,
+          current_sha256,
+        )
+        for key in totals:
+          totals[key] += removed[key]
+    return totals
 
   @staticmethod
   def _atomic_write_json(path: Path, value: Any) -> None:

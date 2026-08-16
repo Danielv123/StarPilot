@@ -858,7 +858,7 @@ class TestLatControl:
     unwind_left = get_ioniq_5_ff_scale(0.7, -0.8, 12.0)
     unwind_right = get_ioniq_5_ff_scale(-0.7, 0.8, 12.0)
     gentle_turn_in_left = get_ioniq_5_ff_scale(0.7, 0.16, 12.0)
-    assert steady_left < steady_right < 1.0
+    assert steady_right < steady_left < 1.0
     assert steady_left < gentle_turn_in_left
     assert turn_in_left > steady_left
     assert turn_in_right >= steady_right
@@ -872,9 +872,8 @@ class TestLatControl:
     unwind_left_threshold = get_ioniq_5_friction_threshold(12.0, 0.7, -0.8)
     unwind_right_threshold = get_ioniq_5_friction_threshold(12.0, -0.7, 0.8)
     assert turn_in_left_threshold < base
-    assert turn_in_right_threshold < turn_in_left_threshold < base
-    assert unwind_left_threshold > base
-    assert unwind_right_threshold == unwind_left_threshold
+    assert turn_in_left_threshold < turn_in_right_threshold < base
+    assert unwind_right_threshold > unwind_left_threshold > base
 
     turn_in_left_scale = get_ioniq_5_friction_scale(12.0, 0.7, 0.8)
     turn_in_right_scale = get_ioniq_5_friction_scale(12.0, -0.7, -0.8)

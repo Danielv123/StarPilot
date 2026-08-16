@@ -36,7 +36,7 @@ def test_model_cleanup_matches_legacy_split_artifacts():
   assert model_manager.is_driving_artifact_file("driving_vision_tinygrad.pkl")
   assert model_manager.is_driving_artifact_file("driving_off_policy_tinygrad.pkl.p00")
   assert not model_manager.is_driving_artifact_file("dmonitoring_model_tinygrad.pkl")
-  assert not model_manager.is_driving_artifact_file("local-test_driving_tinygrad.pkl")
+  assert model_manager.is_driving_artifact_file("local-test_driving_tinygrad.pkl")
 
 
 def test_behavior_version_does_not_control_artifact_layout():
@@ -70,7 +70,7 @@ def test_external_gpu_compilation_is_opt_in(tmp_path, monkeypatch):
     "DEV": "QCOM", "IMAGE": "2", "NOLOCALS": "1", "OPENPILOT_HACKS": "1",
   })
   monkeypatch.setattr(model_compiler.subprocess, "run", lambda command, **kwargs: invocations.append((command, kwargs)))
-  monkeypatch.setattr(model_compiler, "wait_for_external_gpu", lambda _: None)
+  monkeypatch.setattr(model_compiler, "wait_for_external_gpu", lambda: None)
   files = {"driving_supercombo": tmp_path / "model.onnx"}
 
   model_compiler.compile_driving("normal", files, "supercombo", "v15", tmp_path, "policy")

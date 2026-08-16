@@ -708,3 +708,79 @@ def test_v9_objects_gain_video_prune_state(
     "storage_state": "present",
     "pruned_at": None,
   }
+
+
+def test_v11_catalog_queue_drops_null_rows_and_rejects_new_ones(
+  tmp_path: Path,
+) -> None:
+  path = tmp_path / "companion.sqlite3"
+  database = Database(path)
+  database.initialize()
+
+  with database.connection() as connection:
+    connection.executescript(
+      """
+      DROP TABLE drive_catalog_dirty;
+      CREATE TABLE drive_catalog_dirty (
+        drive_id TEXT PRIMARY KEY REFERENCES drives(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+        dirtied_at TEXT NOT NULL
+      );
+      INSERT INTO drive_catalog_dirty(drive_id, version, dirtied_at)
+      VALUES (NULL, 1, '2026-08-13T10:00:00Z');
+      UPDATE schema_meta SET version = 11;
+      """,
+    )
+
+  database.initialize()
+
+  with database.connection() as migrated:
+    version = migrated.execute(
+      "SELECT version FROM schema_meta",
+    ).fetchone()[0]
+    drive_id_column = next(
+      row
+      for row in migrated.execute(
+        "PRAGMA table_info(drive_catalog_dirty)",
+      ).fetchall()
+      if row["name"] == "drive_id"
+    )
+    dirty_count = migrated.execute(
+      "SELECT COUNT(*) FROM drive_catalog_dirty",
+    ).fetchone()[0]
+    migrated.execute(
+      """
+      INSERT INTO devices(id, display_name, token_hash, enrolled_at)
+      VALUES ('device-one', 'Device One', 'token-hash', '2026-08-13T10:00:00Z')
+      """,
+    )
+    migrated.execute(
+      """
+      INSERT INTO objects(sha256, size, storage_path, created_at)
+      VALUES (
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        1, 'objects/unassigned', '2026-08-13T10:00:00Z'
+      )
+      """,
+    )
+    migrated.execute(
+      """
+      INSERT INTO artifacts(
+        id, device_id, object_sha256, kind, relative_path,
+        storage_path, size, status, created_at
+      ) VALUES (
+        'unassigned-artifact', 'device-one',
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'video', 'unassigned/ecamera.hevc', 'objects/unassigned', 1,
+        'stored', '2026-08-13T10:00:00Z'
+      )
+      """,
+    )
+    dirty_count_after_artifact = migrated.execute(
+      "SELECT COUNT(*) FROM drive_catalog_dirty",
+    ).fetchone()[0]
+
+  assert version == SCHEMA_VERSION
+  assert drive_id_column["notnull"] == 1
+  assert dirty_count == 0
+  assert dirty_count_after_artifact == 0

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 DRIVE_CATALOG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS drive_catalog_cache (
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS drive_catalog_cache (
 );
 
 CREATE TABLE IF NOT EXISTS drive_catalog_dirty (
-  drive_id TEXT PRIMARY KEY REFERENCES drives(id) ON DELETE CASCADE,
+  drive_id TEXT NOT NULL PRIMARY KEY REFERENCES drives(id) ON DELETE CASCADE,
   version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
   dirtied_at TEXT NOT NULL
 );
@@ -82,6 +82,7 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS trg_drive_catalog_artifact_insert
 AFTER INSERT ON artifacts
+WHEN NEW.drive_id IS NOT NULL
 BEGIN
   INSERT INTO drive_catalog_dirty(drive_id, version, dirtied_at)
   VALUES (NEW.drive_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -92,6 +93,7 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS trg_drive_catalog_artifact_update
 AFTER UPDATE ON artifacts
+WHEN NEW.drive_id IS NOT NULL
 BEGIN
   INSERT INTO drive_catalog_dirty(drive_id, version, dirtied_at)
   VALUES (NEW.drive_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -100,8 +102,20 @@ BEGIN
     dirtied_at = excluded.dirtied_at;
 END;
 
+CREATE TRIGGER IF NOT EXISTS trg_drive_catalog_artifact_update_old
+AFTER UPDATE OF drive_id ON artifacts
+WHEN OLD.drive_id IS NOT NULL AND OLD.drive_id IS NOT NEW.drive_id
+BEGIN
+  INSERT INTO drive_catalog_dirty(drive_id, version, dirtied_at)
+  VALUES (OLD.drive_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  ON CONFLICT(drive_id) DO UPDATE SET
+    version = version + 1,
+    dirtied_at = excluded.dirtied_at;
+END;
+
 CREATE TRIGGER IF NOT EXISTS trg_drive_catalog_artifact_delete
 AFTER DELETE ON artifacts
+WHEN OLD.drive_id IS NOT NULL
 BEGIN
   INSERT INTO drive_catalog_dirty(drive_id, version, dirtied_at)
   VALUES (OLD.drive_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -118,6 +132,7 @@ BEGIN
   SELECT artifact.drive_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
   FROM artifacts artifact
   WHERE artifact.id = json_extract(NEW.payload_json, '$.artifact_id')
+    AND artifact.drive_id IS NOT NULL
   ON CONFLICT(drive_id) DO UPDATE SET
     version = version + 1,
     dirtied_at = excluded.dirtied_at;
@@ -131,6 +146,7 @@ BEGIN
   SELECT artifact.drive_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
   FROM artifacts artifact
   WHERE artifact.id = json_extract(NEW.payload_json, '$.artifact_id')
+    AND artifact.drive_id IS NOT NULL
   ON CONFLICT(drive_id) DO UPDATE SET
     version = version + 1,
     dirtied_at = excluded.dirtied_at;
@@ -144,6 +160,7 @@ BEGIN
   SELECT artifact.drive_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
   FROM artifacts artifact
   WHERE artifact.id = json_extract(OLD.payload_json, '$.artifact_id')
+    AND artifact.drive_id IS NOT NULL
   ON CONFLICT(drive_id) DO UPDATE SET
     version = version + 1,
     dirtied_at = excluded.dirtied_at;
@@ -1190,6 +1207,75 @@ def _migrate_v10_to_v11(connection: sqlite3.Connection) -> None:
   )
 
 
+def _migrate_v11_to_v12(connection: sqlite3.Connection) -> None:
+  required_tables = (
+    "drives",
+    "segments",
+    "artifacts",
+    "jobs",
+    "route_inventories",
+    "route_inventory_segments",
+    "route_inventory_expected_files",
+    "telemetry_indexes",
+    "drive_catalog_dirty",
+  )
+  if not all(
+    _table_exists(connection, table)
+    for table in required_tables
+  ):
+    return
+  trigger_names = (
+    "trg_drive_catalog_drive_insert",
+    "trg_drive_catalog_drive_update",
+    "trg_drive_catalog_segment_insert",
+    "trg_drive_catalog_segment_update",
+    "trg_drive_catalog_segment_delete",
+    "trg_drive_catalog_artifact_insert",
+    "trg_drive_catalog_artifact_update",
+    "trg_drive_catalog_artifact_update_old",
+    "trg_drive_catalog_artifact_delete",
+    "trg_drive_catalog_job_insert",
+    "trg_drive_catalog_job_update",
+    "trg_drive_catalog_job_delete",
+    "trg_drive_catalog_inventory_insert",
+    "trg_drive_catalog_inventory_update",
+    "trg_drive_catalog_inventory_delete",
+    "trg_drive_catalog_inventory_segment_insert",
+    "trg_drive_catalog_inventory_segment_update",
+    "trg_drive_catalog_inventory_segment_delete",
+    "trg_drive_catalog_inventory_file_insert",
+    "trg_drive_catalog_inventory_file_update",
+    "trg_drive_catalog_inventory_file_delete",
+    "trg_drive_catalog_telemetry_insert",
+    "trg_drive_catalog_telemetry_update",
+    "trg_drive_catalog_telemetry_delete",
+  )
+  drop_triggers = "\n".join(
+    f"DROP TRIGGER IF EXISTS {name};"
+    for name in trigger_names
+  )
+  connection.executescript(
+    f"""
+    BEGIN IMMEDIATE;
+    {drop_triggers}
+    CREATE TABLE drive_catalog_dirty_v12 (
+      drive_id TEXT NOT NULL PRIMARY KEY
+        REFERENCES drives(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+      dirtied_at TEXT NOT NULL
+    );
+    INSERT INTO drive_catalog_dirty_v12(drive_id, version, dirtied_at)
+    SELECT drive_id, version, dirtied_at
+    FROM drive_catalog_dirty
+    WHERE drive_id IS NOT NULL;
+    DROP TABLE drive_catalog_dirty;
+    ALTER TABLE drive_catalog_dirty_v12 RENAME TO drive_catalog_dirty;
+    {DRIVE_CATALOG_SCHEMA}
+    COMMIT;
+    """,
+  )
+
+
 class Database:
   def __init__(self, path: Path):
     self.path = path
@@ -1250,6 +1336,9 @@ class Database:
         if existing_version == 10:
           _migrate_v10_to_v11(connection)
           existing_version = 11
+        if existing_version == 11:
+          _migrate_v11_to_v12(connection)
+          existing_version = 12
         if existing_version is not None and existing_version != SCHEMA_VERSION:
           raise RuntimeError(
             f"database schema {existing_version} is not supported " + f"(expected {SCHEMA_VERSION})",

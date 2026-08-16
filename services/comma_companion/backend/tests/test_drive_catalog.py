@@ -817,3 +817,68 @@ def test_cached_catalog_request_does_not_recompute_drive_readiness(
   )
   assert cache_count is not None
   assert cache_count["count"] == 20
+
+
+def test_unassigned_artifacts_do_not_wedge_drive_catalog_refresh(
+  admin_client,
+) -> None:
+  database = admin_client.app.state.database
+  now = isoformat()
+  with database.transaction(immediate=True) as connection:
+    object_sha = _object(connection, b"unassigned", "unassigned")
+    connection.execute("DELETE FROM drive_catalog_dirty")
+    connection.execute(
+      """
+      INSERT INTO artifacts(
+        id, device_id, object_sha256, kind, relative_path,
+        storage_path, size, status, created_at
+      ) VALUES (
+        'unassigned-artifact', 'device-one', ?, 'video',
+        'unassigned/ecamera.hevc', 'objects/unassigned', 10,
+        'stored', ?
+      )
+      """,
+      (object_sha, now),
+    )
+    connection.execute(
+      """
+      INSERT INTO jobs(
+        id, type, state, payload_json, created_at, updated_at
+      ) VALUES (
+        'unassigned-job', 'transcode_video', 'queued', ?, ?, ?
+      )
+      """,
+      (json.dumps({"artifact_id": "unassigned-artifact"}), now, now),
+    )
+    assert connection.execute(
+      "SELECT COUNT(*) FROM drive_catalog_dirty",
+    ).fetchone()[0] == 0
+
+    connection.execute(
+      """
+      INSERT INTO drives(id, device_id, route_name, created_at)
+      VALUES ('assignment-drive', 'device-one', 'assignment-route', ?)
+      """,
+      (now,),
+    )
+    connection.execute("DELETE FROM drive_catalog_dirty")
+    connection.execute(
+      """
+      UPDATE artifacts SET drive_id = 'assignment-drive'
+      WHERE id = 'unassigned-artifact'
+      """,
+    )
+    assert connection.execute(
+      "SELECT drive_id FROM drive_catalog_dirty",
+    ).fetchone()[0] == "assignment-drive"
+
+    connection.execute("DELETE FROM drive_catalog_dirty")
+    connection.execute(
+      """
+      UPDATE artifacts SET drive_id = NULL
+      WHERE id = 'unassigned-artifact'
+      """,
+    )
+    assert connection.execute(
+      "SELECT drive_id FROM drive_catalog_dirty",
+    ).fetchone()[0] == "assignment-drive"

@@ -651,12 +651,17 @@ IONIQ_5_FF_CUTOFF = 1.20
 IONIQ_5_FF_CUTOFF_WIDTH = 0.30
 IONIQ_5_TRANSITION_SPEED = 12.5
 IONIQ_5_PHASE_SCALE = 0.10
-IONIQ_5_FF_REDUCTION_LEFT = 0.2625
-IONIQ_5_FF_REDUCTION_RIGHT = 0.415
+IONIQ_5_FF_REDUCTION_LEFT = 0.345
+# Preserve ordinary-curve tracking while the shared taper retains authority
+# through sharp unwind on either side.
+IONIQ_5_FF_REDUCTION_RIGHT = 0.420
 IONIQ_5_TURN_IN_BOOST_LEFT = 0.135
 IONIQ_5_TURN_IN_BOOST_RIGHT = 0.02
-IONIQ_5_UNWIND_TAPER_LEFT = 1.15
-IONIQ_5_UNWIND_TAPER_RIGHT = 1.39
+# Avoid collapsing feedforward to zero during a sustained sharp unwind. The
+# autotuner searches this as one shared value because both directions exhibit
+# the same failure mode.
+IONIQ_5_UNWIND_TAPER_LEFT = 0.76
+IONIQ_5_UNWIND_TAPER_RIGHT = 0.76
 IONIQ_5_TURN_IN_THRESHOLD_REDUCTION_LEFT = 0.125
 IONIQ_5_TURN_IN_THRESHOLD_REDUCTION_RIGHT = 0.085
 IONIQ_5_UNWIND_THRESHOLD_INCREASE_LEFT = 0.28
@@ -684,8 +689,8 @@ IONIQ_5_STEADY_JERK_WIDTH = 0.08
 # Delay-aligned closed-loop fit: less command-jerk friction avoids the brief
 # counter-command when a steering ramp becomes a hold.
 IONIQ_5_FRICTION_JERK_GAIN = 0.10
-IONIQ_5_DAMPING_GAIN = 0.02
 # Extra measured-response damping is blended in only at highway speed.
+IONIQ_5_DAMPING_GAIN = 0.02
 IONIQ_5_HIGHWAY_DAMPING_GAIN = 0.08
 IONIQ_5_HIGHWAY_DAMPING_START_SPEED = 18.0
 IONIQ_5_HIGHWAY_DAMPING_FULL_SPEED = 22.0

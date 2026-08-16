@@ -356,6 +356,16 @@
   flex-direction: column;
 }
 
+.ds-row-text-input {
+  align-items: stretch;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+
+.ds-row-text-input .ds-row-info {
+  margin-bottom: 0;
+}
+
 .ds-row-info {
   align-items: center;
   display: flex;
@@ -441,6 +451,19 @@
   outline: none;
 }
 
+.ds-text-input {
+  appearance: none;
+  box-sizing: border-box;
+  cursor: text;
+  min-height: 2.25rem;
+  width: 100%;
+}
+
+.ds-text-input:disabled {
+  cursor: not-allowed;
+  opacity: var(--disabled-opacity);
+}
+
 .ds-apply-btn {
   background: transparent;
   border: var(--border-style-main);
@@ -513,6 +536,35 @@
 .ds-stepper-btn:disabled {
   cursor: not-allowed;
   opacity: var(--disabled-opacity);
+}
+
+.ds-slider-container {
+  width: 100%;
+}
+
+@media (min-width: 768px) {
+  .ds-slider-container {
+    max-width: 420px;
+  }
+}
+
+.ds-slider {
+  accent-color: var(--main-fg);
+  cursor: pointer;
+  width: 100%;
+}
+
+.ds-slider:disabled {
+  cursor: not-allowed;
+  opacity: var(--disabled-opacity);
+}
+
+.ds-slider-scale {
+  color: var(--text-muted);
+  display: flex;
+  font-size: var(--font-size-xs);
+  justify-content: space-between;
+  margin-top: 0.1rem;
 }
 
 /* ――― Favorite Slots ――― */

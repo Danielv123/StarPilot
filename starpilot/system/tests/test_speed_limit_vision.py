@@ -19,6 +19,9 @@ class MemoryParams:
   def put_int(self, key, value):
     self.values[key] = value
 
+  def put(self, key, value):
+    self.values[key] = value
+
   def remove(self, key):
     self.values.pop(key, None)
 
@@ -65,6 +68,65 @@ def publishing_daemon(is_metric):
   daemon._schedule_auto_bookmark = lambda *_args, **_kwargs: None
   daemon._publish_status = lambda status, **_kwargs: setattr(daemon, "published_status", status)
   return daemon
+
+
+def test_debug_storage_failure_does_not_crash_detection(monkeypatch):
+  class ReadOnlyPath:
+    def __truediv__(self, _part):
+      return self
+
+    def exists(self):
+      return False
+
+    def mkdir(self, **_kwargs):
+      raise OSError(30, "Read-only file system")
+
+  daemon = SpeedLimitVisionDaemon.__new__(SpeedLimitVisionDaemon)
+  daemon.use_runtime = True
+  daemon.params_memory = MemoryParams()
+  daemon.debug_session_id = ""
+  daemon.debug_session_unavailable = False
+  monkeypatch.setattr(slv, "DEBUG_BASE_DIR", ReadOnlyPath())
+
+  assert not daemon._start_debug_session()
+  assert daemon.debug_session_unavailable
+  assert daemon.debug_session_id == ""
+  assert daemon.params_memory.values["VisionSpeedLimitLastEvent"] == "debug storage unavailable: OSError"
+
+  assert not daemon._start_debug_session()
+
+
+@pytest.mark.skipif(not hasattr(slv, "memory_pressure_level"), reason="host runtime predates memory pressure governor")
+@pytest.mark.parametrize(
+  ("available_kb", "usage_percent", "expected"),
+  (
+    (None, None, "normal"),
+    (512 * 1024 + 1, None, "normal"),
+    (512 * 1024, None, "pressure"),
+    (256 * 1024, None, "critical"),
+    (None, 88, "pressure"),
+    (None, 94, "critical"),
+  ),
+)
+def test_memory_pressure_level(available_kb, usage_percent, expected):
+  assert slv.memory_pressure_level(available_kb, usage_percent) == expected
+
+
+def test_inference_interval_backs_off_after_expensive_inference():
+  daemon = SpeedLimitVisionDaemon.__new__(SpeedLimitVisionDaemon)
+  daemon.followup_until = 0.0
+  daemon.last_live_pose_inputs_not_ok_at = -float("inf")
+  daemon.last_frame_process_duration_s = 0.4
+  daemon.memory_pressure_state = "normal"
+  daemon.coexistence_mode = False
+  daemon.last_cpu_busy = False
+  daemon._update_memory_pressure = lambda: "normal"
+  daemon._device_cpu_busy = lambda: False
+
+  interval = daemon._inference_interval(10.0)
+
+  assert interval == pytest.approx(1.0)
+  assert daemon.last_inference_interval_reason == "processing_cost"
 
 
 def test_disconnect_camera_releases_client_state():

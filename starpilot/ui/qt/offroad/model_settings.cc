@@ -22,21 +22,25 @@ QString builtinDefaultModelKey(const Params &params) {
   if (key.isEmpty()) {
     key = paramDefaultValue(params, "DrivingModel");
   }
-  return key.isEmpty() ? QStringLiteral("sc2") : key;
+  return key.isEmpty() ? QStringLiteral("rdf43") : key;
 }
 
 QString builtinDefaultModelName(const Params &params) {
   QString name = paramDefaultValue(params, "DrivingModelName");
-  return name.isEmpty() ? QStringLiteral("South Carolina") : name;
+  return name.isEmpty() ? QStringLiteral("Regret Driven Framework V4") : name;
 }
 
 QStringList builtinDefaultModelAliases(const QString &defaultKey) {
   QString canonical = defaultKey.trimmed();
   if (canonical.isEmpty()) {
-    canonical = QStringLiteral("sc2");
+    canonical = QStringLiteral("rdf43");
   }
 
   QStringList aliases{canonical};
+
+  if (canonical == QStringLiteral("rdf43")) {
+    aliases.append(QStringLiteral("rdf"));
+  }
 
   if (canonical.endsWith("2")) {
     aliases.append(canonical.left(canonical.size() - 1));

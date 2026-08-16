@@ -67,8 +67,10 @@ class CarInterface(CarInterfaceBase):
     # These messages are normally absent there on pre-TSS2 platforms.
     camera_fingerprint = fingerprint.get(2, {})
     has_dsu_bypass = 0x343 in camera_fingerprint or 0x4CB in camera_fingerprint
-    if candidate == CAR.LEXUS_IS:
-      # The IS mirrors its native buses onto camera bus during startup without a bypass adapter.
+    late_prius_camera = candidate == CAR.TOYOTA_PRIUS and any(
+      fw.ecu == Ecu.fwdCamera and bytes(fw.fwVersion).startswith(b'8646F4705') for fw in car_fw
+    )
+    if candidate == CAR.LEXUS_IS or late_prius_camera:
       has_dsu_bypass = ((0x343 in camera_fingerprint and 0x343 not in fingerprint.get(1, {})) or
                         (0x4CB in camera_fingerprint and 0x4CB not in fingerprint.get(0, {})))
     if not use_sdsu and candidate not in TSS2_CAR and has_dsu_bypass:
@@ -98,7 +100,7 @@ class CarInterface(CarInterfaceBase):
       # https://engage.toyota.com/static/images/toyota_safety_sense/TSS_Applicability_Chart.pdf
       stop_and_go = candidate != CAR.TOYOTA_AVALON
 
-    elif candidate in (CAR.TOYOTA_RAV4_TSS2, CAR.TOYOTA_RAV4_TSS2_2022, CAR.TOYOTA_RAV4_TSS2_2023, CAR.TOYOTA_RAV4_PRIME, CAR.TOYOTA_SIENNA_4TH_GEN):
+    elif candidate in (CAR.TOYOTA_RAV4_TSS2, CAR.TOYOTA_RAV4_TSS2_2022, CAR.TOYOTA_RAV4_TSS2_2023, CAR.TOYOTA_RAV4_PRIME):
       ret.lateralTuning.init('pid')
       ret.lateralTuning.pid.kiBP = [0.0]
       ret.lateralTuning.pid.kpBP = [0.0]
@@ -196,6 +198,9 @@ class CarInterface(CarInterfaceBase):
 
     if candidate == CAR.TOYOTA_HIGHLANDER and ret.openpilotLongitudinalControl and not ret.flags & ToyotaFlags.HYBRID.value:
       ret.longitudinalActuatorDelay = 0.4
+
+    if candidate == CAR.TOYOTA_SIENNA and ret.openpilotLongitudinalControl:
+      ret.longitudinalActuatorDelay = 0.5
 
     if ret.enableGasInterceptorDEPRECATED:
       # Pedal/SDSU Toyotas feel best with a softer final stop clamp.

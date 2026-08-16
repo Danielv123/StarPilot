@@ -63,6 +63,61 @@ def _update_checksum(packer, address: int, dat: bytearray) -> None:
   _set_value(dat, sig_checksum, checksum)
 
 
+def _set_little_endian_bits(dat: bytearray, lsb: int, size: int, value: int) -> None:
+  """Write the legacy HDA-II field layout without changing the generated DBC aliases."""
+  value &= (1 << size) - 1
+  bit = lsb
+  remaining = size
+  while remaining:
+    byte = bit // 8
+    shift = bit % 8
+    chunk_size = min(remaining, 8 - shift)
+    mask = ((1 << chunk_size) - 1) << shift
+    dat[byte] = (dat[byte] & ~mask) | ((value & ((1 << chunk_size) - 1)) << shift)
+    value >>= chunk_size
+    bit += chunk_size
+    remaining -= chunk_size
+
+
+def _create_gv70_lka_status_msg(packer, CAN, message_name: str, bus: int, enabled: bool,
+                                lat_active: bool, apply_torque: int):
+  values = {
+    "LKA_MODE": 2,
+    "LKA_ICON": 2 if enabled else 1,
+    "TORQUE_REQUEST": apply_torque,
+    "STEER_REQ": 1 if lat_active else 0,
+    "LKA_ASSIST": 0,
+    "STEER_MODE": 0,
+    "DAMP_FACTOR": 100,
+  }
+  address, raw, _ = packer.make_can_msg(message_name, bus, values)
+  dat = bytearray(raw)
+
+  legacy_fields = (
+    (24, 3, 2),
+    (27, 3, 0),
+    (30, 2, 0),
+    (32, 2, 0),
+    (34, 2, 0),
+    (36, 2, 0),
+    (38, 3, 2 if enabled else 1),
+    (52, 2, 1 if lat_active else 0),
+    (54, 2, 0),
+    (56, 1, 0),
+    (60, 4, 0),
+    (80, 2, 0),
+  )
+  for lsb, size, value in legacy_fields:
+    _set_little_endian_bits(dat, lsb, size, value)
+
+  _set_little_endian_bits(dat, 64 if message_name == "LKAS" else 104, 8, 100)
+  if message_name == "LKAS":
+    _set_little_endian_bits(dat, 84, 3, 0)
+
+  _update_checksum(packer, address, dat)
+  return address, bytes(dat), bus
+
+
 def _create_angle_lfa_msg(packer, CAN, values, apply_angle: float, lat_active: bool, torque_reduction_gain: float):
   address = packer.dbc.name_to_msg["LFA"].address
   dat = packer.pack(address, values)
@@ -97,9 +152,20 @@ def create_angle_adas_cmd(packer, CAN, apply_angle: float, lat_active: bool, tor
 
 
 def create_steering_messages(packer, CP, CAN, enabled, lat_active, apply_torque, apply_angle,
-                             lfa_base_values=None, lkas_base_values=None, lka_icon=None):
+                             lfa_base_values=None, lkas_base_values=None, lka_icon=None,
+                             send_lfa_status=False, lfa_only=False):
   if lka_icon is None:
     lka_icon = 2 if enabled else 1
+
+  if CP.carFingerprint == CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN and CP.flags & HyundaiFlags.CANFD_LKA_STEERING:
+    ret = []
+    if CP.openpilotLongitudinalControl or send_lfa_status:
+      ret.append(_create_gv70_lka_status_msg(packer, CAN, "LFA", CAN.ECAN, enabled, lat_active, apply_torque))
+    if lfa_only:
+      return ret
+    ret.append(_create_gv70_lka_status_msg(packer, CAN, "LKAS", CAN.ACAN, enabled, lat_active, apply_torque))
+    return ret
+
   angle_lkas_alt = CP.flags & HyundaiFlags.CANFD_ANGLE_STEERING and CP.flags & HyundaiFlags.CANFD_LKA_STEERING_ALT
 
   control_values = {
@@ -190,8 +256,10 @@ def create_steering_messages(packer, CP, CAN, enabled, lat_active, apply_torque,
   ret = []
   if CP.flags & HyundaiFlags.CANFD_LKA_STEERING:
     lkas_msg = "LKAS_ALT" if CP.flags & HyundaiFlags.CANFD_LKA_STEERING_ALT else "LKAS"
-    if CP.openpilotLongitudinalControl:
+    if CP.openpilotLongitudinalControl or send_lfa_status:
       ret.append(packer.make_can_msg("LFA", CAN.ECAN, lfa_values))
+    if lfa_only:
+      return ret
     ret.append(packer.make_can_msg(lkas_msg, CAN.ACAN, lkas_values))
   else:
     if CP.flags & HyundaiFlags.CANFD_ANGLE_STEERING:
@@ -843,6 +911,7 @@ def hkg_can_fd_checksum(address: int, sig, d: bytearray) -> int:
 # brake, and accelerator bits are updated for the radar heartbeat.
 _ACCEL_BRAKE_ALT_TEMPLATE = bytes.fromhex("000000020000fcff000000000020000055ff000068000000")
 _KIA_EV9_ACCEL_BRAKE_ALT_TEMPLATE = bytes.fromhex("00000000ff006f00e80400001201030055ffff0000000000")
+_HYUNDAI_IONIQ_5_PE_ACCEL_BRAKE_ALT_TEMPLATE = bytes.fromhex("000000000000000000000000ff1fffff55ffff00a8000000")
 # Neutral bodies verified across stock and successful suppression routes. Only
 # rolling integrity fields and the decoded state above are changed at runtime.
 _CCNC_ADRV_TEMPLATES = {
@@ -859,9 +928,31 @@ _CCNC_ADRV_TEMPLATES = {
     0x1E0: bytes.fromhex("00000002000000000000000000000000"),
     0x38C: bytes.fromhex("000000f71f000000000000000000000000000000000000000000000000000000"),
   },
+  CAR.HYUNDAI_IONIQ_5_PE: {
+    0x160: bytes.fromhex("0000000000000000fffc0100a8001000"),
+    0x1DA: bytes.fromhex("0000002200010000000000000000000000000000000000000000000000000000"),
+    0x1EA: bytes.fromhex("000000080000000000000000000000ff000000000000000000000000000f0f00"),
+    0x200: bytes.fromhex("00000014401b0000"),
+    0x345: bytes.fromhex("0000001500560000"),
+    0x161: bytes.fromhex("0000000000000000c0fff0c003000040000000000000000000ff000000000000"),
+    0x162: bytes.fromhex("0000002700000000c0ff00000000000000000000000000000000000000000000"),
+    0x1BA: bytes.fromhex("00000000000000880200000000000000000100000000000f"),
+    0x1E5: bytes.fromhex("00000000000000000000220200000080"),
+    0x1E0: bytes.fromhex("00000002000000000000000000000000"),
+    0x38C: bytes.fromhex("000000f79f000000000000000000000000000000000000000000000000000000"),
+  },
 }
 _CCNC_ADRV_PERIODS = {
   CAR.KIA_EV9: {
+    0x160: 2,
+    0x1DA: 100,
+    0x1EA: 5,
+    0x200: 5,
+    0x345: 20,
+    0x1E0: 5,
+    0x38C: 20,
+  },
+  CAR.HYUNDAI_IONIQ_5_PE: {
     0x160: 2,
     0x1DA: 100,
     0x1EA: 5,
@@ -875,7 +966,12 @@ _CCNC_ADRV_PERIODS = {
 
 def create_accelerator_brake_alt_spoof(bus: int, counter: int, brake_pressed: bool, accelerator_pressed: bool,
                                        car_fingerprint=None) -> CanData:
-  template = _KIA_EV9_ACCEL_BRAKE_ALT_TEMPLATE if car_fingerprint == CAR.KIA_EV9 else _ACCEL_BRAKE_ALT_TEMPLATE
+  if car_fingerprint == CAR.KIA_EV9:
+    template = _KIA_EV9_ACCEL_BRAKE_ALT_TEMPLATE
+  elif car_fingerprint == CAR.HYUNDAI_IONIQ_5_PE:
+    template = _HYUNDAI_IONIQ_5_PE_ACCEL_BRAKE_ALT_TEMPLATE
+  else:
+    template = _ACCEL_BRAKE_ALT_TEMPLATE
   d = bytearray(template)
   d[2] = counter & 0xFF                              # COUNTER (bit 16, 8-bit)
   d[4] = (d[4] & ~0x01) | (0x01 if brake_pressed else 0x00)         # BRAKE_PRESSED (bit 32)

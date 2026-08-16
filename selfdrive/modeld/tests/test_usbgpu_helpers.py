@@ -3,6 +3,7 @@ import io
 import numpy as np
 
 from openpilot.selfdrive.modeld.helpers import dump_oob, load_oob, tinygrad_dev_config
+from scripts import model_compiler
 
 
 def test_external_gpu_keeps_the_native_device_available():
@@ -20,3 +21,16 @@ def test_out_of_band_artifact_round_trip():
   restored = load_oob(stream)
   assert restored["metadata"] == artifact["metadata"]
   np.testing.assert_array_equal(restored["weights"], artifact["weights"])
+
+
+def test_external_gpu_probe_matches_upstream_retry_loop(monkeypatch):
+  from openpilot.system.hardware.chestnut import flash
+
+  calls = []
+  results = iter((False, False, True))
+  monkeypatch.setattr(flash, "link_up", lambda: calls.append("probe") or next(results))
+  monkeypatch.setattr(model_compiler.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
+
+  model_compiler.wait_for_external_gpu()
+
+  assert calls == ["probe", ("sleep", 1), "probe", ("sleep", 1), "probe"]

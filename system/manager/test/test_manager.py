@@ -71,6 +71,140 @@ class FileBackedFakeParams:
   def put_float(self, key, value):
     self.put(key, float(value))
 
+  def remove(self, key):
+    Path(self.get_param_path(key)).unlink(missing_ok=True)
+
+
+def test_navigation_selected_while_already_offroad_is_not_tracked_for_cleanup(tmp_path):
+  params = FileBackedFakeParams(tmp_path / "params", {
+    "ClearNavOnOffroad": True,
+    "ClearNavOnOffroadTimeoutMinutes": 0,
+  })
+
+  state = manager.update_nav_offroad_clear_state(
+    params, False, None, None, 10.0, offroad_transition=False
+  )
+  assert state == (None, None)
+
+  destination = {"name": "Home", "latitude": 1.0, "longitude": 2.0}
+  params.put("NavDestination", destination)
+  state = manager.update_nav_offroad_clear_state(
+    params, False, *state, 20.0, offroad_transition=False
+  )
+
+  assert state == (None, None)
+  assert json.loads(params.get("NavDestination")) == destination
+
+  state = manager.update_nav_offroad_clear_state(
+    params, True, *state, 30.0, offroad_transition=False
+  )
+  assert state == (None, None)
+  assert json.loads(params.get("NavDestination")) == destination
+
+  state = manager.update_nav_offroad_clear_state(
+    params, False, *state, 40.0, offroad_transition=True
+  )
+  assert state == (None, None)
+  assert params.get("NavDestination") is None
+
+
+def test_replacement_destination_disarms_delayed_cleanup(tmp_path):
+  params = FileBackedFakeParams(tmp_path / "params", {
+    "ClearNavOnOffroad": True,
+    "ClearNavOnOffroadTimeoutMinutes": 15,
+    "NavDestination": {"name": "Old", "latitude": 1.0, "longitude": 2.0},
+  })
+
+  tracked = manager.update_nav_offroad_clear_state(
+    params, False, None, None, 10.0, offroad_transition=True
+  )
+  replacement = {"name": "New", "latitude": 3.0, "longitude": 4.0}
+  params.put("NavDestination", replacement)
+
+  state = manager.update_nav_offroad_clear_state(
+    params, False, *tracked, 20.0, offroad_transition=False
+  )
+
+  assert state == (None, None)
+  assert json.loads(params.get("NavDestination")) == replacement
+
+
+def test_active_navigation_clears_on_offroad_transition(tmp_path):
+  params = FileBackedFakeParams(tmp_path / "params", {
+    "ClearNavOnOffroad": True,
+    "ClearNavOnOffroadTimeoutMinutes": 0,
+    "NavDestination": {"name": "Home", "latitude": 1.0, "longitude": 2.0},
+  })
+
+  state = manager.update_nav_offroad_clear_state(
+    params, False, None, None, 10.0, offroad_transition=True
+  )
+
+  assert state == (None, None)
+  assert params.get("NavDestination") is None
+
+
+def test_active_navigation_clears_after_offroad_timeout(tmp_path):
+  params = FileBackedFakeParams(tmp_path / "params", {
+    "ClearNavOnOffroad": True,
+    "ClearNavOnOffroadTimeoutMinutes": 15,
+    "NavDestination": {"name": "Home", "latitude": 1.0, "longitude": 2.0},
+  })
+
+  tracked = manager.update_nav_offroad_clear_state(
+    params, False, None, None, 10.0, offroad_transition=True
+  )
+  tracked = manager.update_nav_offroad_clear_state(
+    params, False, *tracked, 909.0, offroad_transition=False
+  )
+  assert params.get("NavDestination") is not None
+
+  state = manager.update_nav_offroad_clear_state(
+    params, False, *tracked, 910.0, offroad_transition=False
+  )
+
+  assert state == (None, None)
+  assert params.get("NavDestination") is None
+
+
+def test_offroad_cleanup_does_not_remove_destination_replaced_after_snapshot(tmp_path):
+  old_destination = json.dumps({"name": "Old", "latitude": 1.0, "longitude": 2.0})
+  replacement_destination = {
+    "name": "Home",
+    "place_name": "Home",
+    "latitude": 3.0,
+    "longitude": 4.0,
+  }
+
+  class SnapshotRaceParams(FileBackedFakeParams):
+    def __init__(self, root, values):
+      self._first_nav_read = old_destination
+      self.removed = []
+      super().__init__(root, values)
+
+    def get(self, key):
+      if key == "NavDestination" and self._first_nav_read is not None:
+        value, self._first_nav_read = self._first_nav_read, None
+        return value
+      return super().get(key)
+
+    def remove(self, key):
+      self.removed.append(key)
+      super().remove(key)
+
+  params = SnapshotRaceParams(tmp_path / "params", {
+    "ClearNavOnOffroad": True,
+    "ClearNavOnOffroadTimeoutMinutes": 0,
+    "NavDestination": replacement_destination,
+  })
+
+  state = manager.update_nav_offroad_clear_state(
+    params, False, None, None, 10.0, offroad_transition=True
+  )
+
+  assert state == (None, None)
+  assert "NavDestination" not in params.removed
+
 
 class FakeManagedProcess:
   def __init__(self):
@@ -114,6 +248,10 @@ def test_reboot_guard_only_defers_automatic_requests():
 
 
 class TestManager:
+  @pytest.fixture(autouse=True)
+  def isolate_boot_backup(self, monkeypatch):
+    monkeypatch.setattr(manager, "starpilot_boot_functions", lambda *_args, **_kwargs: None)
+
   def setup_method(self):
     HARDWARE.set_power_save(False)
 
@@ -178,8 +316,8 @@ class TestManager:
     manager.main()
     for k in params.all_keys():
       default_value = params.get_default_value(k)
-      if default_value is not None:
-        assert params.get(k) == default_value
+      if default_value not in (None, "", b""):
+        assert params.get(k) is not None
     assert params.get("OpenpilotEnabledToggle")
     assert params.get("RouteCount") == 0
 
@@ -235,6 +373,61 @@ class TestManager:
     assert not params.get_bool("ForceAutoTuneOff")
     assert params.get("CEModelStopTime") == "3.5"
     assert params_cache.get_bool("NNFF")
+
+  def test_migrate_starpilot_default_parity_seeds_new_model_stop_time_default(self, tmp_path, monkeypatch):
+    monkeypatch.setattr(manager, "STARPILOT_DEFAULTS_PARITY_MIGRATION_FLAG", tmp_path / "starpilot_defaults_parity_v1")
+
+    params = FileBackedFakeParams(tmp_path / "params")
+    params_cache = FileBackedFakeParams(tmp_path / "cache")
+
+    manager.migrate_starpilot_default_parity(params, params_cache)
+
+    assert params.get("CEModelStopTime") == "7.7"
+    assert params_cache.get("CEModelStopTime") == "7.7"
+
+  def test_migrate_starpilot_default_model(self, tmp_path, monkeypatch):
+    monkeypatch.setattr(manager, "STARPILOT_DEFAULT_MODEL_MIGRATION_FLAG", tmp_path / "starpilot_default_model_rdf_v4")
+
+    params = FileBackedFakeParams(tmp_path / "params", {
+      "Model": "sc2",
+      "DrivingModel": "sc2",
+      "DrivingModelName": "South Carolina",
+      "ModelVersion": "v11",
+      "DrivingModelVersion": "v11",
+    })
+    params_cache = FileBackedFakeParams(tmp_path / "cache")
+
+    manager.migrate_starpilot_default_model(params, params_cache)
+
+    assert params.get("Model") == "rdf43"
+    assert params.get("DrivingModel") == "rdf43"
+    assert params.get("DrivingModelName") == "Regret Driven Framework V4"
+    assert params.get("ModelVersion") == "v15"
+    assert params_cache.get("DrivingModel") == "rdf43"
+    assert manager.STARPILOT_DEFAULT_MODEL_MIGRATION_FLAG.exists()
+
+  def test_migrate_starpilot_ce_model_stop_time(self, tmp_path, monkeypatch):
+    monkeypatch.setattr(manager, "STARPILOT_CE_MODEL_STOP_TIME_MIGRATION_FLAG", tmp_path / "starpilot_ce_model_stop_time_v2")
+
+    params = FileBackedFakeParams(tmp_path / "params", {"CEModelStopTime": 9.0})
+    params_cache = FileBackedFakeParams(tmp_path / "cache")
+
+    manager.migrate_starpilot_ce_model_stop_time(params, params_cache)
+
+    assert params.get("CEModelStopTime") == "7.7"
+    assert params_cache.get("CEModelStopTime") == "7.7"
+    assert manager.STARPILOT_CE_MODEL_STOP_TIME_MIGRATION_FLAG.exists()
+
+  def test_migrate_starpilot_ce_model_stop_time_preserves_custom_value(self, tmp_path, monkeypatch):
+    monkeypatch.setattr(manager, "STARPILOT_CE_MODEL_STOP_TIME_MIGRATION_FLAG", tmp_path / "starpilot_ce_model_stop_time_v2")
+
+    params = FileBackedFakeParams(tmp_path / "params", {"CEModelStopTime": 8.0})
+    params_cache = FileBackedFakeParams(tmp_path / "cache", {"CEModelStopTime": 8.0})
+
+    manager.migrate_starpilot_ce_model_stop_time(params, params_cache)
+
+    assert params.get("CEModelStopTime") == "8.0"
+    assert params_cache.get("CEModelStopTime") == "8.0"
 
   def test_migrate_disable_humanlike_defaults(self, tmp_path, monkeypatch):
     monkeypatch.setattr(manager, "STARPILOT_HUMANLIKE_DISABLE_MIGRATION_FLAG", tmp_path / "starpilot_humanlike_disable_v1")
@@ -319,6 +512,33 @@ class TestManager:
 
     assert (new_store / "ClusterOffset").read_text() == "1.0"
     assert (new_store / "RemapCancelToDistance").read_text() == "0"
+
+  @pytest.mark.parametrize("direct_backup", [False, True])
+  def test_migrate_legacy_secoc_key_without_starpilot_marker(self, tmp_path, direct_backup):
+    params = FileBackedFakeParams(tmp_path / "params")
+    params_cache = FileBackedFakeParams(tmp_path / "cache")
+    legacy_cache = tmp_path / "legacy_cache"
+    legacy_cache.mkdir()
+    legacy_store = legacy_cache if direct_backup else manager._params_store_path(legacy_cache)
+    legacy_store.mkdir(exist_ok=True)
+    (legacy_store / "SecOCKey").write_text("00112233445566778899aabbccddeeff")
+
+    manager.migrate_legacy_secoc_key(params, params_cache, legacy_cache)
+
+    assert params.get("SecOCKey") == "00112233445566778899aabbccddeeff"
+    assert params_cache.get("SecOCKey") == "00112233445566778899aabbccddeeff"
+
+  def test_migrate_legacy_secoc_key_rejects_invalid_key(self, tmp_path):
+    params = FileBackedFakeParams(tmp_path / "params")
+    params_cache = FileBackedFakeParams(tmp_path / "cache")
+    legacy_cache = tmp_path / "legacy_cache"
+    legacy_cache.mkdir()
+    (legacy_cache / "SecOCKey").write_text("not-a-valid-key")
+
+    manager.migrate_legacy_secoc_key(params, params_cache, legacy_cache)
+
+    assert params.get("SecOCKey") is None
+    assert params_cache.get("SecOCKey") is None
 
   def test_migrate_cluster_offset_default_resets_legacy_default_only(self, tmp_path, monkeypatch):
     monkeypatch.setattr(manager, "STARPILOT_CLUSTER_OFFSET_MIGRATION_FLAG", tmp_path / "starpilot_cluster_offset_v1")

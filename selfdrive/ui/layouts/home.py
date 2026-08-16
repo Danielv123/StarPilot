@@ -2,11 +2,11 @@ import time
 import pyray as rl
 from collections.abc import Callable
 from enum import IntEnum
-from openpilot.common.params import Params
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets.offroad_alerts import UpdateAlert, OffroadAlert
 from openpilot.selfdrive.ui.widgets.exp_mode_button import ExperimentalModeButton
 from openpilot.selfdrive.ui.widgets.drive_stats import DriveStatsDashboard
+from openpilot.selfdrive.ui.widgets.home_info_card import HomeInfoCard
 from openpilot.selfdrive.ui.widgets.setup import SetupWidget
 from openpilot.selfdrive.ui.lib.starpilot_version import starpilot_display_description
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -32,7 +32,7 @@ class HomeLayoutState(IntEnum):
 class HomeLayout(Widget):
   def __init__(self):
     super().__init__()
-    self.params = Params()
+    self.params = ui_state.ui_params
 
     self.update_alert = UpdateAlert()
     self.offroad_alert = OffroadAlert()
@@ -59,12 +59,14 @@ class HomeLayout(Widget):
 
     self._drive_stats = DriveStatsDashboard(self.params)
     self._setup_widget = SetupWidget()
+    self._home_info_card = self._child(HomeInfoCard(params=self.params, drive_stats=self._drive_stats))
 
     self._exp_mode_button = ExperimentalModeButton()
     self._setup_callbacks()
 
   def show_event(self):
     self._exp_mode_button.show_event()
+    super().show_event()
     self.last_refresh = time.monotonic()
     self._refresh()
 
@@ -213,12 +215,13 @@ class HomeLayout(Widget):
       self.right_column_rect.height - exp_height - SPACING,
     )
     if ui_state.prime_state.is_paired():
-      self._drive_stats.render_records(setup_rect)
+      self._home_info_card.render(setup_rect)
     else:
       self._setup_widget.render(setup_rect)
 
   def _refresh(self):
     self._drive_stats.refresh()
+    self._home_info_card.refresh()
     self._version_text = self._get_version_text()
     update_available = self.update_alert.refresh()
     alert_count = self.offroad_alert.refresh()

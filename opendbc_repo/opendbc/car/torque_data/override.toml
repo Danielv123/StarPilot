@@ -13,7 +13,9 @@ legend = ["LAT_ACCEL_FACTOR", "MAX_LAT_ACCEL_MEASURED", "FRICTION"]
 # New subarus angle based controllers
 "SUBARU_FORESTER_2022" = [nan, 3.0, nan]
 "SUBARU_OUTBACK_2023" = [nan, 3.0, nan]
+"SUBARU_LEGACY_2025" = [nan, 3.0, nan]
 "SUBARU_ASCENT_2023" = [nan, 3.0, nan]
+"SUBARU_CROSSTREK_2025" = [nan, 3.0, nan]
 
 # Toyota LTA also has torque
 "TOYOTA_RAV4_TSS2_2023" = [nan, 3.0, nan]
@@ -137,3 +139,4 @@ legend = ["LAT_ACCEL_FACTOR", "MAX_LAT_ACCEL_MEASURED", "FRICTION"]
 "HONDA_HRV_3G" = [2.5, 1.2, 0.2]
 
 "CHEVROLET_MALIBU_CC" = [1.85, 1.85, 0.075]
+"CHEVROLET_TRAX" = [0.95, 0.95, 0.17]

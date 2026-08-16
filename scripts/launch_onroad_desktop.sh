@@ -27,13 +27,14 @@ env_var_truthy() {
 usage() {
   cat <<'EOF'
 Usage:
-  ./onroad [jobs] [--c3 | --c4 | --raybig | --all | --replay-only] [--galaxy] [-nav] [-alert] [--cem] [--prefix name] <route-or-replay-args...>
+  ./onroad [jobs] [--c3 | --c4 | --raybig | --all | --replay-only] [--galaxy] [-nav] [--offroad] [-alert] [--cem] [--prefix name] <route-or-replay-args...>
 
 Examples:
   ./onroad <route>
   ./onroad --c3 <route>
   ./onroad --c4 <route> --start 30
   ./onroad --c4 -nav <route>
+  ./onroad --raybig --nav --offroad --demo
   ./onroad --c4 --cem --demo
   ./onroad --raybig --cem --demo
   ./onroad --raybig --cem -alert --demo --no-loop
@@ -47,7 +48,9 @@ Notes:
   - Use multiple UI flags together if you want more than one desktop UI at once.
   - --galaxy starts a local Galaxy web session with the same preview params and prints the localhost URL. It blocks replay's logged customReserved9 stream so Galaxy can own the live Testing Grounds publisher.
   - -nav injects a fake navigation demo stream and blocks replay from publishing navInstruction/navRoute.
+  - --offroad is only valid with --nav; together they preview the offroad Quick Start card and do not start the fake on-road nav publisher.
   - --cem publishes fake CEM statuses for desktop visual review in the raylib UIs.
+  - --csc publishes a fake starpilotPlan stream that forces the CSC glow to render on desktop UI.
   - -alert blocks replay from publishing selfdriveState and fires a fake critical full-screen red alert (alertSize=full, alertStatus=critical) 20 seconds after the demo publisher starts (10s for replay route + UI to come up, plus 10s for the user to open Settings). Default alert text mimics a real controlsMismatch event; run tools/replay/fake_alert_demo.py directly to override --text1/--text2/--delay.
 EOF
 }
@@ -65,13 +68,16 @@ UI_SELECTION_EXPLICIT=0
 LEGACY_UI_SELECTION=""
 REPLAY_ONLY=0
 NAV_DEMO=0
+OFFROAD_DEMO=0
 CEM_DEMO=0
 ALERT_DEMO=0
+CSC_DEMO=0
 GALAXY=0
 REPLAY_PID=""
 NAV_PID=""
 CEM_PID=""
 ALERT_PID=""
+CSC_PID=""
 GALAXY_PID=""
 GALAXY_PORT=""
 GALAXY_URL=""
@@ -113,8 +119,16 @@ parse_args() {
         NAV_DEMO=1
         shift
         ;;
+      --offroad)
+        OFFROAD_DEMO=1
+        shift
+        ;;
       --cem|--mici-widget-demo|--widget-demo)
         CEM_DEMO=1
+        shift
+        ;;
+      --csc|--csc-demo)
+        CSC_DEMO=1
         shift
         ;;
       --galaxy)
@@ -247,6 +261,9 @@ cleanup() {
   if [[ -n "${ALERT_PID}" ]]; then
     kill "${ALERT_PID}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${CSC_PID}" ]]; then
+    kill "${CSC_PID}" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${GALAXY_PID}" ]]; then
     kill "${GALAXY_PID}" >/dev/null 2>&1 || true
   fi
@@ -267,6 +284,9 @@ cleanup() {
   fi
   if [[ -n "${ALERT_PID}" ]]; then
     wait "${ALERT_PID}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${CSC_PID}" ]]; then
+    wait "${CSC_PID}" >/dev/null 2>&1 || true
   fi
   if [[ -n "${GALAXY_PID}" ]]; then
     wait "${GALAXY_PID}" >/dev/null 2>&1 || true
@@ -352,6 +372,10 @@ ensure_alert_demo_replay_blocklist() {
   ensure_replay_blocklist "selfdriveState"
 }
 
+ensure_csc_demo_replay_blocklist() {
+  ensure_replay_blocklist "starpilotPlan"
+}
+
 ensure_galaxy_replay_blocklist() {
   ensure_replay_blocklist "customReserved9"
 }
@@ -381,8 +405,10 @@ prepare_env() {
   export SP_RAYBIG_FAKE_WIFI=0
   export SP_ALLOW_DESKTOP_FAKE_WIFI=0
   export SP_ONROAD_NAV_DEMO="${NAV_DEMO}"
+  export SP_ONROAD_OFFROAD_DEMO="${OFFROAD_DEMO}"
   export SP_CEM_DEMO="${CEM_DEMO}"
   export SP_ONROAD_ALERT_DEMO="${ALERT_DEMO}"
+  export SP_ONROAD_CSC_DEMO="${CSC_DEMO}"
 
   local generated_prefix="${PREFIX_ARG:-${OPENPILOT_PREFIX:-desktop-onroad-$$}}"
   ONROAD_TEMP_PREFIX="${generated_prefix}"
@@ -484,6 +510,18 @@ launch_alert_demo() {
   fi
 }
 
+launch_csc_demo() {
+  echo "Starting fake CSC demo publisher..."
+  "${ROOT_DIR}/.venv/bin/python3" "${ROOT_DIR}/tools/replay/fake_csc_demo.py" &
+  CSC_PID=$!
+
+  sleep 0.5
+  if ! kill -0 "${CSC_PID}" >/dev/null 2>&1; then
+    wait "${CSC_PID}"
+    return 1
+  fi
+}
+
 pick_free_local_port() {
   "${ROOT_DIR}/.venv/bin/python3" - <<'PY'
 import socket
@@ -571,6 +609,9 @@ launch_python_ui() {
   local big="$1"
   (
     export BIG="${big}"
+    if [[ "${OFFROAD_DEMO}" == "1" ]]; then
+      export PRIME_TYPE=0
+    fi
     exec "${ROOT_DIR}/.venv/bin/python3" "${ROOT_DIR}/selfdrive/ui/ui.py"
   ) &
   UI_PIDS+=("$!")
@@ -601,8 +642,17 @@ if [[ "${NAV_DEMO}" == "1" ]]; then
   ensure_nav_demo_replay_blocklist
 fi
 
+if [[ "${OFFROAD_DEMO}" == "1" && "${NAV_DEMO}" != "1" ]]; then
+  echo "--offroad requires --nav." >&2
+  exit 1
+fi
+
 if [[ "${ALERT_DEMO}" == "1" ]]; then
   ensure_alert_demo_replay_blocklist
+fi
+
+if [[ "${CSC_DEMO}" == "1" ]]; then
+  ensure_csc_demo_replay_blocklist
 fi
 
 if [[ "${GALAXY}" == "1" ]]; then
@@ -660,7 +710,7 @@ fi
 echo "Starting replay: ${REPLAY_ARGS[*]}"
 launch_replay
 
-if [[ "${NAV_DEMO}" == "1" ]]; then
+if [[ "${NAV_DEMO}" == "1" && "${OFFROAD_DEMO}" != "1" ]]; then
   launch_nav_demo
 fi
 
@@ -670,6 +720,10 @@ fi
 
 if [[ "${ALERT_DEMO}" == "1" ]]; then
   launch_alert_demo
+fi
+
+if [[ "${CSC_DEMO}" == "1" ]]; then
+  launch_csc_demo
 fi
 
 if [[ ${#UI_TARGETS[@]} -eq 0 ]]; then

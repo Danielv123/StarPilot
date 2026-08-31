@@ -74,10 +74,44 @@ def test_select_ui_uses_c4_for_mici_routes():
   assert onroad_config.select_ui_target(_init_data("mici")) == "c4"
 
 
-def test_select_ui_uses_old_qt_only_when_big_route_logged_use_old_ui():
+def test_select_ui_uses_c3_for_all_big_routes():
   assert onroad_config.select_ui_target(_init_data("tici", {"UseOldUI": b"1"})) == "c3"
-  assert onroad_config.select_ui_target(_init_data("tici", {"TryRaylibUI": b"0"})) == "raybig"
-  assert onroad_config.select_ui_target(_init_data("tizi")) == "raybig"
+  assert onroad_config.select_ui_target(_init_data("tici", {"TryRaylibUI": b"0"})) == "c3"
+  assert onroad_config.select_ui_target(_init_data("tizi")) == "c3"
+  assert onroad_config.select_ui_target(None) == "c3"
+
+
+def test_replay_gpu_state_reconstructs_loading_failure_and_restart():
+  state = onroad_config.ReplayGpuState()
+
+  assert state.update(present=True) == (True, False, False, False)
+  assert state.update(event_names=("selfdriveInitializing", "bigModelLoading")) == (True, True, True, False)
+  assert state.update(event_names=("bigModelFailed",), model_updated=True) == (True, True, False, False)
+  assert state.update(model_updated=True) == (True, True, False, False)
+  assert state.update(event_names=("bigModelLoading",)) == (True, True, True, False)
+  assert state.update(model_updated=True) == (True, True, False, True)
+
+
+def test_replay_gpu_state_detects_active_later_segment():
+  state = onroad_config.ReplayGpuState(compiled=True)
+
+  assert state.update(present=True, model_updated=True) == (True, True, False, True)
+  assert state.update(present=False) == (False, False, False, False)
+
+
+def test_replay_gpu_state_does_not_treat_connected_gpu_as_active_with_normal_model():
+  state = onroad_config.ReplayGpuState()
+
+  assert state.update(present=True, model_updated=True) == (True, False, False, False)
+
+
+def test_seed_onroad_params_marks_logged_gpu_model_compiled(monkeypatch):
+  monkeypatch.setattr(onroad_config, "_model_uses_external_gpu", lambda model: model == "big-model")
+  params = FakeParams()
+
+  onroad_config.seed_onroad_params(_init_data("mici", {"Model": b"big-model"}), params)
+
+  assert params.values["UsbGpuCompiled"] is True
 
 
 def test_seed_onroad_params_uses_logged_disabled_bool_and_desktop_overrides(monkeypatch):

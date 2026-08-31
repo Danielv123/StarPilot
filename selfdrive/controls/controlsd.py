@@ -12,21 +12,30 @@ from openpilot.common.swaglog import cloudlog
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.chrysler.values import pacifica_hybrid_aol_stock_acc_mode
 from opendbc.car.gm.values import CAR as GM_CAR
+from opendbc.car.honda.values import CAR as HONDA_CAR
+from opendbc.car.hyundai.values import CAR as HYUNDAI_CAR
 from opendbc.car.nissan.values import CAR as NISSAN_CAR
 from opendbc.car.vehicle_model import VehicleModel
-from openpilot.selfdrive.controls.lib.drive_helpers import MAX_LATERAL_JERK, clip_curvature, get_lateral_active
+from openpilot.selfdrive.controls.lib.drive_helpers import (
+  MAX_LATERAL_JERK,
+  clip_curvature,
+  get_kona_non_scc_lateral_active,
+  get_lateral_active,
+)
 from openpilot.selfdrive.controls.lib.lane_centering import LaneCenteringController
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
+from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
 from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   BOLT_2018_2021_STEER_RATIO_TEST_SCALE,
   LatControlTorque,
   get_bolt_2017_steer_ratio_scale,
+  get_honda_accord_steer_ratio_scale,
 )
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
 from openpilot.selfdrive.car.cruise_state import should_cancel_stock_cruise
-from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
+from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS, get_car_lateral_smooth_seconds
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
 from openpilot.starpilot.common.starpilot_variables import get_starpilot_toggles
@@ -35,6 +44,7 @@ from openpilot.starpilot.controls.lib.neural_network_feedforward import LatContr
 State = log.SelfdriveState.OpenpilotState
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
+LateralControlMode = car.CarControl.Actuators.LateralControlMode
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 
@@ -159,12 +169,27 @@ CURVATURE_HOLD_OPPOSITE_RELEASE = 0.01  # 1/m
 CURVATURE_HOLD_CONFIRM_MIN = 0.003  # 1/m (~7 deg) of wound curvature before capture
 CURVATURE_HOLD_CONFIRM_SWEPT = 0.6  # rad of heading swept this blinker cycle; past this the push is exit-shaping, not initiation
 
+# Suppress low-speed action spikes while the model's spatial path remains straight.
+TWITCH_GUARD_MAX_SPEED = 4.0
+TWITCH_GUARD_FADE_SPEED = 3.0
+TWITCH_GUARD_DURATION = 1.5
+TWITCH_GUARD_PLAN_RATIO = 4.0
+TWITCH_GUARD_FLOOR = 0.002
+TWITCH_GUARD_STRAIGHT_LO = 0.005
+TWITCH_GUARD_STRAIGHT_HI = 0.014
+TWITCH_GUARD_MIN_REACH = 12.0
+
 
 def _plan_circle_curvature(xs, ys, lookahead: float) -> float:
-  # curvature of the circle through the origin, tangent to the car's heading, passing
-  # through the plan point ~lookahead meters ahead: kappa = 2y / (x^2 + y^2)
+  # Fit curvature through the plan point at the requested lookahead.
   px, py = 0.0, 0.0
-  for x, y in zip(xs, ys):
+  for x, y in zip(xs, ys, strict=False):
+    try:
+      x, y = float(x), float(y)
+    except (TypeError, ValueError, OverflowError):
+      return 0.0
+    if not (math.isfinite(x) and math.isfinite(y)):
+      return 0.0
     px, py = x, y
     if math.hypot(x, y) >= lookahead:
       break
@@ -175,11 +200,7 @@ def _plan_circle_curvature(xs, ys, lookahead: float) -> float:
 
 
 def _plan_dual_probe(model_v2, d_near: float, d_far: float) -> float:
-  # Min-magnitude of a near and a far circle fit. The far probe alone assumes the turn
-  # starts immediately, which over-winds wide turns whose arc begins several meters out
-  # (wide multi-lane lefts): the near probe reads ~straight there and only grows as the
-  # car approaches the arc, so the readout self-scales to the turn geometry. Sign
-  # disagreement means no coherent turn ahead: contribute nothing.
+  # Use the smaller magnitude of near and far probes to avoid early turn bias.
   xs, ys = model_v2.position.x, model_v2.position.y
   near = _plan_circle_curvature(xs, ys, d_near)
   far = _plan_circle_curvature(xs, ys, d_far)
@@ -212,8 +233,65 @@ def get_plan_turn_onset_dist(model_v2) -> float:
 
 
 def get_plan_reach(model_v2) -> float:
-  xs = model_v2.position.x
-  return xs[-1] if len(xs) else 0.0
+  try:
+    xs = model_v2.position.x
+    return float(xs[-1]) if len(xs) else 0.0
+  except (AttributeError, IndexError, TypeError, ValueError, OverflowError):
+    return 0.0
+
+
+def _plan_positions_are_finite(model_v2) -> bool:
+  try:
+    xs, ys = model_v2.position.x, model_v2.position.y
+    return len(xs) == len(ys) and all(
+      math.isfinite(float(x)) and math.isfinite(float(y)) for x, y in zip(xs, ys, strict=True)
+    )
+  except (AttributeError, TypeError, ValueError, OverflowError):
+    return False
+
+
+def limit_curvature_to_plan(model_v2, curvature: float, v_ego: float) -> float:
+  if not (math.isfinite(curvature) and math.isfinite(v_ego)):
+    return curvature
+  if v_ego >= TWITCH_GUARD_MAX_SPEED or curvature == 0.0:
+    return curvature
+  if not _plan_positions_are_finite(model_v2):
+    return curvature
+  reach = get_plan_reach(model_v2)
+  if not math.isfinite(reach) or reach < TWITCH_GUARD_MIN_REACH:
+    return curvature
+  plan = abs(_plan_circle_curvature(model_v2.position.x, model_v2.position.y,
+                                    CURVATURE_HOLD_PLAN_LOOKAHEAD_FAR))
+  if not math.isfinite(plan):
+    return curvature
+  straightness = (plan - TWITCH_GUARD_STRAIGHT_LO) / (TWITCH_GUARD_STRAIGHT_HI - TWITCH_GUARD_STRAIGHT_LO)
+  limit = max(TWITCH_GUARD_PLAN_RATIO * plan * min(max(straightness, 0.0), 1.0), TWITCH_GUARD_FLOOR)
+  if abs(curvature) <= limit:
+    return curvature
+  fade = (TWITCH_GUARD_MAX_SPEED - v_ego) / (TWITCH_GUARD_MAX_SPEED - TWITCH_GUARD_FADE_SPEED)
+  fade = min(max(fade, 0.0), 1.0)
+  return curvature + (math.copysign(limit, curvature) - curvature) * fade
+
+
+def update_twitch_guard(remaining: float, v_ego: float, standstill: bool) -> float:
+  if not (math.isfinite(remaining) and math.isfinite(v_ego)):
+    return 0.0
+  if standstill or abs(v_ego) <= 0.3:
+    return TWITCH_GUARD_DURATION
+  return max(remaining - DT_CTRL, 0.0)
+
+
+def get_control_lateral_smooth_seconds(brand: str, v_ego: float, vehicle_smooth_seconds: float) -> float:
+  if brand == "rivian" or (brand == "subaru" and vehicle_smooth_seconds > 0.0):
+    return get_car_lateral_smooth_seconds(brand, v_ego, vehicle_smooth_seconds)
+  return LAT_SMOOTH_SECONDS
+
+
+def turn_lead_allowed(brand: str, lateral_control_mode: car.CarControl.Actuators.LateralControlMode) -> bool:
+  # Torque steering mechanically damps the turn-lead fade. A direct angle
+  # controller follows the resulting lead/catch-up cycle literally, which can
+  # reverse the wheel command several times during one turn initiation.
+  return brand != "rivian" or lateral_control_mode != LateralControlMode.angle
 
 
 # Turn-initiation lead. The model's action and the fixed 4/7 m probes are anchored in
@@ -323,6 +401,8 @@ class Controls:
     self.turn_hold_handoff_t = 0.0
     self.turn_hold_done = False
     self.turn_blinker_swept = 0.0
+    self.twitch_guard_remaining = 0.0
+    self.kona_non_scc_lateral_active = False
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
@@ -332,6 +412,8 @@ class Controls:
     self.LaC: LatControl
     if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
       self.LaC = LatControlAngle(self.CP, self.CI, DT_CTRL)
+    elif self.CP.steerControlType == car.CarParams.SteerControlType.curvatureDEPRECATED:
+      self.LaC = LatControlCurvature(self.CP, self.CI, DT_CTRL)
     elif self.CP.lateralTuning.which() == 'pid':
       self.LaC = LatControlPID(self.CP, self.CI, DT_CTRL)
     elif self.CP.lateralTuning.which() == 'torque':
@@ -370,20 +452,26 @@ class Controls:
       self.ecu_disable_failed = self.params.get_bool("EcuDisableFailed")
       self.ecu_disable_failed_checked = True
       if self.ecu_disable_failed and self.CP.carFingerprint == NISSAN_CAR.NISSAN_LEAF:
-        self.CP.openpilotLongitudinalControl = False
-        self.CP.pcmCruise = True
+        self.CP = messaging.log_from_bytes(self.params.get("CarParams"), car.CarParams)
+        self.FPCP = messaging.log_from_bytes(self.params.get("StarPilotCarParams"), custom.StarPilotCarParams)
 
   def state_control(self):
     CS = self.sm['carState']
+    self.twitch_guard_remaining = update_twitch_guard(self.twitch_guard_remaining, CS.vEgo, CS.standstill)
 
     # Update VehicleModel
     lp = self.sm['liveParameters']
     x = max(lp.stiffnessFactor, 0.1)
     sr = max(lp.steerRatio, 0.1)
+    custom_accord_ratio = getattr(self.starpilot_toggles, "steerRatio", self.CP.steerRatio)
+    accord_ratio_is_explicit = getattr(self.starpilot_toggles, "use_custom_steerRatio", False) and \
+      abs(custom_accord_ratio - self.CP.steerRatio) > 0.01
     if self.CP.carFingerprint == GM_CAR.CHEVROLET_BOLT_CC_2017:
       sr *= get_bolt_2017_steer_ratio_scale(CS.vEgo)
     elif self.CP.carFingerprint == GM_CAR.CHEVROLET_BOLT_CC_2018_2021:
       sr *= BOLT_2018_2021_STEER_RATIO_TEST_SCALE
+    elif self.CP.carFingerprint == HONDA_CAR.HONDA_ACCORD and not accord_ratio_is_explicit:
+      sr *= get_honda_accord_steer_ratio_scale(CS.vEgo)
     self.VM.update_params(x, sr)
 
     steer_angle_without_offset = math.radians(CS.steeringAngleDeg - lp.angleOffsetDeg)
@@ -410,15 +498,30 @@ class Controls:
 
     # Check which actuators can be enabled
     standstill = abs(CS.vEgo) <= max(self.CP.minSteerSpeed, 0.3) or CS.standstill
-    CC.latActive = get_lateral_active(CC.enabled, self.sm['selfdriveState'].active,
-                                      self.sm['starpilotCarState'].alwaysOnLateralEnabled,
-                                      CS.steerFaultTemporary, CS.steerFaultPermanent,
-                                      standstill, self.CP.steerAtStandstill,
-                                      self.sm['starpilotPlan'].lateralCheck)
+    if self.CP.carFingerprint == HYUNDAI_CAR.HYUNDAI_KONA_NON_SCC:
+      CC.latActive = get_kona_non_scc_lateral_active(
+        CC.enabled, self.sm['selfdriveState'].active,
+        self.sm['starpilotCarState'].alwaysOnLateralEnabled,
+        CS.steerFaultTemporary, CS.steerFaultPermanent,
+        standstill, self.CP.steerAtStandstill,
+        self.sm['starpilotPlan'].lateralCheck,
+        CS.steeringPressed, self.kona_non_scc_lateral_active,
+      )
+      self.kona_non_scc_lateral_active = CC.latActive
+    else:
+      CC.latActive = get_lateral_active(CC.enabled, self.sm['selfdriveState'].active,
+                                        self.sm['starpilotCarState'].alwaysOnLateralEnabled,
+                                        CS.steerFaultTemporary, CS.steerFaultPermanent,
+                                        standstill, self.CP.steerAtStandstill,
+                                        self.sm['starpilotPlan'].lateralCheck)
     # EcuDisableFailed is set when car started in READY mode (ECU disable was rejected)
     # Disable longitudinal so stock ACC works instead
     self.update_ecu_disable_failed()
-    CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and not self.sm['starpilotCarState'].pauseLongitudinal and self.CP.openpilotLongitudinalControl and not self.ecu_disable_failed
+    CC.longActive = (
+      CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and
+      not self.sm['starpilotCarState'].pauseLongitudinal and self.CP.openpilotLongitudinalControl and
+      not self.ecu_disable_failed
+    )
 
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state
@@ -457,6 +560,9 @@ class Controls:
     # here is positive for RIGHT turns (pauseturn log: left turn at +148 deg steering
     # angle logs desiredCurvature -0.07), so the blinker maps right=+1, left=-1.
     blinker_dir = float(CS.rightBlinker) - float(CS.leftBlinker)
+    if (CC.latActive and self.twitch_guard_remaining > 0.0 and
+        blinker_dir == 0.0 and self.turn_hold_curvature == 0.0):
+      new_desired_curvature = limit_curvature_to_plan(model_v2, new_desired_curvature, CS.vEgo)
     # heading swept in the blinker's direction over the whole blinker cycle (any speed):
     # discriminates a turn not yet made from one being exited (see the re-arm below)
     if blinker_dir == 0.0:
@@ -577,7 +683,9 @@ class Controls:
     # bend is not a turn. The model-oppose veto is defense-in-depth for the fade-in
     # edge: a model actively steering against the blinker is correcting something the
     # lead must not fight (see the constants comment for the 2026-07-19 failures).
-    if (CC.latActive and blinker_dir != 0.0 and
+    lateral_control_mode = self.sm['carOutput'].actuatorsOutput.lateralControlMode
+    if (turn_lead_allowed(self.CP.brand, lateral_control_mode) and
+        CC.latActive and blinker_dir != 0.0 and
         model_v2.meta.laneChangeState == LaneChangeState.off and
         TURN_LEAD_MIN_SPEED <= CS.vEgo < TURN_LEAD_MAX_SPEED and
         new_desired_curvature * blinker_dir > -TURN_LEAD_MODEL_OPPOSE):
@@ -650,17 +758,21 @@ class Controls:
 
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll,
                                                                jerk_factor)
-    lat_delay = self.sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS
+    lat_smooth_seconds = get_control_lateral_smooth_seconds(self.CP.brand, CS.vEgo, self.CP.lateralSmoothSeconds)
+    lat_delay = self.sm["liveDelay"].lateralDelay + lat_smooth_seconds
 
     actuators.curvature = self.desired_curvature
-    steer, steeringAngleDeg, lac_log = self.LaC.update(CC.latActive, CS, self.VM, lp,
-                                                       self.steer_limited_by_safety, self.desired_curvature,
-                                                       curvature_limited, lat_delay,
-                                                       self.calibrated_pose,
-                                                       self.sm['modelV2'],
-                                                       self.starpilot_toggles)
+    steer, lateral_output, lac_log = self.LaC.update(CC.latActive, CS, self.VM, lp,
+                                                     self.steer_limited_by_safety, self.desired_curvature,
+                                                     curvature_limited, lat_delay,
+                                                     self.calibrated_pose,
+                                                     self.sm['modelV2'],
+                                                     self.starpilot_toggles)
     actuators.torque = float(steer)
-    actuators.steeringAngleDeg = float(steeringAngleDeg)
+    if self.CP.steerControlType == car.CarParams.SteerControlType.curvatureDEPRECATED:
+      actuators.curvature = float(lateral_output)
+    else:
+      actuators.steeringAngleDeg = float(lateral_output)
 
     if len(long_plan.speeds):
       actuators.speed = long_plan.speeds[-1]
@@ -767,6 +879,8 @@ class Controls:
     lat_tuning = self.CP.lateralTuning.which()
     if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
       cs.lateralControlState.angleState = lac_log
+    elif self.CP.steerControlType == car.CarParams.SteerControlType.curvatureDEPRECATED:
+      cs.lateralControlState.curvatureStateDEPRECATED = lac_log
     elif lat_tuning == 'pid':
       cs.lateralControlState.pidState = lac_log
     elif lat_tuning == 'torque':

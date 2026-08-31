@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
+from collections.abc import Callable
+import ctypes
+from functools import cached_property
 import os
-from openpilot.system.hardware import TICI
+import struct
+from openpilot.system.hardware import HARDWARE, TICI
 os.environ['GMMU'] = '0'
 os.environ['DEV'] = 'QCOM' if TICI else 'LLVM'
+from tinygrad.device import Device
 from tinygrad.tensor import Tensor
 import time
 import pickle
@@ -12,6 +17,7 @@ from cereal import car, log
 from pathlib import Path
 from setproctitle import setproctitle
 from cereal.messaging import PubMaster, SubMaster
+from cereal.services import SERVICE_LIST
 from msgq.visionipc import VisionIpcClient, VisionStreamType, VisionBuf
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.params import Params
@@ -62,7 +68,182 @@ def _model_smooth_seconds(params, key, default):
     return default
   value = params.get_float(key, return_default=True, default=default)
   return round(min(max(value, SMOOTH_SECONDS_STEP), 2.0) / SMOOTH_SECONDS_STEP) * SMOOTH_SECONDS_STEP
+
+
+def _should_publish_model_output(model_output, vipc_dropped_frames: int, external_gpu_active: bool = False) -> bool:
+  return model_output is not None and vipc_dropped_frames == 0
+
+
 MIN_LAT_CONTROL_SPEED = 0.3
+BIG_MODEL_LOAD_WAIT_TIMEOUT_MS = 30000
+BIG_MODEL_RUN_WAIT_TIMEOUT_MS = 3000
+EXTERNAL_GPU_POWER_READY_MV = 10000
+EXTERNAL_GPU_EGMP_READY_MV = 12500
+EXTERNAL_GPU_POWER_STABLE_SECONDS = 3.0
+EXTERNAL_GPU_POWER_LOG_INTERVAL_SECONDS = 10.0
+LAT_SMOOTH_BP = [2.0, 8.0]
+
+
+def _set_hcq_wait_timeout(timeout_ms: int) -> None:
+  """Update tinygrad's cached HCQ timeout for the external-GPU load/run phase."""
+  os.environ["HCQDEV_WAIT_TIMEOUT_MS"] = str(timeout_ms)
+  # tinygrad.getenv is cached. Updating os.environ alone leaves the first value
+  # in effect for the lifetime of modeld.
+  from tinygrad.helpers import getenv
+  getenv.cache_clear()
+
+
+def _external_gpu_power_voltage(device_type: str, panda_states, peripheral_state) -> int | None:
+  if device_type == "tici":
+    voltage = int(peripheral_state.voltage)
+    return voltage if peripheral_state.pandaType != log.PandaState.PandaType.unknown and voltage > 0 else None
+
+  voltages = [
+    int(state.voltage) for state in panda_states
+    if state.pandaType != log.PandaState.PandaType.unknown and int(state.voltage) > 0
+  ]
+  return max(voltages, default=None)
+
+
+def _external_gpu_power_ready(voltage: int | None, now: float, stable_since: float | None,
+                              minimum_voltage: int = EXTERNAL_GPU_POWER_READY_MV) -> tuple[bool, float | None]:
+  if voltage is None or voltage < minimum_voltage:
+    return False, None
+
+  stable_since = now if stable_since is None else stable_since
+  return now - stable_since >= EXTERNAL_GPU_POWER_STABLE_SECONDS, stable_since
+
+
+def _egmp_ready_bus(CP) -> int | None:
+  if CP is None or CP.brand != "hyundai":
+    return None
+
+  # These platforms use the accessory-mode ECU-disable startup sequence.
+  from opendbc.car.hyundai.hyundaicanfd import CanBus
+  from opendbc.car.hyundai.values import CAR
+  if CP.carFingerprint not in (CAR.HYUNDAI_IONIQ_5_PE, CAR.HYUNDAI_IONIQ_6, CAR.KIA_EV9):
+    return None
+  return CanBus(CP).ECAN
+
+
+def _egmp_vehicle_ready(can_messages, bus: int) -> bool:
+  return any(
+    msg.address == 0x35 and msg.src == bus and len(msg.dat) > 3 and bytes(msg.dat)[3] & 0x40
+    for msg in can_messages
+  )
+
+
+def wait_for_external_gpu_power_ready(CP=None) -> None:
+  """Wait out vehicle startup power transitions before initializing Chestnut."""
+  device_type = HARDWARE.get_device_type()
+  egmp_bus = _egmp_ready_bus(CP)
+  services = ["pandaStates", "peripheralState"] + (["can"] if egmp_bus is not None else [])
+  sm = SubMaster(services)
+  vehicle_ready = egmp_bus is None
+  stable_since = None
+  last_log = 0.0
+
+  while True:
+    sm.update(1000)
+    now = time.monotonic()
+    if egmp_bus is not None and sm.updated["can"] and _egmp_vehicle_ready(sm["can"], egmp_bus):
+      if not vehicle_ready:
+        cloudlog.warning("e-GMP vehicle entered READY; waiting for external GPU power to stabilize")
+      vehicle_ready = True
+
+    voltage = _external_gpu_power_voltage(device_type, sm["pandaStates"], sm["peripheralState"])
+    minimum_voltage = EXTERNAL_GPU_EGMP_READY_MV if egmp_bus is not None else EXTERNAL_GPU_POWER_READY_MV
+    ready, stable_since = _external_gpu_power_ready(
+      voltage,
+      now,
+      stable_since if vehicle_ready else None,
+      minimum_voltage,
+    )
+    if vehicle_ready and ready:
+      cloudlog.warning(f"vehicle power stable at {voltage / 1000:.2f} V; starting external GPU load")
+      return
+
+    if now - last_log >= EXTERNAL_GPU_POWER_LOG_INTERVAL_SECONDS:
+      detail = "unavailable" if voltage is None else f"{voltage / 1000:.2f} V"
+      if not vehicle_ready:
+        cloudlog.warning(f"external GPU load deferred: vehicle power is {detail}; waiting for e-GMP READY")
+      else:
+        cloudlog.warning(f"external GPU load deferred: vehicle power is {detail}; waiting for " +
+                         f"{minimum_voltage / 1000:.1f} V to remain stable")
+      last_log = now
+
+
+def get_lateral_smooth_seconds(v_ego: float, maximum: float = 0.0) -> float:
+  return float(np.interp(v_ego, LAT_SMOOTH_BP, [maximum, 0.0]))
+
+
+def get_car_lateral_smooth_seconds(brand: str, v_ego: float, maximum: float) -> float:
+  if brand in ("rivian", "subaru"):
+    return get_lateral_smooth_seconds(v_ego, maximum)
+  return maximum
+
+
+class ChestnutState:
+  """Publish bounded external-GPU and ASM2464 telemetry from modeld."""
+
+  def __init__(self, pm: PubMaster, big: bool):
+    self.pm = pm
+    self.big = big
+    self.valid = True
+    self.sends = 0
+    self.metrics = {}
+
+  @cached_property
+  def power_limit(self) -> int:
+    smu = Device["AMD"].iface.dev_impl.smu
+    return smu._send_msg(smu.smu_mod.PPSMC_MSG_GetPptLimit, 0, read_back_arg=True, timeout=100)
+
+  def send(self) -> None:
+    msg = messaging.new_message("chestnutState")
+    state = msg.chestnutState
+    self.sends += 1
+
+    # SMU metrics are relatively expensive, so update them at 0.1 Hz while
+    # publishing the cached values with the 10 Hz ASM link telemetry.
+    if self.big and "AMD" in Device._opened_devices and self.sends % 100 == 1:
+      try:
+        smu = Device["AMD"].iface.dev_impl.smu
+        metrics_t = smu.smu_mod.SmuMetricsExternal_t
+        smu._send_msg(smu.smu_mod.PPSMC_MSG_TransferTableSmu2Dram, smu.smu_mod.TABLE_SMU_METRICS, timeout=100)
+        metrics_buf = bytearray(smu.adev.vram.view(smu.driver_table_paddr, ctypes.sizeof(metrics_t))[:])
+        metrics = metrics_t.from_buffer(metrics_buf).SmuMetrics
+        self.metrics = {
+          "tempC": metrics.AvgTemperature[smu.smu_mod.TEMP_HOTSPOT],
+          "memoryTempC": metrics.AvgTemperature[smu.smu_mod.TEMP_MEM],
+          "powerDrawW": metrics.AverageSocketPower,
+          "powerLimitW": self.power_limit,
+          "gpuUsagePercent": metrics.AverageGfxActivity,
+          "gpuClockMhz": metrics.AverageGfxclkFrequencyPostDs,
+          "fanSpeedRpm": metrics.AvgFanRpm,
+        }
+        self.valid = True
+      except Exception:
+        if self.valid:
+          cloudlog.exception("chestnut state read failed")
+        self.valid = False
+        self.metrics.clear()
+
+    if self.big:
+      for key, value in self.metrics.items():
+        setattr(state, key, value)
+
+    asm_valid = False
+    if "AMD" in Device._opened_devices:
+      try:
+        asm = Device["AMD"].iface.pci_dev.usb
+        state.pcieLtssm = asm.read(0xB450, 1)[0]
+        state.supplyVoltage, state.supplyCurrent = struct.unpack("<Hh", bytes(asm.usb.control_read(0xC0, 5))[:4])
+        asm_valid = True
+      except Exception:
+        pass
+
+    msg.valid = asm_valid and (not self.big or self.valid)
+    self.pm.send("chestnutState", msg)
 
 
 def _get_param_str(params: Params, key: str, default: str = "") -> str:
@@ -128,13 +309,30 @@ def _select_builtin_model(params: Params) -> None:
   params.put("DrivingModelName", "Regret Driven Framework V4")
 
 
+def _close_tinygrad_disk_cache_connection() -> None:
+  """Drop tinygrad's process-global cache connection before loading the next model."""
+  import tinygrad.helpers as tinygrad_helpers
+
+  connection = getattr(tinygrad_helpers, "_db_connection", None)
+  if connection is None:
+    return
+
+  try:
+    connection.close()
+  except Exception:
+    cloudlog.exception("failed to close tinygrad disk cache connection")
+  finally:
+    tinygrad_helpers._db_connection = None
+
+
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                           lat_action_t: float, long_action_t: float, v_ego: float, mlsim: bool,
                           is_v9: bool, is_v14: bool, is_v15: bool, starpilot_toggles,
-                          lat_smooth_seconds=LAT_SMOOTH_SECONDS, long_smooth_seconds=LONG_SMOOTH_SECONDS) -> log.ModelDataV2.Action:
-    if is_v14 or is_v15:
+                          lat_smooth_seconds=LAT_SMOOTH_SECONDS, long_smooth_seconds=LONG_SMOOTH_SECONDS,
+                          is_v16: bool = False) -> log.ModelDataV2.Action:
+    if is_v14 or is_v15 or is_v16:
       desired_curv_unscaled, desired_accel = model_output['action'][0]
-      if is_v15:
+      if is_v15 or is_v16:
         desired_curvature = float(desired_curv_unscaled) / max(1.0, v_ego) ** 2
       else:
         desired_curvature = float(desired_curv_unscaled) / 100.0
@@ -223,9 +421,11 @@ class ModelState:
     )
     return numpy_inputs, prev_desired_curv_key
 
-  def __init__(self, cam_w: int, cam_h: int, external_gpu_active: bool = False):
+  def __init__(self, cam_w: int, cam_h: int, external_gpu_active: bool = False,
+               model_id_override: str | None = None, write_model_version: bool = True):
     params = Params()
-    model_id = _canonical_model_id(_resolve_mirrored_param(params, "Model", "DrivingModel") or BUILTIN_MODEL_KEY)
+    selected_model = model_id_override or _resolve_mirrored_param(params, "Model", "DrivingModel") or BUILTIN_MODEL_KEY
+    model_id = _canonical_model_id(selected_model)
     requires_external_gpu = model_uses_external_gpu(model_id)
     if requires_external_gpu and not external_gpu_active:
       cloudlog.error(f"Model {model_id} requires an external GPU; falling back to {BUILTIN_MODEL_KEY}")
@@ -316,9 +516,11 @@ class ModelState:
     self.is_v9 = self.policy_generation == "v9"
     self.is_v14 = self.policy_generation == "v14"
     self.is_v15 = self.policy_generation == "v15"
+    self.is_v16 = self.policy_generation == "v16"
     self.mlsim = is_tinygrad_model_version(self.policy_generation)
-    params.put("ModelVersion", self.policy_generation)
-    params.put("DrivingModelVersion", self.policy_generation)
+    if write_model_version:
+      params.put("ModelVersion", self.policy_generation)
+      params.put("DrivingModelVersion", self.policy_generation)
 
     if self.prev_desired_curv_key is not None:
       self.full_prev_desired_curv = np.zeros(
@@ -377,8 +579,49 @@ class ModelState:
     parsed.update(policy_results[primary_key])
     return parsed
 
+  def _reset_state(self) -> None:
+    if self.model_type == "supercombo":
+      self.input_queues, self.npy = make_supercombo_input_queues(
+        self.policy_input_shapes, self.frame_skip, self.QUEUE_DEV,
+      )
+    else:
+      vision_shapes = self.metadata["vision"]["input_shapes"]
+      self.input_queues, self.npy = make_split_input_queues(
+        vision_shapes, self.policy_input_shapes, self.frame_skip, self.QUEUE_DEV,
+      )
+
+    for value in self.numpy_inputs.values():
+      value.fill(0)
+    self.prev_desire.fill(0)
+    if self.prev_desired_curv_key is not None:
+      self.full_prev_desired_curv.fill(0)
+    self._blob_cache.clear()
+
+  def warmup(self) -> None:
+    dummy_frames = {
+      key: np.zeros(self.frame_buf_size, dtype=np.uint8)
+      for key in self.vision_input_names
+    }
+    # A host pointer is not a valid camera buffer for every warp backend. Match
+    # upstream and substitute realized device buffers for warmup only.
+    self._blob_cache.update({
+      (key, value.ctypes.data): Tensor.zeros(value.shape, dtype="uint8", device=self.WARP_DEV).realize()
+      for key, value in dummy_frames.items()
+    })
+    eye = np.eye(3, dtype=np.float32)
+    inputs = {self.desire_key: np.zeros(ModelConstants.DESIRE_LEN, dtype=np.float32)}
+    for name, value in self.numpy_inputs.items():
+      if name in (self.desire_key, self.prev_desired_curv_key):
+        continue
+      shape = value.shape[1:] if value.ndim > 1 and value.shape[0] == 1 else value.shape
+      inputs[name] = np.zeros(shape, dtype=value.dtype)
+
+    self.run(dummy_frames, dict.fromkeys(self.vision_input_names, eye), inputs, False)
+    self._reset_state()
+
   def run(self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray],
-          inputs: dict[str, np.ndarray], prepare_only: bool) -> dict[str, np.ndarray] | None:
+          inputs: dict[str, np.ndarray], prepare_only: bool,
+          after_enqueue: Callable[[], None] | None = None) -> dict[str, np.ndarray] | None:
     frames: dict[str, Tensor] = {}
     for key, buf in bufs.items():
       ptr = np.frombuffer(buf.data, dtype=np.uint8).ctypes.data
@@ -424,14 +667,12 @@ class ModelState:
         img=img,
         big_img=big_img,
       )
+    if after_enqueue is not None:
+      after_enqueue()
     outputs = [output.numpy().flatten() for output in output_tensors]
 
-    # USB GPU failures can produce NaNs/Infs instead of raising. Never publish
-    # one of those frames; the next frame can recover without affecting the
-    # native GPU/CPU model paths.
     if self.uses_external_gpu and any(not np.isfinite(output).all() for output in outputs):
-      cloudlog.error("external GPU produced non-finite model output, dropping frame")
-      return None
+      raise RuntimeError("external GPU model output not finite")
 
     if self.model_type == "supercombo":
       model_output = outputs[0]
@@ -472,6 +713,34 @@ def _load_model_state(cam_w: int, cam_h: int, selected_model: str, external_gpu_
     return ModelState(cam_w, cam_h, False)
 
 
+def _load_external_gpu_model(cam_w: int, cam_h: int, selected_model: str,
+                             CP=None, demo: bool = False) -> ModelState | None:
+  """Load and warm the USB-GPU model without running another tinygrad model concurrently."""
+  candidate = None
+  try:
+    if not demo:
+      wait_for_external_gpu_power_ready(CP)
+    _set_hcq_wait_timeout(BIG_MODEL_LOAD_WAIT_TIMEOUT_MS)
+    wait_usbgpu_link()
+    candidate = ModelState(
+      cam_w,
+      cam_h,
+      True,
+      model_id_override=selected_model,
+      write_model_version=False,
+    )
+    if not candidate.uses_external_gpu:
+      raise RuntimeError("external GPU model resolved to the builtin model")
+    candidate.warmup()
+    return candidate
+  except Exception:
+    cloudlog.exception("external GPU model load or warmup failed")
+    return None
+  finally:
+    _close_tinygrad_disk_cache_connection()
+    _set_hcq_wait_timeout(BIG_MODEL_RUN_WAIT_TIMEOUT_MS)
+
+
 def main(demo=False):
   cloudlog.warning("modeld init")
 
@@ -491,11 +760,6 @@ def main(demo=False):
   params.put_bool("UsbGpuCompiled", external_artifact_ready)
   params.put_bool("UsbGpuActive", False)
   params.put_bool("UsbGpuLoading", external_gpu_requested)
-  if external_gpu_requested:
-    from tinygrad.helpers import DEV
-    device_config = tinygrad_dev_config(True, TICI)
-    DEV.value = device_config
-    os.environ["DEV"] = device_config
 
   # visionipc clients
   while True:
@@ -522,20 +786,53 @@ def main(demo=False):
 
   start_time = time.monotonic()
   cloudlog.warning("loading model")
+  model = None
+  small_model = None
+  big_model = None
+  CP = None
   if external_gpu_requested:
-    wait_usbgpu_link()
-  model = _load_model_state(vipc_client_main.width, vipc_client_main.height, selected_model, external_gpu_requested, params)
+    if demo:
+      CP = get_demo_car_params()
+    else:
+      CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
+
+    big_model = _load_external_gpu_model(
+      vipc_client_main.width,
+      vipc_client_main.height,
+      selected_model,
+      CP,
+      demo,
+    )
+
+    small_model = ModelState(
+      vipc_client_main.width,
+      vipc_client_main.height,
+      False,
+      model_id_override=BUILTIN_MODEL_KEY,
+      write_model_version=False,
+    )
+    model = big_model if big_model is not None else small_model
+    if big_model is not None:
+      params.put("ModelVersion", model.policy_generation)
+      params.put("DrivingModelVersion", model.policy_generation)
+  else:
+    model = _load_model_state(vipc_client_main.width, vipc_client_main.height, selected_model, False, params)
+
   external_gpu_active = model.uses_external_gpu
   params.put_bool("UsbGpuCompiled", external_model_selected and file_chunked_exists(external_artifact))
   params.put_bool("UsbGpuActive", external_gpu_active)
   params.put_bool("UsbGpuLoading", False)
-  cloudlog.warning(f"model loaded in {time.monotonic() - start_time:.1f}s, modeld starting")
+  cloudlog.warning(f"models loaded in {time.monotonic() - start_time:.1f}s, modeld starting")
 
   # messaging
-  pm = PubMaster(["modelV2", "drivingModelData", "cameraOdometry", "starpilotModelV2"])
+  publish_services = ["modelV2", "drivingModelData", "cameraOdometry", "starpilotModelV2"]
+  if external_gpu_requested:
+    publish_services.append("chestnutState")
+  pm = PubMaster(publish_services)
   sm = SubMaster(["deviceState", "carState", "roadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay", "starpilotPlan"])
 
   publish_state = PublishState()
+  chestnut_state = ChestnutState(pm, external_gpu_active) if external_gpu_requested else None
   # setup filter to track dropped frames
   frame_dropped_filter = FirstOrderFilter(0., 10., 1. / ModelConstants.MODEL_FREQ)
   frame_id = 0
@@ -552,10 +849,11 @@ def main(demo=False):
   camera_offset.set_target(params.get_float("CameraOffset", return_default=True))
 
 
-  if demo:
-    CP = get_demo_car_params()
-  else:
-    CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
+  if CP is None:
+    if demo:
+      CP = get_demo_car_params()
+    else:
+      CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
   cloudlog.info("modeld got CarParams: %s", CP.brand)
 
   lat_smooth_seconds = _model_smooth_seconds(params, "LatSmoothSeconds", LAT_SMOOTH_SECONDS)
@@ -601,13 +899,16 @@ def main(demo=False):
       meta_extra = meta_main
 
     sm.update(0)
-    lat_smooth_seconds = _model_smooth_seconds(params, "LatSmoothSeconds", LAT_SMOOTH_SECONDS)
+
     long_smooth_seconds = _model_smooth_seconds(params, "LongSmoothSeconds", LONG_SMOOTH_SECONDS)
     long_delay = CP.longitudinalActuatorDelay + long_smooth_seconds
     desire = DH.desire
     is_rhd = sm["driverMonitoringState"].isRHD
     frame_id = sm["roadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
+    lat_smooth_default = CP.lateralSmoothSeconds if (CP.brand == "rivian" or CP.lateralSmoothSeconds > 0.0) else LAT_SMOOTH_SECONDS
+    lat_smooth_maximum = _model_smooth_seconds(params, "LatSmoothSeconds", lat_smooth_default)
+    lat_smooth_seconds = get_car_lateral_smooth_seconds(CP.brand, v_ego, lat_smooth_maximum)
     lat_delay = sm["liveDelay"].lateralDelay + lat_smooth_seconds
     lateral_control_params = np.array([v_ego, lat_delay], dtype=np.float32)
     if sm.frame % 60 == 0:
@@ -679,14 +980,41 @@ def main(demo=False):
       inputs['lateral_control_params'] = lateral_control_params
 
     mt1 = time.perf_counter()
-    model_output = model.run(bufs, transforms, inputs, prepare_only)
+    try:
+      send_chestnut = (
+        chestnut_state is not None and
+        run_count % round(ModelConstants.MODEL_FREQ / SERVICE_LIST["chestnutState"].frequency) == 0
+      )
+      model_output = model.run(
+        bufs,
+        transforms,
+        inputs,
+        prepare_only,
+        chestnut_state.send if send_chestnut else None,
+      )
+    except Exception:
+      if not external_gpu_active or small_model is None:
+        raise
+      cloudlog.exception("external GPU model failed, falling back to builtin model")
+      params.put_bool("UsbGpuActive", False)
+      model = small_model
+      big_model = None
+      external_gpu_active = False
+      params.put("ModelVersion", model.policy_generation)
+      params.put("DrivingModelVersion", model.policy_generation)
+      params.put_bool("UsbGpuLoading", False)
+      if chestnut_state is not None:
+        chestnut_state.big = False
+      run_count = 0
+      model_output = None
+
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
 
     if model_output is not None and vipc_dropped_frames > 0:
       cloudlog.error(f"suppressing model output after dropping {vipc_dropped_frames} frames")
 
-    if model_output is not None and vipc_dropped_frames == 0:
+    if _should_publish_model_output(model_output, vipc_dropped_frames, external_gpu_active):
       modelv2_send = messaging.new_message('modelV2')
       starpilot_modelv2_send = messaging.new_message('starpilotModelV2')
       drivingdata_send = messaging.new_message('drivingModelData')
@@ -697,7 +1025,7 @@ def main(demo=False):
         lat_action_t,
         long_action_t,
         v_ego, model.mlsim, model.is_v9, model.is_v14, model.is_v15, starpilot_toggles,
-        lat_smooth_seconds, long_smooth_seconds,
+        lat_smooth_seconds, long_smooth_seconds, is_v16=model.is_v16,
       )
       prev_action = action
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,

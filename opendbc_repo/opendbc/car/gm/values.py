@@ -175,6 +175,7 @@ class GMSafetyFlags(IntFlag):
   FLAG_GM_REMOTE_START_BOOTS_COMMA = 8192
   FLAG_GM_PANDA_3D1_SCHED = 16384
   FLAG_GM_PANDA_PADDLE_SCHED = 32768
+  FLAG_GM_VOLT_CC_GATEWAY = 16384
 
 
 class Footnote(Enum):
@@ -214,16 +215,12 @@ class GMPlatformConfig(PlatformConfig):
 
 @dataclass
 class GMASCMPlatformConfig(GMPlatformConfig):
-  def init(self):
-    # ASCM is supported, but due to a janky install and hardware configuration, we are not showing in the car docs
-    self.car_docs = []
+  pass
 
 
 @dataclass
 class GMSDGMPlatformConfig(GMPlatformConfig):
-  def init(self):
-    # Don't show in docs until the harness is sold. See https://github.com/commaai/openpilot/issues/32471
-    self.car_docs = []
+  pass
 
 
 class CAR(Platforms):
@@ -251,7 +248,7 @@ class CAR(Platforms):
     dbc_dict=CHEVROLET_VOLT.dbc_dict,
   )
   CHEVROLET_VOLT_CC = GMPlatformConfig(
-    [GMCarDocs("Chevrolet Volt No-ACC 2017-18", min_enable_speed=0)],
+    [GMCarDocs("Chevrolet Volt No-ACC 2016-18 (OBD Harness)", "Redneck ACC", min_enable_speed=0)],
     CHEVROLET_VOLT.specs,
     dbc_dict=CHEVROLET_VOLT.dbc_dict,
   )

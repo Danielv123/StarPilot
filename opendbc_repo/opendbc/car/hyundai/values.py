@@ -45,8 +45,12 @@ class CarControllerParams:
       self.STEER_DRIVER_MULTIPLIER = 2
       self.STEER_THRESHOLD = 100
       if vEgoRaw < 15.0:  # below ~34 mph - more aggressive for tight turns
-        self.STEER_DELTA_UP = 10
-        self.STEER_DELTA_DOWN = 8
+        if CP.carFingerprint == CAR.KIA_CARNIVAL_HEV_4TH_GEN:
+          self.STEER_DELTA_UP = 2
+          self.STEER_DELTA_DOWN = 3
+        else:
+          self.STEER_DELTA_UP = 10
+          self.STEER_DELTA_DOWN = 8
       else:
         self.STEER_DELTA_UP = 2
         self.STEER_DELTA_DOWN = 3
@@ -111,6 +115,7 @@ class HyundaiSafetyFlags(IntFlag):
 
 
 class HyundaiStarPilotSafetyFlags(IntFlag):
+  AOL_MAIN_LKAS_ON_ENGAGE = 128
   AOL_MAIN_LKAS_SYNC = 32
   HAS_LDA_BUTTON = 1024
   AOL_LKAS_ON_ENGAGE = 2048
@@ -481,7 +486,7 @@ class CAR(Platforms):
     [
       HyundaiCarDocs("Hyundai Palisade (without HDA II) 2023-25", "Highway Driving Assist",
                      car_parts=CarParts.common([CarHarness.hyundai_a])),
-      HyundaiCarDocs("Hyundai Palisade (with HDA II) 2023-24", "Highway Driving Assist II",
+      HyundaiCarDocs("Hyundai Palisade (with HDA II) 2023-25", "Highway Driving Assist II",
                      car_parts=CarParts.common([CarHarness.hyundai_r])),
       HyundaiCarDocs("Kia Telluride (without HDA II) 2023-25", "Highway Driving Assist",
                      car_parts=CarParts.common([CarHarness.hyundai_l])),
@@ -872,6 +877,16 @@ class CAR(Platforms):
     flags=HyundaiFlags.EV | HyundaiFlags.CANFD_ANGLE_STEERING,
     radar_dbc=HYUNDAI_MRR35_RADAR_DBC,
   )
+  GENESIS_GV70_2026 = HyundaiCanFDPlatformConfig(
+    [
+      HyundaiCarDocs("Genesis GV70 (3.5T Sport Prestige Trim, with HDA II & LFA2) 2026",
+                     "Highway Driving Assist II & Lane Follow Assist 2",
+                     car_parts=CarParts.common([CarHarness.hyundai_m])),
+    ],
+    GENESIS_GV70_1ST_GEN.specs,
+    flags=HyundaiFlags.CANFD_ANGLE_STEERING,
+    radar_dbc=HYUNDAI_MRR35_RADAR_DBC,
+  )
   GENESIS_G80 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Genesis G80 2018-19", "All", car_parts=CarParts.common([CarHarness.hyundai_h]))],
     CarSpecs(mass=2060, wheelbase=3.01, steerRatio=16.5),
@@ -968,32 +983,27 @@ CANCEL_BUTTON_ENABLE_CARS = frozenset({
   CAR.HYUNDAI_PALISADE_2023,
 })
 
+CAN_CANFD_BLENDED_HDA2_LONGITUDINAL_CAR = frozenset({
+  CAR.HYUNDAI_PALISADE_2023,
+})
+
 KIA_EV6_GT_LINE_LONG_TUNING_VDS_PREFIXES = frozenset({
   "C4DLC",
 })
+KIA_EV6_GT_LINE_LONG_TUNING_TESTING_GROUND_ID = "5"
 
 
-# These classic HKG platforms publish the LKAS button on CLU13 over the alt bus.
-# Keep G90 excluded until its alt-bus path is route-proven without the recent
-# engage/disengage regression.
-ALT_BUS_LDA_BUTTON_CARS = frozenset({
-  CAR.HYUNDAI_SONATA,
-})
-
-# On these Sonata layouts the alt-bus LKAS button pulses through the CLU13
-# steering-wheel-status field instead of the dedicated LKAS bit.
-ALT_BUS_LDA_BUTTON_SWL_STAT_CARS = frozenset({
-  CAR.HYUNDAI_SONATA,
-})
+ALT_BUS_LDA_BUTTON_CARS = frozenset()
+ALT_BUS_LDA_BUTTON_SWL_STAT_CARS = frozenset()
 
 
 def hyundai_cancel_button_enables_cruise(car_fingerprint) -> bool:
   return car_fingerprint in CANCEL_BUTTON_ENABLE_CARS
 
 
-def kia_ev6_gt_line_longitudinal_tuning(car_fingerprint, vin: str) -> bool:
-  return car_fingerprint == CAR.KIA_EV6 and isinstance(vin, str) and \
-    len(vin) == 17 and vin[3:8] in KIA_EV6_GT_LINE_LONG_TUNING_VDS_PREFIXES
+def kia_ev6_gt_line_longitudinal_tuning(car_fingerprint, vin: str, testing_ground_active: bool = False) -> bool:
+  vin_match = isinstance(vin, str) and len(vin) == 17 and vin[3:8] in KIA_EV6_GT_LINE_LONG_TUNING_VDS_PREFIXES
+  return car_fingerprint == CAR.KIA_EV6 and (vin_match or testing_ground_active)
 
 
 def get_platform_codes(fw_versions: list[bytes]) -> set[tuple[bytes, bytes | None]]:
@@ -1085,7 +1095,7 @@ PART_NUMBER_FW_PATTERN = re.compile(b'(?<=[0-9][.,][0-9]{2} )([0-9]{5}[-/]?[A-Z]
 # We've seen both ICE and hybrid for these platforms, and they have hybrid descriptors (e.g. MQ4 vs MQ4H)
 CANFD_FUZZY_WHITELIST = {CAR.KIA_SORENTO_4TH_GEN, CAR.KIA_SORENTO_HEV_4TH_GEN, CAR.KIA_K8_HEV_1ST_GEN,
                          CAR.KIA_CARNIVAL_4TH_GEN, CAR.KIA_CARNIVAL_2025, CAR.KIA_CARNIVAL_HEV_4TH_GEN,
-                         CAR.KIA_SORENTO_HEV_4TH_GEN_LFA2}
+                         CAR.KIA_SORENTO_HEV_4TH_GEN_LFA2, CAR.GENESIS_GV70_2026}
 
 # List of ECUs expected to have platform codes, camera and radar should exist on all cars
 # TODO: use abs, it has the platform code and part number on many platforms
@@ -1188,6 +1198,7 @@ CANFD_SECURITYACCESS_CAR = {
 }
 CANFD_UNSUPPORTED_LONGITUDINAL_CAR = CAR.with_flags(HyundaiFlags.CANFD_NO_RADAR_DISABLE) - CANFD_SECURITYACCESS_CAR  # TODO: merge with UNSUPPORTED_LONGITUDINAL_CAR
 CANFD_ANGLE_LONGITUDINAL_CAR = {CAR.KIA_EV9, CAR.HYUNDAI_IONIQ_5_PE}
+CANFD_ALT_BUTTONS_RESUME_CAR = {CAR.KIA_CARNIVAL_2025, CAR.KIA_CARNIVAL_HEV_4TH_GEN}
 CANFD_CORNER_RADAR_BSM_CAR = {CAR.HYUNDAI_IONIQ_6, CAR.HYUNDAI_IONIQ_5_PE, CAR.KIA_EV9}
 CANFD_RADAR_LIVE_LONGITUDINAL_CAR = {
   CAR.HYUNDAI_IONIQ_5, CAR.HYUNDAI_IONIQ_5_PE, CAR.HYUNDAI_IONIQ_6, CAR.KIA_EV6, CAR.KIA_EV9, CAR.GENESIS_GV60_EV_1ST_GEN,
@@ -1218,6 +1229,9 @@ NON_SCC_CAR = CAR.with_flags(HyundaiFlags.NON_SCC)
 #       HyundaiFlags.CANFD_RADAR_SCC | HyundaiFlags.CANFD_NO_RADAR_DISABLE | )
 UNSUPPORTED_LONGITUDINAL_CAR = CAR.with_flags(HyundaiFlags.LEGACY) | CAR.with_flags(HyundaiFlags.UNSUPPORTED_LONGITUDINAL)
 
-LEGACY_LONGITUDINAL_CAR = {CAR.KIA_XCEED_PHEV}
+LEGACY_LONGITUDINAL_CAR = {
+  CAR.GENESIS_G80,
+  CAR.KIA_XCEED_PHEV,
+}
 
 DBC = CAR.create_dbc_map()

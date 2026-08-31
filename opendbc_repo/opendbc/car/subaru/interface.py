@@ -3,7 +3,7 @@ from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.subaru.carcontroller import CarController
 from opendbc.car.subaru.carstate import CarState
-from opendbc.car.subaru.values import CAR, CanBus, GLOBAL_ES_ADDR, SubaruFlags, SubaruSafetyFlags
+from opendbc.car.subaru.values import CAR, CanBus, GLOBAL_ES_ADDR, SUBARU_AVH_CARS, SUBARU_STOP_START_CARS, SubaruFlags, SubaruSafetyFlags
 
 
 class CarInterface(CarInterfaceBase):
@@ -40,6 +40,10 @@ class CarInterface(CarInterfaceBase):
         ret.safetyConfigs[0].safetyParam |= SubaruSafetyFlags.D_PLATFORM.value
       if ret.flags & SubaruFlags.D_PLATFORM_CAMERA:
         ret.safetyConfigs[0].safetyParam |= SubaruSafetyFlags.D_PLATFORM_CAMERA.value
+      if candidate in SUBARU_STOP_START_CARS:
+        ret.safetyConfigs[0].safetyParam |= SubaruSafetyFlags.STOP_START_BUTTON.value
+      if candidate in SUBARU_AVH_CARS:
+        ret.safetyConfigs[0].safetyParam |= SubaruSafetyFlags.AVH_BUTTON.value
       if candidate in (CAR.SUBARU_LEGACY_2025, CAR.SUBARU_ASCENT_2023):
         ret.safetyConfigs[0].safetyParam |= SubaruSafetyFlags.FIXED_ANGLE_LIMITS.value
 
@@ -51,6 +55,8 @@ class CarInterface(CarInterfaceBase):
 
     if ret.flags & SubaruFlags.LKAS_ANGLE:
       ret.steerControlType = structs.CarParams.SteerControlType.angle
+      if candidate == CAR.SUBARU_OUTBACK_2023:
+        ret.lateralSmoothSeconds = 0.4
 
     elif candidate in (CAR.SUBARU_ASCENT, CAR.SUBARU_ASCENT_2023):
       ret.steerActuatorDelay = 0.3  # end-to-end angle controller

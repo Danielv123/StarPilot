@@ -2,6 +2,8 @@ import { html, reactive } from "/assets/vendor/arrow-core.js"
 import { createBrowserHistory, createRouter } from "/assets/vendor/remix-router-1.3.1.js"
 import { hideSidebar } from "/assets/js/utils.js"
 import { DeviceSettings } from "/assets/components/tools/device_settings.js?v=favorite-c4-hint-1"
+import { Bluetooth } from "/assets/components/tools/bluetooth.js?v=bluetooth-5"
+import { WheelControls } from "/assets/components/tools/wheel_controls.js?v=controllers-2"
 import { ErrorLogs } from "/assets/components/tools/error_logs.js"
 import { VehicleFeatures } from "/assets/components/tools/vehicle_features.js"
 import { GalaxyPairing } from "/assets/components/tools/galaxy.js"
@@ -11,11 +13,12 @@ import { MapsManager } from "/assets/components/tools/maps.js"
 import { NavDestination } from "/assets/components/navigation/navigation_destination.js?v=nav-search-context-2"
 import { NavKeys } from "/assets/components/navigation/navigation_keys.js?v=app-keys-session-1"
 import { RouteRecordings } from "/assets/components/recordings/dashcam_routes.js"
-import { SettingsView } from "/assets/components/settings.js"
+import { SettingsView } from "/assets/components/settings.js?v=router-cycle-fix-3"
 import { ScreenRecordings } from "/assets/components/recordings/screen_recordings.js"
-import { Sidebar } from "/assets/components/sidebar.js?v=lateral-tuning-1"
+import { Sidebar } from "/assets/components/sidebar.js?v=controllers-nav-1"
+import { SentryMode } from "/assets/components/tools/sentry.js"
 import { SpeedLimits } from "/assets/components/tools/speed_limits.js"
-import { ModelManager } from "/assets/components/tools/model_manager.js?v=20260303t"
+import { ModelManager } from "/assets/components/tools/model_manager.js?v=20260825a"
 import { LivePlots } from "/assets/components/tools/plots.js"
 import { ThemeMaker } from "/assets/components/tools/theme_maker.js"
 import { TestingGround } from "/assets/components/tools/testing_ground.js"
@@ -55,6 +58,7 @@ function SafeHome() {
       <p>Safe mode is active while UI rendering is being repaired.</p>
       <p>
         <a href="/galaxy">Galaxy Pairing</a> |
+        <a href="/sentry">Sentry Mode</a> |
         <a href="/device_settings">Toggles</a> |
         <a href="/manage_updates">Software</a>
       </p>
@@ -64,6 +68,8 @@ function SafeHome() {
 
 function Root() {
   let routes = [
+    createRoute("bluetooth", "/bluetooth", Bluetooth),
+    createRoute("wheel_controls", "/wheel-controls", WheelControls),
     createRoute("device_settings", "/device_settings/:section?", DeviceSettings),
     createRoute("errorLogs", "/manage_error_logs", ErrorLogs),
     createRoute("galaxy", "/galaxy", GalaxyPairing),
@@ -72,6 +78,7 @@ function Root() {
     createRoute("root", "/", Home),
     createRoute("routes", "/dashcam_routes", RouteRecordings),
     createRoute("screen_recordings", "/screen_recordings", ScreenRecordings),
+    createRoute("sentry", "/sentry", SentryMode),
     createRoute("settings", "/settings/:section/:subsection?", SettingsView),
     createRoute("speed_limits", "/download_speed_limits", SpeedLimits),
     createRoute("model_manager", "/manage_models", ModelManager),

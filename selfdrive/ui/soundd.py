@@ -5,7 +5,7 @@ import wave
 
 from pathlib import Path
 
-from cereal import car, custom, log, messaging
+from cereal import custom, log, messaging
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
@@ -17,6 +17,7 @@ from openpilot.system import micd
 from openpilot.system.hardware import HARDWARE
 
 from openpilot.starpilot.common.starpilot_variables import ACTIVE_THEME_PATH, ERROR_LOGS_PATH, RANDOM_EVENTS_PATH, get_starpilot_toggles
+from openpilot.starpilot.system.bluetooth.audio import BluetoothAudioSink
 
 SAMPLE_RATE = 48000
 SAMPLE_BUFFER = 4096 # (approx 100ms)
@@ -40,11 +41,29 @@ StarPilotAudibleAlert = custom.StarPilotCarControl.HUDControl.AudibleAlert
 # stock sounds still work, and only offset custom random-event sounds.
 STARPILOT_CUSTOM_ALERT_OFFSET = 1000
 STARPILOT_CUSTOM_ALERT_START = int(StarPilotAudibleAlert.angry)
+TURN_STEERING_LIMIT_ALERT_SUFFIX = "steersaturated"
+# Keep carState out of this list; C4's onroad stack is near msgq's 15-reader limit.
+SOUNDD_SERVICES = ('selfdriveState', 'soundPressure', 'starpilotSelfdriveState', 'starpilotPlan')
 
 
 def starpilot_alert_key(alert):
   raw_alert = int(alert)
   return STARPILOT_CUSTOM_ALERT_OFFSET + raw_alert if raw_alert >= STARPILOT_CUSTOM_ALERT_START else raw_alert
+
+
+def is_turn_steering_limit_alert(alert_type: str) -> bool:
+  """Return whether an alert type represents Turn Exceeds Steering Limit."""
+  alert_name = str(alert_type or "").split("/", 1)[0].casefold()
+  return alert_name.endswith(TURN_STEERING_LIMIT_ALERT_SUFFIX)
+
+
+def should_mute_turn_steering_limit_alert(alert_type: str, v_ego: float, mute_below_speed: float) -> bool:
+  """Mute only the audio for steering-limit alerts below the configured speed."""
+  return (
+    mute_below_speed > 0.0 and
+    v_ego < mute_below_speed and
+    is_turn_steering_limit_alert(alert_type)
+  )
 
 
 sound_list: dict[int, tuple[str, int | None, float]] = {
@@ -110,7 +129,13 @@ class Soundd:
 
     self.openpilot_crashed_played = False
 
-    self.auto_volume = 0
+    self.auto_volume = MIN_VOLUME
+    self.pending_stream_status = None
+    self.bluetooth_audio = None
+    self.bluetooth_supported = HARDWARE.get_device_type() in ("tici", "tizi", "mici")
+    self.bluetooth_params = Params() if self.bluetooth_supported else None
+    self.bluetooth_enabled = False
+    self.bluetooth_last_check = 0.0
 
     self.previous_sound_pack = None
     self.previous_sound_source_signature = None
@@ -193,8 +218,25 @@ class Soundd:
 
   def callback(self, data_out: np.ndarray, frames: int, time, status) -> None:
     if status:
-      cloudlog.warning(f"soundd stream over/underflow: {status}")
-    data_out[:frames, 0] = self.get_sound_data(frames)
+      self.pending_stream_status = status
+    samples = self.get_sound_data(frames)
+    bluetooth_healthy = self.bluetooth_audio.submit(samples) if self.bluetooth_audio is not None else False
+    data_out[:frames, 0] = 0.0 if bluetooth_healthy else samples
+
+  def update_bluetooth_audio(self) -> None:
+    if not self.bluetooth_supported or time.monotonic() - self.bluetooth_last_check < 1.0:
+      return
+    self.bluetooth_last_check = time.monotonic()
+    enabled = self.bluetooth_params.get_bool("BluetoothEnabled")
+    if enabled == self.bluetooth_enabled:
+      return
+    self.bluetooth_enabled = enabled
+    if enabled:
+      self.bluetooth_audio = BluetoothAudioSink(params=self.bluetooth_params)
+    elif self.bluetooth_audio is not None:
+      sink = self.bluetooth_audio
+      self.bluetooth_audio = None
+      sink.close()
 
   def update_alert(self, new_alert):
     current_alert_played_once = self.current_alert == AudibleAlert.none or self.current_sound_frame > len(self.loaded_sounds[self.current_alert])
@@ -284,9 +326,7 @@ class Soundd:
     # sounddevice must be imported after forking processes
     import sounddevice as sd
 
-    sm = messaging.SubMaster(['selfdriveState', 'soundPressure'])
-
-    sm = sm.extend(['starpilotSelfdriveState', 'starpilotPlan'])
+    sm = messaging.SubMaster(list(SOUNDD_SERVICES))
 
     while True:
       stream = None
@@ -296,21 +336,37 @@ class Soundd:
 
         while True:
           sm.update(0)
+          self.update_bluetooth_audio()
+
+          if self.pending_stream_status is not None:
+            status = self.pending_stream_status
+            self.pending_stream_status = None
+            cloudlog.warning(f"soundd stream over/underflow: {status}")
 
           if sm.updated['soundPressure'] and self.current_alert == AudibleAlert.none: # only update volume filter when not playing alert
             self.spl_filter_weighted.update(sm["soundPressure"].soundPressureWeightedDb)
-            self.current_volume = self.calculate_volume(float(self.spl_filter_weighted.x))
+            self.auto_volume = self.calculate_volume(float(self.spl_filter_weighted.x))
+            self.current_volume = self.auto_volume
 
             if self.starpilot_toggles.alert_volume_controller:
-              self.auto_volume = self.current_volume
               self.current_volume = 0.0
 
-          elif self.current_alert != AudibleAlert.none and self.starpilot_toggles.alert_volume_controller:
-            self.current_volume = self.get_volume_override()
-            if self.current_volume == 1.01:
-              self.current_volume = self.auto_volume
-
           self.get_audible_alert(sm)
+
+          if self.current_alert != AudibleAlert.none:
+            v_ego = max(float(getattr(sm["starpilotSelfdriveState"], "vEgo", 0.0)), 0.0)
+            if should_mute_turn_steering_limit_alert(
+              self.current_alert_type,
+              v_ego,
+              float(getattr(self.starpilot_toggles, "turn_steering_limit_mute_speed", 0.0)),
+            ):
+              self.current_volume = 0.0
+            elif self.starpilot_toggles.alert_volume_controller:
+              self.current_volume = self.get_volume_override()
+              if self.current_volume == 1.01:
+                self.current_volume = self.auto_volume
+            else:
+              self.current_volume = self.auto_volume
 
           rk.keep_time()
 

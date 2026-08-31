@@ -32,7 +32,6 @@ THEME_KEY_CONFIG = {
 COLOR_PRESETS = ["Stock", "#FFFFFF", "#178644", "#3B82F6", "#E63956", "#8B5CF6", "#F59E0B"]
 CAMERA_VIEWS = ["Auto", "Driver", "Standard", "Wide"]
 
-# Mirrors starpilot/ui/qt/offroad/developer_panel.cc:200-218.
 # Keys are the int values stored in DeveloperSidebarMetric{1..7}; values are the
 # human-readable labels shown in both the row value and the picker dialog.
 DEVELOPER_SIDEBAR_METRIC_OPTIONS: dict[int, str] = {
@@ -349,8 +348,7 @@ class StarPilotAppearanceLayout(_SettingsPage):
             SettingRow("HideLeadMarker", "toggle", tr_noop("Hide Lead Marker"),
                        subtitle="",
                        get_state=lambda: self._params.get_bool("HideLeadMarker"),
-                       set_state=lambda s: self._params.put_bool("HideLeadMarker", s),
-                       visible=ol),
+                       set_state=lambda s: self._params.put_bool("HideLeadMarker", s)),
             SettingRow("HideChangingLanesBanner", "toggle", tr_noop("Hide Changing Lanes Banner"),
                        subtitle="",
                        get_state=lambda: self._params.get_bool("HideChangingLanesBanner"),
@@ -438,13 +436,12 @@ class StarPilotAppearanceLayout(_SettingsPage):
             SettingRow("ShowStoppingPoint", "toggle", tr_noop("Show Stop Sign"),
                        subtitle="",
                        get_state=lambda: self._params.get_bool("ShowStoppingPoint"),
-                       set_state=lambda s: self._params.put_bool("ShowStoppingPoint", s),
-                       enabled=ol),
+                       set_state=lambda s: self._params.put_bool("ShowStoppingPoint", s)),
             SettingRow("ShowStoppingPointMetrics", "toggle", tr_noop("Stop Distance"),
                        subtitle="",
                        get_state=lambda: self._params.get_bool("ShowStoppingPointMetrics"),
                        set_state=lambda s: self._params.put_bool("ShowStoppingPointMetrics", s),
-                       enabled=lambda: self._params.get_bool("ShowStoppingPoint") and ol()),
+                       enabled=lambda: self._params.get_bool("ShowStoppingPoint")),
             SettingRow("DeveloperMetrics", "toggle", tr_noop("Developer Metrics"),
                        subtitle=tr_noop("Performance data, sensor readings, and system metrics."),
                        get_state=lambda: self._params.get_bool("DeveloperMetrics"),

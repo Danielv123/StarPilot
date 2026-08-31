@@ -42,6 +42,10 @@ sys.modules.setdefault("openpilot.system.loggerd.uploader", loggerd_uploader)
 
 model_manager = ModuleType("openpilot.starpilot.assets.model_manager")
 model_manager.canonical_model_key = lambda value: str(value or "").strip().lower().replace(" ", "-")
+model_manager.external_gpu_available = lambda: False
+model_manager.is_builtin_model_key = lambda key: False
+model_manager.model_key_aliases = lambda key: ()
+model_manager.model_uses_external_gpu = lambda key: False
 sys.modules.setdefault("openpilot.starpilot.assets.model_manager", model_manager)
 
 starpilot_variables = ModuleType("openpilot.starpilot.common.starpilot_variables")
@@ -54,6 +58,8 @@ theme_manager.HOLIDAY_THEME_PATH = Path("/tmp/dashboard-test-holiday-themes")
 sys.modules.setdefault("openpilot.starpilot.assets.theme_manager", theme_manager)
 
 import utilities
+
+_REAL_COMMON_PARAMS_MODULE = sys.modules.get("openpilot.common.params")
 
 for _module_name, _module in _INITIAL_MODULES.items():
   if _module is None:
@@ -82,6 +88,8 @@ def _simple_module(name, **attrs):
 
 
 def _install_server_import_stubs():
+  if _REAL_COMMON_PARAMS_MODULE is not None:
+    sys.modules["openpilot.common.params"] = _REAL_COMMON_PARAMS_MODULE
   sys.modules["openpilot.system.loggerd.config"] = loggerd_config
   sys.modules["openpilot.system.loggerd.deleter"] = loggerd_deleter
   sys.modules["openpilot.system.loggerd.uploader"] = loggerd_uploader
@@ -126,6 +134,14 @@ def _install_server_import_stubs():
   )
 
   sys.modules["openpilot.common.realtime"] = _simple_module("openpilot.common.realtime", DT_HW=0.01)
+  sys.modules["openpilot.common.swaglog"] = _simple_module(
+    "openpilot.common.swaglog",
+    cloudlog=SimpleNamespace(
+      error=lambda *args, **kwargs: None,
+      exception=lambda *args, **kwargs: None,
+      info=lambda *args, **kwargs: None,
+    ),
+  )
   sys.modules["openpilot.common.time_helpers"] = _simple_module("openpilot.common.time_helpers", system_time_valid=lambda: True)
   sys.modules["openpilot.system.hardware"] = _simple_module(
     "openpilot.system.hardware",
@@ -145,6 +161,15 @@ def _install_server_import_stubs():
     get_longitudinal_maneuver_support=lambda *args, **kwargs: {},
   )
   sys.modules["panda"] = _simple_module("panda", Panda=lambda *args, **kwargs: SimpleNamespace(can_send=lambda *send_args, **send_kwargs: None))
+  msgq_module = _simple_module("msgq")
+  msgq_visionipc = _simple_module(
+    "msgq.visionipc",
+    VisionIpcClient=lambda *args, **kwargs: SimpleNamespace(connect=lambda *connect_args: False),
+    VisionStreamType=SimpleNamespace(VISION_STREAM_DRIVER=0),
+  )
+  msgq_module.visionipc = msgq_visionipc
+  sys.modules["msgq"] = msgq_module
+  sys.modules["msgq.visionipc"] = msgq_visionipc
 
   model_manager.is_builtin_model_key = lambda value: False
   model_manager.model_key_aliases = lambda value: [value]
@@ -208,7 +233,42 @@ def _install_server_import_stubs():
       },
     ),
     FAVORITE_SLOTS_PARAM="FavoriteSlots",
+    SETTINGS_CATALOG_PATH=MODULE_DIR.parents[1] / "common/assets/device_settings_layout.json",
+    build_favorite_slot_options=lambda *args, **kwargs: [
+      {
+        "key": "__starpilot_favorite_action__:distance_decrease",
+        "label": "Distance - / SET",
+        "description": "Acts like a short press of the car's SET/- cruise button.",
+        "section": "Actions",
+        "action": "decelCruise",
+      },
+      {
+        "key": "__starpilot_favorite_action__:distance_increase",
+        "label": "Distance + / RES",
+        "description": "Acts like a short press of the car's RES/+ cruise button.",
+        "section": "Actions",
+        "action": "accelCruise",
+      },
+    ],
+    filter_favorite_slot_options=lambda options, capabilities=None: [
+      dict(option)
+      for option in options
+      if not option.get("requiresCapability") or (capabilities or {}).get(option["requiresCapability"], False)
+    ],
+    get_favorite_values=lambda items, params=None: {
+      (item if isinstance(item, str) else item.get("key")): (
+        bool(params.get_bool(item if isinstance(item, str) else item.get("key")))
+        if params is not None and hasattr(params, "get_bool")
+        else False
+      )
+      for item in items
+      if (item if isinstance(item, str) else (isinstance(item, dict) and item.get("key")))
+      and not str(item if isinstance(item, str) else item.get("key", "")).startswith("__starpilot_favorite_action__:")
+    },
     is_favorite_action_key=lambda key: str(key or "").startswith("__starpilot_favorite_action__:"),
+    load_settings_catalog=lambda layout_path=None: json.loads(
+      (Path(layout_path) if layout_path else MODULE_DIR.parents[1] / "common/assets/device_settings_layout.json").read_text()
+    ),
     normalize_favorite_slots=lambda *args, **kwargs: "",
     trigger_favorite_action=_trigger_stub_favorite_action,
   )
@@ -220,6 +280,7 @@ def _install_server_import_stubs():
   )
   for name, value in {
     "ACTIVE_THEME_PATH": Path("/tmp/dashboard-test-active-theme"),
+    "BUTTON_FUNCTIONS": {},
     "ERROR_LOGS_PATH": "/tmp/dashboard-test-errors",
     "EXCLUDED_KEYS": set(),
     "LEGACY_STARPILOT_PARAM_RENAMES": {},
@@ -257,6 +318,29 @@ def _install_server_import_stubs():
     "openpilot.starpilot.system.the_galaxy.flm_workspace",
   )
   sys.modules["openpilot.starpilot.system.the_galaxy.utilities"] = utilities
+  sys.modules["openpilot.starpilot.system.wheel_controls"] = _simple_module(
+    "openpilot.starpilot.system.wheel_controls",
+    CONTROLLER_ACTION_OPTIONS=(
+      {"key": "__starpilot_controller_action__:set_speed", "label": "Set Speed To", "section": "Controller Actions", "value_type": "speed"},
+      {"key": "__starpilot_controller_action__:selfie", "label": "Take Comma Selfie", "section": "Controller Actions"},
+    ),
+    CONTROLLER_ACTION_SET_SPEED="__starpilot_controller_action__:set_speed",
+    CONTROLLER_ACTION_SLOT_COUNT=10,
+    FAVORITE_SLOT_COUNT=3,
+    cancel_learning=lambda *args, **kwargs: None,
+    clear_mappings=lambda *args, **kwargs: None,
+    controller_speed_bounds=lambda is_metric: (8, 145) if is_metric else (5, 90),
+    delete_mapping=lambda *args, **kwargs: True,
+    load_controller_action_slots=lambda *args, **kwargs: [
+      {"enabled": False, "key": None, "label": "", "value": None} for _ in range(10)
+    ],
+    public_status=lambda *args, **kwargs: {"mappings": [], "devices": [], "available": True},
+    set_controller_action_slot=lambda *args, **kwargs: None,
+    set_joystick_device=lambda *args, **kwargs: None,
+    start_learning=lambda *args, **kwargs: None,
+    start_testing=lambda *args, **kwargs: None,
+    stop_testing=lambda *args, **kwargs: None,
+  )
 
 
 class FakeParams:
@@ -297,17 +381,16 @@ class FakeDashboardAnalyzerProcess:
 
 
 def test_route_inventory_counts_segments_without_video_probing(monkeypatch):
-  segments = [
-    SimpleNamespace(route_name=SimpleNamespace(time_str="route-new")),
-    SimpleNamespace(route_name=SimpleNamespace(time_str="route-new")),
-    SimpleNamespace(route_name=SimpleNamespace(time_str="route-new")),
-    SimpleNamespace(route_name=SimpleNamespace(time_str="route-old")),
-  ]
+  def segment(time_str, segment_num):
+    return SimpleNamespace(route_name=SimpleNamespace(time_str=time_str), segment_num=segment_num)
+
+  # route-new has aged out of its first two segments, so it no longer starts at --0.
+  segments = [segment("route-new", 4), segment("route-new", 2), segment("route-new", 3), segment("route-old", 0)]
   monkeypatch.setattr(utilities, "get_all_segment_names", lambda _path: segments)
 
-  assert utilities.get_routes_with_segment_counts("/tmp/routes") == [
-    ("route-old", 1),
-    ("route-new", 3),
+  assert utilities.get_routes_with_segment_details("/tmp/routes") == [
+    ("route-old", {"segmentCount": 1, "firstSegmentNum": 0}),
+    ("route-new", {"segmentCount": 3, "firstSegmentNum": 2}),
   ]
 
 
@@ -582,6 +665,67 @@ def test_route_listing_uses_all_segment_times_when_segment_zero_was_touched(tmp_
   start, end = utilities._route_time_range(routes[0], 180)
   assert start == "2026-07-18T07:19:00"
   assert end == "2026-07-18T07:22:00"
+
+
+def test_route_listing_does_not_parse_logs_when_filesystem_time_is_valid(tmp_path, monkeypatch):
+  route_start = utilities.datetime(2026, 7, 18, 7, 19, 0)
+  route_name = "000011e3--6e01289631"
+  segment = tmp_path / f"{route_name}--0"
+  segment.mkdir()
+  (segment / "qlog.zst").write_bytes(b"placeholder")
+  segment_end = route_start.timestamp() + 60
+  os.utime(segment, (segment_end, segment_end))
+
+  def fail_if_read(_path):
+    raise AssertionError("valid filesystem timestamps must not decompress route logs")
+
+  monkeypatch.setattr(utilities, "_route_logged_start_time", fail_if_read)
+
+  routes = utilities._list_dashboard_routes([tmp_path])
+
+  assert routes[0]["startedAt"] == route_start
+  assert routes[0]["timeSource"] == utilities.DASHBOARD_TIME_SOURCE_FILESYSTEM
+
+
+def test_route_listing_applies_limit_before_parsing_old_logs(tmp_path, monkeypatch):
+  old_segment = tmp_path / "00000001--abcdef1234--0"
+  old_segment.mkdir()
+  (old_segment / "qlog.zst").write_bytes(b"placeholder")
+  stale_time = utilities.datetime(2025, 7, 18, 7, 20, 0).timestamp()
+  os.utime(old_segment, (stale_time, stale_time))
+
+  current_segment = tmp_path / "00000002--abcdef1234--0"
+  current_segment.mkdir()
+  current_time = utilities.datetime(2026, 7, 18, 7, 20, 0).timestamp()
+  os.utime(current_segment, (current_time, current_time))
+
+  def fail_if_read(_path):
+    raise AssertionError("routes outside the scan limit must not be parsed")
+
+  monkeypatch.setattr(utilities, "_route_logged_start_time", fail_if_read)
+
+  routes = utilities._list_dashboard_routes([tmp_path], limit=1)
+
+  assert [route["name"] for route in routes] == ["00000002--abcdef1234"]
+
+
+def test_route_listing_defers_offline_clock_repair_to_background_analysis(tmp_path, monkeypatch):
+  route_name = "000011e3--6e01289631"
+  segment = tmp_path / f"{route_name}--0"
+  segment.mkdir()
+  (segment / "qlog.zst").write_bytes(b"placeholder")
+
+  stale_time = utilities.datetime(2025, 7, 18, 7, 20, 0).timestamp()
+  os.utime(segment, (stale_time, stale_time))
+  def fail_if_read(_path):
+    raise AssertionError("dashboard route listing must not decompress logs")
+
+  monkeypatch.setattr(utilities, "_route_logged_start_time", fail_if_read)
+
+  routes = utilities._list_dashboard_routes([tmp_path])
+
+  assert routes[0]["startedAt"] is None
+  assert routes[0]["timeSource"] == ""
 
 
 def test_top_models_are_ranked_from_persisted_usage_not_favorites():
@@ -968,6 +1112,28 @@ def test_clear_dashboard_route_history_keeps_durable_records(tmp_path, monkeypat
   assert stats["personalRecords"]["cleanDriveStreak"]["drives"] == 4
   assert stats["attentionRecords"]["cleanDriveStreak"]["drives"] == 4
   assert stats["modelUsage"]["orion"]["drives"] == 3
+
+
+def test_clear_dashboard_route_history_can_retain_preserved_routes(tmp_path, monkeypatch):
+  monkeypatch.setattr(utilities, "DASHBOARD_PARAMS_DIR", tmp_path)
+  params = FakeParams({
+    utilities.DASHBOARD_PERSISTENT_STATS_PARAM: {
+      "routes": {
+        "0000006a--9f0a7bdf9c": {"date": "2026-06-15T08:00:00"},
+        "0000006b--9f0a7bdf9d": {"date": "2026-06-16T08:00:00"},
+      },
+      "ignoredRoutes": ["0000006a--9f0a7bdf9c", "0000006b--9f0a7bdf9d"],
+      "personalRecords": {"cleanDriveStreak": {"drives": 4}},
+    },
+  })
+
+  removed = utilities.clear_dashboard_route_history(params, retained_route_names={"0000006a--9f0a7bdf9c"})
+
+  assert removed == 1
+  stats = utilities._load_dashboard_persistent_stats(params)
+  assert list(stats["routes"]) == ["0000006a--9f0a7bdf9c"]
+  assert stats["ignoredRoutes"] == ["0000006a--9f0a7bdf9c"]
+  assert stats["personalRecords"]["cleanDriveStreak"]["drives"] == 4
 
 
 def test_lightweight_routes_surface_recent_drives_without_log_analysis(monkeypatch):
@@ -1550,6 +1716,94 @@ def _load_server_module():
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
   return module
+
+
+def test_clear_generated_build_state_preserves_prebuilts_and_user_data(tmp_path):
+  server = _load_server_module()
+  sconsign = tmp_path / ".sconsign.dblite"
+  generated = tmp_path / "cereal" / "gen" / "cpp" / "log.capnp.h"
+  prebuilt = tmp_path / "prebuilt"
+  user_model = tmp_path / "uncompiledmodels" / "custom.onnx"
+  for path in (sconsign, generated, prebuilt, user_model):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("test")
+
+  server._clear_generated_build_state(tmp_path)
+
+  assert not sconsign.exists()
+  assert not (tmp_path / "cereal" / "gen").exists()
+  assert prebuilt.read_text() == "test"
+  assert user_model.read_text() == "test"
+
+
+def test_maps_status_uses_cache_without_scanning_legacy_storage(monkeypatch):
+  server = _load_server_module()
+  assert server._import_galaxy_web_symbols()
+
+  app = server.Flask(
+    "maps_status_test",
+    template_folder=str(MODULE_DIR / "templates"),
+    static_folder=str(MODULE_DIR / "assets"),
+  )
+  server.setup(app)
+  monkeypatch.setattr(server, "params", FakeParams({
+    "MapsDownloadSizeCache": '{"country:CA":{"downloadBytes":123}}',
+    "MapsSelected": "",
+  }))
+  monkeypatch.setattr(server, "params_memory", FakeParams())
+  monkeypatch.setattr(server, "MAPS_PATH", SimpleNamespace(rglob=lambda *_args: (_ for _ in ()).throw(AssertionError("status must not scan maps"))))
+
+  response = app.test_client().get("/api/maps/status")
+  payload = response.get_json()
+
+  assert response.status_code == 200
+  assert payload["storageKnown"] is False
+  assert payload["storageBytes"] == 0
+  assert payload["mapsPresent"] is False
+
+
+def test_maps_status_returns_known_storage_from_v2_cache(monkeypatch):
+  server = _load_server_module()
+  assert server._import_galaxy_web_symbols()
+
+  app = server.Flask(
+    "maps_status_known_test",
+    template_folder=str(MODULE_DIR / "templates"),
+    static_folder=str(MODULE_DIR / "assets"),
+  )
+  server.setup(app)
+  monkeypatch.setattr(server, "params", FakeParams({
+    "MapsDownloadSizeCache": '{"version":2,"storageBytes":4096,"selections":{}}',
+    "MapsSelected": "",
+  }))
+  monkeypatch.setattr(server, "params_memory", FakeParams())
+
+  payload = app.test_client().get("/api/maps/status").get_json()
+
+  assert payload["storageKnown"] is True
+  assert payload["storageBytes"] == 4096
+  assert payload["mapsPresent"] is True
+
+
+def test_sentry_notification_rate_limit_persists_and_expires(monkeypatch, tmp_path):
+  server = _load_server_module()
+  rate_limit_path = tmp_path / "sentry_notification_rate_limit.json"
+  now = [1000.0]
+  monkeypatch.setattr(server, "_sentry_notification_rate_limit_path", lambda: rate_limit_path)
+  monkeypatch.setattr(server.time, "time", lambda: now[0])
+  server._SENTRY_NOTIFICATION_LAST_AT = None
+  event = {"eventId": "event-1"}
+
+  assert server._claim_sentry_notification_slot(event) is True
+  assert rate_limit_path.exists()
+  server._SENTRY_NOTIFICATION_LAST_AT = None
+  assert server._claim_sentry_notification_slot({"eventId": "event-2"}) is False
+
+  now[0] += server.SENTRY_NOTIFICATION_RATE_LIMIT_SECONDS - 0.1
+  assert server._claim_sentry_notification_slot({"eventId": "event-3"}) is False
+
+  now[0] += 0.1
+  assert server._claim_sentry_notification_slot({"eventId": "event-4"}) is True
 
 
 def test_troubleshoot_steer_delay_normalizes_vehicle_delay_for_display():

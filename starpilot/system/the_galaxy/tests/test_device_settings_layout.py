@@ -1,13 +1,11 @@
 import json
-import importlib.util
 import re
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-LAYOUT_PATH = REPO_ROOT / "starpilot/system/the_galaxy/assets/components/tools/device_settings_layout.json"
+LAYOUT_PATH = REPO_ROOT / "starpilot/common/assets/device_settings_layout.json"
 PARAM_KEYS_PATH = REPO_ROOT / "common/params_keys.h"
-GENERATOR_PATH = REPO_ROOT / "tools/StarPilot/generate_galaxy_layout.py"
 
 
 def _layout():
@@ -31,21 +29,13 @@ def _declared_default(key):
   return match.group(1)
 
 
-def _generator_module():
-  spec = importlib.util.spec_from_file_location("generate_galaxy_layout", GENERATOR_PATH)
-  assert spec is not None and spec.loader is not None
-  module = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(module)
-  return module
-
-
 def test_galaxy_layout_removes_obsolete_and_duplicate_controls():
   layout = _layout()
   sections = _params_by_section(layout)
   all_keys = {key for params in sections.values() for key in params}
 
   assert "Model & Customization" not in sections
-  assert {"HumanAcceleration", "ReverseCruise"}.isdisjoint(all_keys)
+  assert "HumanAcceleration" not in all_keys
   assert "DisableWideRoad" in sections["Visual (Display & UI)"]
   assert sum(
     param.get("key") == "DisableWideRoad"
@@ -66,9 +56,66 @@ def test_galaxy_layout_contains_basic_mode_controls():
     "HumanLaneChanges",
     "QOLLongitudinal",
   } <= sections["Longitudinal (Speed & Following)"].keys()
+  assert "Vision Speed Limits" in sections
+  assert "VisionSpeedLimitDetection" not in sections["Longitudinal (Speed & Following)"]
   assert "RedneckCruise" not in sections["Longitudinal (Speed & Following)"].keys()
   assert sections["Developer"]["RedneckCruise"]["parent_key"] == "GalaxyDeveloperMode"
-  assert {"AlphaLongitudinalEnabled", "ForceOffroad", "GalaxyDeveloperMode", "UseOldUI"} <= sections["Developer"].keys()
+  assert sections["Longitudinal (Speed & Following)"]["PulseGlideSpeedDelta"]["parent_key"] == "QOLLongitudinal"
+  assert sections["Longitudinal (Speed & Following)"]["PulseGlideSpeedDelta"]["settings_tier"] == "advanced"
+  assert "PulseGlideSpeedDelta" not in sections["Developer"]
+  assert {"AlphaLongitudinalEnabled", "ForceOffroad", "GalaxyDeveloperMode"} <= sections["Developer"].keys()
+
+
+def test_ford_lateral_controls_are_ford_only_and_galaxy_only():
+  lateral = _params_by_section(_layout())["Lateral (Steering)"]
+  ford_keys = {
+    "FordLateralMode",
+    "FordHumanTurnDetection",
+    "FordHandsFreeCluster",
+    "FordCurvatureBlendLow",
+    "FordCurvatureBlendHigh",
+    "FordCurvatureLaneChangeFactor",
+    "FordAngleBlend",
+    "FordAngleLowSpeedFactor",
+    "FordAngleHighSpeedFactor",
+    "FordAngleHighSpeedDamping",
+    "FordAngleLaneChangeFactor",
+  }
+
+  assert ford_keys <= lateral.keys()
+  assert all(lateral[key]["galaxy_only"] is True for key in ford_keys)
+  assert all(lateral[key]["vehicle_makes"] == ["Ford"] for key in ford_keys)
+  assert all(lateral[key]["settings_tier"] == "simple" for key in ford_keys)
+
+  mode = lateral["FordLateralMode"]
+  assert mode["ui_type"] == "dropdown"
+  assert mode["data_type"] == "int"
+  assert mode["is_parent_toggle"] is True
+  assert {option["label"]: option["value"] for option in mode["options"]} == {
+    "Native": 0,
+    "Curvature": 1,
+    "Angle": 2,
+  }
+  assert _declared_default("FordLateralMode") == "1"
+
+  common_keys = {"FordHumanTurnDetection", "FordHandsFreeCluster"}
+  curvature_keys = {"FordCurvatureBlendLow", "FordCurvatureBlendHigh", "FordCurvatureLaneChangeFactor"}
+  angle_keys = {
+    "FordAngleBlend",
+    "FordAngleLowSpeedFactor",
+    "FordAngleHighSpeedFactor",
+    "FordAngleHighSpeedDamping",
+    "FordAngleLaneChangeFactor",
+  }
+  assert all(lateral[key]["visible_when_values"] == [1, 2] for key in common_keys)
+  assert all(lateral[key]["visible_when_values"] == [1] for key in curvature_keys)
+  assert all(lateral[key]["visible_when_values"] == [2] for key in angle_keys)
+  assert all(lateral[key]["parent_key"] == "FordLateralMode" for key in ford_keys - {"FordLateralMode"})
+
+  device_ui_root = REPO_ROOT / "selfdrive/ui"
+  for path in device_ui_root.rglob("*.py"):
+    source = path.read_text(encoding="utf-8")
+    assert all(key not in source for key in ford_keys)
 
 
 def test_device_shutdown_uses_literal_hours():
@@ -88,6 +135,17 @@ def test_curve_speed_controller_no_lead_toggle_is_nested_under_csc():
   assert _declared_default("CurveSpeedControllerNoLead") == "0"
 
 
+def test_curve_speed_controller_readouts_are_display_only_and_nested():
+  csc = _params_by_section(_layout())["Longitudinal (Speed & Following)"]
+
+  for key, unit in (("CalibratedLateralAcceleration", " m/s²"), ("CalibrationProgress", "%")):
+    readout = csc[key]
+    assert readout["ui_type"] == "readout"
+    assert readout["parent_key"] == "CurveSpeedController"
+    assert readout["unit"] == unit
+    assert readout["settings_tier"] == "simple"
+
+
 def test_every_galaxy_setting_has_a_shared_settings_tier():
   layout = _layout()
   tiers = {
@@ -100,15 +158,24 @@ def test_every_galaxy_setting_has_a_shared_settings_tier():
   assert None not in tiers
 
 
-def test_galaxy_layout_generator_is_semantically_idempotent():
+def test_every_setting_parent_exposes_a_manage_control():
   layout = _layout()
-  assert _generator_module().generate_layout(layout) == layout
+
+  for section in layout:
+    params = section.get("params", [])
+    parent_keys = {param.get("parent_key") for param in params if param.get("parent_key")}
+    params_by_key = {param["key"]: param for param in params}
+    for parent_key in parent_keys:
+      assert params_by_key[parent_key].get("is_parent_toggle") is True, (
+        f"{section['name']} parent {parent_key} must expose its child settings"
+      )
 
 
 def test_requested_simple_and_advanced_settings_tiers():
   sections = _params_by_section(_layout())
   lateral = sections["Lateral (Steering)"]
   longitudinal = sections["Longitudinal (Speed & Following)"]
+  vision = sections["Vision Speed Limits"]
   developer = sections["Developer"]
 
   for section_name in (
@@ -155,6 +222,11 @@ def test_requested_simple_and_advanced_settings_tiers():
     "ConditionalChill",
   ):
     assert longitudinal[key]["settings_tier"] == "advanced"
+  assert longitudinal["PulseGlideSpeedDelta"]["settings_tier"] == "advanced"
+
+  assert vision["VisionSpeedLimitDetection"]["settings_tier"] == "advanced"
+  assert vision["VisionSpeedLimitLowLimitFilter"]["settings_tier"] == "advanced"
+  assert vision["VisionSpeedLimitLowLimitThreshold"]["settings_tier"] == "advanced"
 
   assert developer["GalaxyDeveloperMode"]["settings_tier"] == "simple"
   assert developer["AlphaLongitudinalEnabled"]["parent_key"] == "GalaxyDeveloperMode"
@@ -163,10 +235,53 @@ def test_requested_simple_and_advanced_settings_tiers():
   assert developer["ForceOffroad"]["parent_key"] == "GalaxyDeveloperMode"
   assert developer["ForceOffroad"]["requires_parked"] is True
   assert developer["ForceOffroad"]["settings_tier"] == "advanced"
-  assert developer["UseOldUI"]["settings_tier"] == "simple"
   assert developer["DeveloperUI"]["settings_tier"] == "advanced"
   assert developer["RedneckCruise"]["settings_tier"] == "advanced"
   assert sections["Visual (Display & UI)"]["DisableWideRoad"]["settings_tier"] == "advanced"
+
+
+def test_turn_steering_limit_mute_speed_is_galaxy_developer_only():
+  sections = _params_by_section(_layout())
+  setting = sections["Developer"]["TurnSteeringLimitMuteSpeed"]
+
+  assert setting["parent_key"] == "GalaxyDeveloperMode"
+  assert setting["settings_tier"] == "advanced"
+  assert setting["data_type"] == "int"
+  assert setting["min"] == 0.0
+  assert setting["max"] == 99.0
+  assert _declared_default("TurnSteeringLimitMuteSpeed") == "0"
+
+  physical_settings = (
+    REPO_ROOT / "selfdrive/ui/layouts/settings/starpilot/sounds.py",
+    REPO_ROOT / "selfdrive/ui/layouts/settings/starpilot/aethergrid.py",
+  )
+  assert all("TurnSteeringLimitMuteSpeed" not in path.read_text(encoding="utf-8") for path in physical_settings)
+
+
+def test_honda_pid_scale_controls_use_galaxy_fine_granularity():
+  developer = _params_by_section(_layout())["Developer"]
+
+  for key in ("HondaLateralPidKpScale", "HondaLateralPidKiScale"):
+    setting = developer[key]
+    assert setting["step"] == 0.01
+    assert setting["precision"] == 2
+    assert setting["settings_tier"] == "advanced"
+
+
+def test_ford_angle_controls_use_galaxy_fine_granularity():
+  lateral = _params_by_section(_layout())["Lateral (Steering)"]
+
+  for key in (
+    "FordAngleBlend",
+    "FordAngleLowSpeedFactor",
+    "FordAngleHighSpeedFactor",
+    "FordAngleHighSpeedDamping",
+    "FordAngleLaneChangeFactor",
+  ):
+    setting = lateral[key]
+    assert setting["step"] == 0.01
+    assert setting["precision"] == 2
+    assert setting["galaxy_only"]
 
 
 def test_hidden_feature_defaults_remain_enabled():
@@ -190,6 +305,17 @@ def test_human_acceleration_param_is_removed():
   assert '{"HumanAcceleration",' not in params_source
 
 
+def test_rivian_angle_control_is_harness_gated():
+  sections = _params_by_section(_layout())
+  setting = sections["Vehicle"]["RivianAngleControl"]
+
+  assert setting["ui_type"] == "toggle"
+  assert setting["data_type"] == "bool"
+  assert setting["requires_capability"] == "HasRivianAngleHarness"
+  assert "reboot" not in setting["description"].lower()
+  assert _declared_default("RivianAngleControl") == "0"
+
+
 def test_vasm_is_default_off_and_configured_only_in_galaxy():
   sections = _params_by_section(_layout())
   lateral = sections["Lateral (Steering)"]
@@ -204,22 +330,55 @@ def test_vasm_is_default_off_and_configured_only_in_galaxy():
   assert all("VASM" not in path.read_text(encoding="utf-8") for path in physical_settings)
 
 
+def test_low_vision_limit_filter_is_default_off_and_configured_only_in_galaxy():
+  sections = _params_by_section(_layout())
+  vision = sections["Vision Speed Limits"]
+  toggle = vision["VisionSpeedLimitLowLimitFilter"]
+  threshold = vision["VisionSpeedLimitLowLimitThreshold"]
+
+  assert vision["VisionSpeedLimitDetection"]["is_parent_toggle"] is True
+  assert vision["VisionSpeedLimitAutoBookmark"]["is_parent_toggle"] is True
+  assert "VisionSpeedLimitDetection" not in sections["Longitudinal (Speed & Following)"]
+  assert toggle["is_parent_toggle"] is True
+  assert toggle["parent_key"] == "VisionSpeedLimitDetection"
+  assert threshold["parent_key"] == "VisionSpeedLimitLowLimitFilter"
+  assert threshold["min"] == 5
+  assert threshold["max"] == 80
+  assert threshold["step"] == 5
+  assert _declared_default("VisionSpeedLimitLowLimitFilter") == "0"
+  assert _declared_default("VisionSpeedLimitLowLimitThreshold") == "25"
+  assert _declared_default("VisionSpeedLimitDetection") == "1"
+
+  physical_settings = (
+    REPO_ROOT / "selfdrive/ui/layouts/settings/starpilot/longitudinal.py",
+    REPO_ROOT / "selfdrive/ui/layouts/settings/starpilot/aethergrid.py",
+  )
+  assert all("VisionSpeedLimitLowLimit" not in path.read_text(encoding="utf-8") for path in physical_settings)
+
+
 def test_pip_preview_is_under_driving_screen_widgets_and_configured_only_in_galaxy():
   sections = _params_by_section(_layout())
   visual = sections["Visual (Display & UI)"]
 
-  assert {"PIPPreviewEnabled", "PIPPreviewShowOnBlinker", "PIPPreviewShowOnBSM"} <= visual.keys()
+  assert {"PIPPreviewEnabled", "PIPPreviewShowOnBlinker", "PIPPreviewShowOnBSM", "PIPPreviewInvert"} <= visual.keys()
   assert visual["PIPPreviewEnabled"]["parent_key"] == "CustomUI"
   assert visual["PIPPreviewShowOnBlinker"]["parent_key"] == "PIPPreviewEnabled"
   assert visual["PIPPreviewShowOnBSM"]["parent_key"] == "PIPPreviewEnabled"
+  assert visual["PIPPreviewInvert"]["parent_key"] == "PIPPreviewEnabled"
   assert visual["PIPPreviewEnabled"]["settings_tier"] == "advanced"
   assert visual["PIPPreviewShowOnBlinker"]["settings_tier"] == "advanced"
   assert visual["PIPPreviewShowOnBSM"]["settings_tier"] == "advanced"
+  assert visual["PIPPreviewInvert"]["settings_tier"] == "advanced"
 
   assert _declared_default("PIPPreviewEnabled") == "0"
   assert _declared_default("PIPPreviewShowOnBlinker") == "0"
   assert _declared_default("PIPPreviewShowOnBSM") == "0"
-  assert '"{\\"width\\":1928,\\"height\\":1208,\\"center_left\\":[315,548],\\"center_right\\":[1571,539],\\"crop_size\\":580}"' in PARAM_KEYS_PATH.read_text(encoding="utf-8")
+  assert _declared_default("PIPPreviewInvert") == "0"
+  annotation_default = (
+    '"{\\"width\\":1928,\\"height\\":1208,\\"center_left\\":[315,548],' +
+    '\\"center_right\\":[1571,539],\\"crop_size\\":580}"'
+  )
+  assert annotation_default in PARAM_KEYS_PATH.read_text(encoding="utf-8")
 
   physical_settings = (
     REPO_ROOT / "selfdrive/ui/layouts/settings/starpilot/aethergrid.py",

@@ -10,7 +10,7 @@ LONG_PITCH_KEY = "LongPitch"
 LANE_CHANGE_SMOOTHING_KEY = "LaneChangeSmoothing"
 STEER_KP_KEY = "SteerKP"
 STEER_KP_STOCK_KEY = "SteerKPStock"
-USE_OLD_UI_KEY = "UseOldUI"
+LEGACY_UI_SELECTION_KEYS = ("UseOldUI", "TryRaylibUI")
 VISION_SPEED_LIMIT_DETECTION_KEY = "VisionSpeedLimitDetection"
 DEVELOPER_METRIC_DISPLAY_KEYS = (
   "FPSCounter",
@@ -22,15 +22,16 @@ DEVELOPER_METRIC_DISPLAY_KEYS = (
 )
 DEVICE_SHUTDOWN_KEY = "DeviceShutdown"
 CAMERA_VIEW_KEY = "CameraView"
+REVERSE_CRUISE_KEY = "ReverseCruise"
 
 DEFAULT_STEER_KP = 0.6
 LEGACY_STEER_KP = 0.7
-QT_STEER_KP_PLACEHOLDER = 1.0
+LEGACY_STEER_KP_STOCK_PLACEHOLDER = 1.0
 
 LAUNCH_PARAM_MIGRATION_MARKER = ".starpilot_launch_param_migrations_v2"
 BRANCH_DEFAULTS_MIGRATION_MARKER = ".starpilot_branch_defaults_migrations_v1"
 ACCELERATION_PROFILE_MIGRATION_MARKER = ".starpilot_acceleration_profile_default_v1"
-USE_OLD_UI_MIGRATION_MARKER = ".starpilot_use_old_ui_migration_v2"
+LEGACY_UI_SELECTION_MIGRATION_MARKER = ".starpilot_remove_legacy_ui_selection_v1"
 LATERAL_METHOD_REBRAND_MIGRATION_MARKER = ".starpilot_lateral_method_rebrand_v1"
 VISION_SPEED_LIMIT_DETECTION_MIGRATION_MARKER = ".starpilot_vision_speed_limit_detection_v1"
 DEVELOPER_METRIC_DISPLAY_MIGRATION_MARKER = ".starpilot_developer_metric_display_off_v1"
@@ -38,6 +39,7 @@ LANE_CHANGE_SMOOTHING_MIGRATION_MARKER = ".starpilot_lane_change_smoothing_defau
 SPEED_LIMIT_VISIBILITY_MIGRATION_MARKER = ".starpilot_speed_limit_visibility_v1"
 DEVICE_SHUTDOWN_HOURS_MIGRATION_MARKER = ".starpilot_device_shutdown_hours_v1"
 CAMERA_VIEW_DEFAULT_MIGRATION_MARKER = ".starpilot_camera_view_default_v1"
+REVERSE_CRUISE_REMOVAL_MIGRATION_MARKER = ".starpilot_remove_reverse_cruise_v1"
 MARKER_DIRNAME = ".starpilot_param_migrations"
 
 LATERAL_METHOD_PARAM_SUFFIXES = (
@@ -113,8 +115,8 @@ def _acceleration_profile_marker_path(params: ParamsLike) -> Path:
   return _marker_dir_path(params) / ACCELERATION_PROFILE_MIGRATION_MARKER
 
 
-def _use_old_ui_marker_path(params: ParamsLike) -> Path:
-  return _marker_dir_path(params) / USE_OLD_UI_MIGRATION_MARKER
+def _legacy_ui_selection_marker_path(params: ParamsLike) -> Path:
+  return _marker_dir_path(params) / LEGACY_UI_SELECTION_MIGRATION_MARKER
 
 
 def _lateral_method_rebrand_marker_path(params: ParamsLike) -> Path:
@@ -143,6 +145,10 @@ def _device_shutdown_hours_marker_path(params: ParamsLike) -> Path:
 
 def _camera_view_default_marker_path(params: ParamsLike) -> Path:
   return _marker_dir_path(params) / CAMERA_VIEW_DEFAULT_MIGRATION_MARKER
+
+
+def _reverse_cruise_removal_marker_path(params: ParamsLike) -> Path:
+  return _marker_dir_path(params) / REVERSE_CRUISE_REMOVAL_MIGRATION_MARKER
 
 
 def _marker_dir_path(params: ParamsLike) -> Path:
@@ -184,13 +190,8 @@ def _apply_legacy_launch_param_migrations(params: ParamsLike, marker: Path) -> N
   steer_kp_stock = params.get_float(STEER_KP_STOCK_KEY)
   if (_approx_equal(steer_kp_stock, 0.0) or
       _approx_equal(steer_kp_stock, LEGACY_STEER_KP) or
-      _approx_equal(steer_kp_stock, QT_STEER_KP_PLACEHOLDER)):
+      _approx_equal(steer_kp_stock, LEGACY_STEER_KP_STOCK_PLACEHOLDER)):
     params.put_float(STEER_KP_STOCK_KEY, DEFAULT_STEER_KP)
-
-  # Initialize UsePrebuilt to True if never explicitly set, so the UI default
-  # matches the shell script's default of USE_PREBUILT=1.
-  if not Path(params.get_param_path("UsePrebuilt")).exists():
-    params.put_bool("UsePrebuilt", True)
 
   marker.touch()
 
@@ -225,13 +226,14 @@ def _apply_acceleration_profile_default_migration(params: ParamsLike, marker: Pa
   marker.touch()
 
 
-def _apply_use_old_ui_migration(params: ParamsLike, marker: Path) -> None:
+def _remove_legacy_ui_selection(params: ParamsLike, marker: Path) -> None:
   if marker.exists():
     return
 
   marker.parent.mkdir(parents=True, exist_ok=True)
 
-  params.put_bool(USE_OLD_UI_KEY, False)
+  for key in LEGACY_UI_SELECTION_KEYS:
+    Path(params.get_param_path(key)).unlink(missing_ok=True)
 
   marker.touch()
 
@@ -330,17 +332,27 @@ def _apply_camera_view_default_migration(params: ParamsLike, marker: Path) -> No
   marker.touch()
 
 
+def _remove_reverse_cruise_param(params: ParamsLike, marker: Path) -> None:
+  if marker.exists():
+    return
+
+  marker.parent.mkdir(parents=True, exist_ok=True)
+  Path(params.get_param_path(REVERSE_CRUISE_KEY)).unlink(missing_ok=True)
+  marker.touch()
+
+
 def apply_launch_param_migrations(params: ParamsLike, marker_path: Path | None = None,
                                   branch_defaults_marker_path: Path | None = None,
                                   acceleration_profile_marker_path: Path | None = None,
-                                  use_old_ui_marker_path: Path | None = None,
+                                  legacy_ui_selection_marker_path: Path | None = None,
                                   lateral_method_rebrand_marker_path: Path | None = None,
                                   vision_speed_limit_detection_marker_path: Path | None = None,
                                   developer_metric_display_marker_path: Path | None = None,
                                   lane_change_smoothing_marker_path: Path | None = None,
                                   speed_limit_visibility_marker_path: Path | None = None,
                                   device_shutdown_hours_marker_path: Path | None = None,
-                                  camera_view_default_marker_path: Path | None = None) -> None:
+                                  camera_view_default_marker_path: Path | None = None,
+                                  reverse_cruise_removal_marker_path: Path | None = None) -> None:
   _apply_legacy_launch_param_migrations(params, marker_path or _default_marker_path(params))
   # Keep branch-default rollout on its own marker so older installs that already
   # have the legacy marker still receive this one-time param reset.
@@ -348,7 +360,9 @@ def apply_launch_param_migrations(params: ParamsLike, marker_path: Path | None =
   _apply_acceleration_profile_default_migration(
     params, acceleration_profile_marker_path or _acceleration_profile_marker_path(params)
   )
-  _apply_use_old_ui_migration(params, use_old_ui_marker_path or _use_old_ui_marker_path(params))
+  _remove_legacy_ui_selection(
+    params, legacy_ui_selection_marker_path or _legacy_ui_selection_marker_path(params)
+  )
   _apply_lateral_method_rebrand_migration(
     params, lateral_method_rebrand_marker_path or _lateral_method_rebrand_marker_path(params)
   )
@@ -369,6 +383,9 @@ def apply_launch_param_migrations(params: ParamsLike, marker_path: Path | None =
   )
   _apply_camera_view_default_migration(
     params, camera_view_default_marker_path or _camera_view_default_marker_path(params)
+  )
+  _remove_reverse_cruise_param(
+    params, reverse_cruise_removal_marker_path or _reverse_cruise_removal_marker_path(params)
   )
 
 

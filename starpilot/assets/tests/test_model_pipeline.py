@@ -15,12 +15,28 @@ from openpilot.starpilot.assets.model_manager import MANIFEST_CANDIDATES, ModelM
 from openpilot.starpilot.common.model_versions import UNIFIED_ARTIFACT_FORMAT
 
 
-def test_v23_is_the_only_manifest_candidate():
-  assert MANIFEST_CANDIDATES == ("v23",)
+def test_v24_is_the_only_manifest_candidate():
+  assert MANIFEST_CANDIDATES == ("v24",)
 
 
-def test_v23_manifest_is_loaded_from_models_checkout():
-  assert ModelManager._manifest_paths("v23") == ("Models/model_names_v23.json",)
+def test_v24_manifest_is_loaded_from_models_checkout():
+  assert ModelManager._manifest_paths("v24") == ("Models/model_names_v24.json",)
+
+
+def test_resource_sources_prefer_huggingface_then_github(monkeypatch):
+  monkeypatch.setattr(download_functions, "is_url_pingable", lambda url: True)
+  assert download_functions.get_resource_urls() == [
+    download_functions.HF_BUCKET_URL,
+    download_functions.GITHUB_URL,
+  ]
+  assert all("gitlab" not in url for url in download_functions.get_resource_urls())
+
+
+def test_huggingface_manifest_has_root_and_manifests_fallbacks():
+  assert ModelManager._hf_manifest_paths("v24") == (
+    "model_names_v24.json",
+    "manifests/model_names_v24.json",
+  )
 
 
 def test_old_manifest_ids_resolve_to_v23_namespace():
@@ -50,6 +66,12 @@ def test_behavior_version_does_not_control_artifact_layout():
   assert manager._required_files("example", "split") == []
 
 
+def test_supercombo_defaults_to_v16_without_changing_split_defaults():
+  assert model_compiler.resolve_behavior_version("new-model", None, "supercombo") == "v16"
+  assert model_compiler.resolve_behavior_version("legacy-model", None, "split") == ""
+  assert model_compiler.resolve_behavior_version("new-model", "v15", "supercombo") == "v15"
+
+
 def test_external_gpu_requirement_is_cached_from_manifest(tmp_path, monkeypatch):
   monkeypatch.setattr(model_manager, "MODELS_PATH", tmp_path)
   manager = object.__new__(ModelManager)
@@ -62,6 +84,32 @@ def test_external_gpu_requirement_is_cached_from_manifest(tmp_path, monkeypatch)
   assert model_manager.model_uses_external_gpu("large")
   assert not model_manager.model_uses_external_gpu("normal")
   assert not model_manager.model_uses_external_gpu("missing")
+
+
+def test_local_gpu_compile_persists_runtime_metadata(tmp_path, monkeypatch):
+  models_path = tmp_path / "models"
+  compiled_path = tmp_path / "compiled" / "local-large_driving_tinygrad.pkl"
+  models_path.mkdir()
+  compiled_path.parent.mkdir()
+  compiled_path.write_bytes(b"artifact")
+  monkeypatch.setattr(model_compiler, "MODELS_PATH", models_path)
+
+  model_compiler.install_local_artifact(compiled_path, "local-large", "v16", external_gpu=True)
+
+  sidecar = json.loads((models_path / "local-large.json").read_text())
+  metadata = json.loads((models_path / model_manager.ARTIFACT_METADATA_CACHE).read_text())
+  assert sidecar["uses_external_gpu"] is True
+  assert metadata["local-large"]["uses_external_gpu"] is True
+
+  monkeypatch.setattr(model_manager, "MODELS_PATH", models_path)
+  manager = object.__new__(ModelManager)
+  assert manager._discover_local_models()[0]["uses_external_gpu"] is True
+
+  model_compiler.install_local_artifact(compiled_path, "local-large", "v16", external_gpu=False)
+  sidecar = json.loads((models_path / "local-large.json").read_text())
+  metadata = json.loads((models_path / model_manager.ARTIFACT_METADATA_CACHE).read_text())
+  assert sidecar["uses_external_gpu"] is False
+  assert metadata["local-large"]["uses_external_gpu"] is False
 
 
 def test_external_gpu_compilation_is_opt_in(tmp_path, monkeypatch):
@@ -82,9 +130,26 @@ def test_external_gpu_compilation_is_opt_in(tmp_path, monkeypatch):
   assert normal_kwargs["env"]["DEV"] == "QCOM"
   assert normal_kwargs["env"]["IMAGE"] == "2"
   assert "--out-of-band" in external_command
+  assert external_kwargs["env"]["DEBUG"] == "1"
   assert external_kwargs["env"]["DEV"] == "USB+AMD:LLVM"
   assert external_kwargs["env"]["WARP_DEV"] == "QCOM"
   assert all(flag not in external_kwargs["env"] for flag in ("IMAGE", "NOLOCALS", "OPENPILOT_HACKS"))
+
+
+def test_external_gpu_compile_uses_agnos_isolated_cpu(monkeypatch):
+  command = ["python3", "compile_modeld.py"]
+  monkeypatch.setattr(model_compiler.sys, "platform", "linux")
+  monkeypatch.setattr(model_compiler.platform, "machine", lambda: "aarch64")
+
+  assert model_compiler.external_gpu_compile_command(command) == ["taskset", "-c", "7", *command]
+
+
+def test_external_gpu_compile_does_not_pin_other_platforms(monkeypatch):
+  command = ["python3", "compile_modeld.py"]
+  monkeypatch.setattr(model_compiler.sys, "platform", "darwin")
+  monkeypatch.setattr(model_compiler.platform, "machine", lambda: "arm64")
+
+  assert model_compiler.external_gpu_compile_command(command) is command
 
 
 def test_compile_clears_only_selected_model_outputs(tmp_path, monkeypatch):

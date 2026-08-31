@@ -2,6 +2,7 @@
 import dataclasses
 import json
 import requests
+import tempfile
 import threading
 import time
 
@@ -20,19 +21,23 @@ from openpilot.starpilot.common.starpilot_backups import backup_starpilot
 from openpilot.starpilot.common.connect_server import sync_konik_dongle_id
 from openpilot.starpilot.common.maps_catalog import normalize_schedule_value, sanitize_selected_locations_csv
 from openpilot.starpilot.common.maps_download_progress import (
-  estimate_download_bytes,
-  estimate_eta_seconds,
-  load_size_cache,
+  MAPS_STORAGE_CACHE_PARAM,
+  estimate_file_eta_seconds,
+  load_maps_storage_cache,
   nonnegative_int,
   selection_key,
   storage_bytes,
 )
 from openpilot.starpilot.common.theme_asset_names import find_matching_theme_asset_file
-from openpilot.starpilot.common.starpilot_utilities import get_starpilot_api_info, is_FrogsGoMoo, is_url_pingable, run_cmd
+from openpilot.starpilot.common.starpilot_utilities import get_starpilot_api_info, is_url_pingable, run_cmd
 from openpilot.starpilot.common.starpilot_variables import (
-  ERROR_LOGS_PATH, STARPILOT_API, FROGS_GO_MOO_PATH, HD_LOGS_PATH, KONIK_LOGS_PATH, MAPS_PATH, THEME_SAVE_PATH,
+  ERROR_LOGS_PATH, STARPILOT_API, HD_LOGS_PATH, KONIK_LOGS_PATH, MAPS_PATH, THEME_SAVE_PATH,
   StarPilotVariables, get_starpilot_toggles
 )
+
+BOOT_LOGO_JPEG_PATH = Path("/usr/comma/bg.jpg")
+BOOT_LOGO_PNG_PATH = Path("/usr/comma/bg.png")
+BOOT_LOGO_MAGIC_PATH = Path("/usr/comma/magic.py")
 
 
 def seed_desktop_theme_assets():
@@ -145,13 +150,6 @@ def install_starpilot(build_metadata, params):
 
   update_boot_logo(starpilot=True, selected_logo=params.get("BootLogo"))
 
-  if is_FrogsGoMoo():
-    mount_options = run_cmd(["findmnt", "-n", "-o", "OPTIONS", "/persist"], "Successfully retrieved mount options", "Failed to retrieve mount options")
-    run_cmd(["sudo", "mount", "-o", "remount,rw", "/persist"], "Successfully remounted /persist as read-write", "Failed to remount /persist")
-    run_cmd(["sudo", "python3", FROGS_GO_MOO_PATH], "Successfully ran frogsgomoo.py", "Failed to run frogsgomoo.py")
-    run_cmd(["sudo", "mount", "-o", f"remount,{mount_options}", "/persist"], "Successfully restored /persist mount options", "Failed to restore /persist mount options")
-
-
 def register_device(build_metadata, params):
   def register_thread():
     dongle_id = params.get("DongleId")
@@ -200,8 +198,6 @@ def update_boot_logo(starpilot=False, stock=False, selected_logo=None):
   if HARDWARE.get_device_type() == "pc":
     return
 
-  boot_logo_location = Path("/usr/comma/bg.jpg")
-
   if starpilot:
     target_logo = Path(BASEDIR) / "starpilot/assets/other_images/starpilot_boot_logo.jpg"
     if selected_logo:
@@ -221,42 +217,86 @@ def update_boot_logo(starpilot=False, stock=False, selected_logo=None):
     print(f"Error: Target logo file not found at {target_logo}")
     return
 
-  source_logo = target_logo
-  staged_logo = Path("/tmp/starpilot_boot_logo.jpg")
   try:
     from PIL import Image
 
-    with Image.open(target_logo) as img:
-      # weston.service always writes a JPEG copy of /usr/comma/bg.jpg; make sure
-      # the source image is already RGB JPEG to avoid startup failure on RGBA assets.
-      if img.format != "JPEG" or img.mode != "RGB":
-        img.convert("RGB").save(staged_logo, format="JPEG", quality=95)
-        source_logo = staged_logo
+    with tempfile.TemporaryDirectory(prefix="starpilot_boot_logo_") as staging_dir:
+      staging_path = Path(staging_dir)
+      staged_jpeg = staging_path / "bg.jpg"
+      staged_png = staging_path / "bg.png"
+
+      with Image.open(target_logo) as img:
+        normalized_logo = img.convert("RGB")
+        if normalized_logo.width >= normalized_logo.height:
+          landscape_logo = normalized_logo
+          weston_logo = normalized_logo.transpose(Image.Transpose.ROTATE_270)
+        else:
+          weston_logo = normalized_logo
+          landscape_logo = normalized_logo.transpose(Image.Transpose.ROTATE_90)
+
+        magic_uses_jpeg = False
+        try:
+          magic_uses_jpeg = BOOT_LOGO_JPEG_PATH.as_posix() in BOOT_LOGO_MAGIC_PATH.read_text()
+        except OSError:
+          pass
+
+        (landscape_logo if magic_uses_jpeg else weston_logo).save(staged_jpeg, format="JPEG", quality=95)
+        landscape_logo.save(staged_png, format="PNG")
+
+      logo_variants = [(staged_jpeg, BOOT_LOGO_JPEG_PATH)]
+      if BOOT_LOGO_PNG_PATH.is_file():
+        logo_variants.append((staged_png, BOOT_LOGO_PNG_PATH))
+
+      pending_updates = [
+        (source, destination)
+        for source, destination in logo_variants
+        if not destination.is_file() or destination.read_bytes() != source.read_bytes()
+      ]
+      if not pending_updates:
+        return
+
+      mount_options = run_cmd(["findmnt", "-n", "-o", "OPTIONS", "/"], "Successfully retrieved mount options", "Failed to retrieve mount options")
+      if mount_options is None:
+        return
+      if run_cmd(["sudo", "mount", "-o", "remount,rw", "/"], "Successfully remounted / as read-write", "Failed to remount /") is None:
+        return
+
+      try:
+        for source, destination in pending_updates:
+          run_cmd(["sudo", "cp", source, destination], f"Successfully replaced boot logo at {destination}", f"Failed to replace boot logo at {destination}")
+      finally:
+        run_cmd(["sudo", "mount", "-o", f"remount,{mount_options}", "/"], "Successfully restored / mount options", "Failed to restore / mount options")
   except Exception as error:
     print(f"Error normalizing boot logo {target_logo}: {error}")
-    if target_logo.suffix.lower() not in {".jpg", ".jpeg"}:
-      print("Skipping boot logo update to keep weston startup stable.")
-      return
-
-  current_logo = boot_logo_location.read_bytes() if boot_logo_location.is_file() else b""
-  desired_logo = source_logo.read_bytes()
-  if current_logo != desired_logo:
-    mount_options = run_cmd(["findmnt", "-n", "-o", "OPTIONS", "/"], "Successfully retrieved mount options", "Failed to retrieve mount options")
-    run_cmd(["sudo", "mount", "-o", "remount,rw", "/"], "Successfully remounted / as read-write", "Failed to remount /")
-    run_cmd(["sudo", "cp", source_logo, boot_logo_location], "Successfully replaced boot logo", "Failed to replace boot logo")
-    run_cmd(["sudo", "mount", "-o", f"remount,{mount_options}", "/"], "Successfully restored / mount options", "Failed to restore / mount options")
 
 
 MAPS_DOWNLOAD_PROGRESS_PARAM = "MapsDownloadProgress"
-MAPS_DOWNLOAD_SIZE_CACHE_PARAM = "MapsDownloadSizeCache"
+MAPS_DOWNLOAD_SIZE_CACHE_PARAM = MAPS_STORAGE_CACHE_PARAM
 
 
 def _decode_map_param(value):
   return value.decode("utf-8", errors="ignore") if isinstance(value, bytes) else value
 
 
-def _get_map_size_cache(params):
-  return load_size_cache(_decode_map_param(params.get(MAPS_DOWNLOAD_SIZE_CACHE_PARAM)))
+def _get_maps_storage_cache(params):
+  return load_maps_storage_cache(_decode_map_param(params.get(MAPS_DOWNLOAD_SIZE_CACHE_PARAM)))
+
+
+def _save_maps_storage_cache(params, cache):
+  params.put(MAPS_DOWNLOAD_SIZE_CACHE_PARAM, cache.to_json())
+
+
+def _reconcile_maps_storage(params, cache, *, selected_key=None, baseline_storage_bytes=None, total_files=0, updated_at=""):
+  total_storage_bytes = storage_bytes(MAPS_PATH)
+  cache.reconcile(
+    total_storage_bytes,
+    selection_key=selected_key,
+    baseline_storage_bytes=baseline_storage_bytes,
+    total_files=total_files,
+    updated_at=updated_at,
+  )
+  _save_maps_storage_cache(params, cache)
+  return total_storage_bytes
 
 
 def _publish_maps_progress(
@@ -271,6 +311,7 @@ def _publish_maps_progress(
   completed=False,
   phase="starting",
   cached_estimate_bytes=0,
+  current_storage_bytes=None,
 ):
   total_files = 0
   downloaded_files = 0
@@ -292,23 +333,23 @@ def _publish_maps_progress(
     active = bool(progress.active) if progress is not None else False
   cancelled = bool(cancelled or progress_cancelled)
   elapsed_seconds = max(time.monotonic() - started_at, 0.0)
-  current_storage_bytes = storage_bytes(MAPS_PATH)
-  storage_delta_bytes = max(current_storage_bytes - baseline_storage_bytes, 0)
-  bytes_per_second = storage_delta_bytes / elapsed_seconds if elapsed_seconds > 0 else 0.0
-  estimated_bytes = estimate_download_bytes(storage_delta_bytes, total_files, downloaded_files)
-  estimate_source = "live_file_rate" if estimated_bytes else ""
-  if not estimated_bytes and cached_estimate_bytes:
-    estimated_bytes = int(cached_estimate_bytes)
-    estimate_source = "previous_download"
+
+  fraction = min(max(downloaded_files / float(total_files), 0.0), 1.0) if total_files > 0 else (1.0 if completed else 0.0)
 
   if completed:
     percent = 100
-  elif estimated_bytes > 0:
-    percent = min(99, int(storage_delta_bytes * 100 / estimated_bytes))
   elif total_files > 0:
-    percent = min(99, int(downloaded_files * 100 / total_files))
+    percent = min(99, int(fraction * 100))
   else:
     percent = 0
+
+  estimated_bytes = nonnegative_int(cached_estimate_bytes)
+  storage_known = current_storage_bytes is not None or baseline_storage_bytes is not None
+  effective_storage_bytes = current_storage_bytes if current_storage_bytes is not None else baseline_storage_bytes
+  storage_delta_bytes = (
+    max(nonnegative_int(current_storage_bytes) - nonnegative_int(baseline_storage_bytes), 0)
+    if current_storage_bytes is not None and baseline_storage_bytes is not None else 0
+  )
 
   payload = {
     "active": bool(active),
@@ -317,23 +358,43 @@ def _publish_maps_progress(
     "downloadedBytes": storage_delta_bytes,
     "downloadedFiles": downloaded_files,
     "estimatedDownloadBytes": estimated_bytes,
-    "estimateSource": estimate_source,
-    "etaSeconds": estimate_eta_seconds(estimated_bytes, storage_delta_bytes, bytes_per_second) if not completed else 0,
+    "estimateSource": "previous_additional_storage" if estimated_bytes > 0 else "",
+    "etaSeconds": estimate_file_eta_seconds(elapsed_seconds, total_files, downloaded_files) if not completed else 0,
     "percent": percent,
     "phase": phase,
     "primaryLocation": primary_location,
     "selectedKey": selection_key(maps_selected),
     "selectedLocations": [location for location in maps_selected.split(",") if location],
-    "storageBytes": current_storage_bytes,
+    "storageBytes": nonnegative_int(effective_storage_bytes) if storage_known else 0,
+    "storageKnown": storage_known,
     "totalFiles": total_files,
     "updatedAt": time.time(),
-    "bytesPerSecond": round(bytes_per_second, 2),
+    "bytesPerSecond": 0,
   }
   params_memory.put(MAPS_DOWNLOAD_PROGRESS_PARAM, json.dumps(payload, separators=(",", ":")))
   return payload
 
 
+def _wait_for_map_download_to_stop(sm, last_progress, timeout_seconds=5.0):
+  deadline = time.monotonic() + timeout_seconds
+  while time.monotonic() < deadline:
+    sm.update(1000)
+    if not sm.updated["mapdExtendedOut"]:
+      continue
+
+    last_progress = sm["mapdExtendedOut"].downloadProgress
+    if not last_progress.active:
+      return last_progress, True
+  return last_progress, False
+
+
 def update_maps(now, params, params_memory, manual_update=False):
+  size_cache = _get_maps_storage_cache(params)
+  if not size_cache.storage_known:
+    _reconcile_maps_storage(params, size_cache)
+  baseline_storage_bytes = size_cache.storage_bytes
+  maps_downloaded = bool(size_cache.maps_present)
+
   maps_selected_raw = params.get("MapsSelected")
   maps_selected = sanitize_selected_locations_csv(maps_selected_raw)
   if not maps_selected:
@@ -348,7 +409,6 @@ def update_maps(now, params, params_memory, manual_update=False):
   is_sunday = now.weekday() == 6
   schedule = normalize_schedule_value(params.get("PreferredSchedule"))
 
-  maps_downloaded = MAPS_PATH.exists() and any(path.is_file() for path in MAPS_PATH.rglob("*"))
   if maps_downloaded and (schedule == 0 or (schedule == 1 and not is_sunday) or (schedule == 2 and not is_first)) and not manual_update:
     return
 
@@ -361,10 +421,8 @@ def update_maps(now, params, params_memory, manual_update=False):
   pm = messaging.PubMaster(["mapdIn"])
   sm = messaging.SubMaster(["mapdExtendedOut"])
 
-  size_cache = _get_map_size_cache(params)
-  cached_entry = size_cache.get(selection_key(maps_selected), {})
-  cached_estimate_bytes = nonnegative_int(cached_entry.get("downloadBytes", 0)) if isinstance(cached_entry, dict) else 0
-  baseline_storage_bytes = storage_bytes(MAPS_PATH)
+  selected_key = selection_key(maps_selected)
+  cached_estimate_bytes = size_cache.selection_estimate_bytes(selected_key)
   started_at = time.monotonic()
   _publish_maps_progress(
     params_memory,
@@ -393,16 +451,25 @@ def update_maps(now, params, params_memory, manual_update=False):
       msg.mapdIn.type = 27
       pm.send("mapdIn", msg)
 
+      last_progress, stopped = _wait_for_map_download_to_stop(sm, last_progress)
+      final_storage = None
+      if stopped:
+        final_storage = _reconcile_maps_storage(params, size_cache)
+      else:
+        size_cache.mark_unknown()
+        _save_maps_storage_cache(params, size_cache)
+
       _publish_maps_progress(
         params_memory,
         maps_selected,
-        baseline_storage_bytes,
+        baseline_storage_bytes if stopped else None,
         started_at,
         progress=last_progress,
         active=False,
         cancelled=True,
         phase="cancelled",
         cached_estimate_bytes=cached_estimate_bytes,
+        current_storage_bytes=final_storage,
       )
       params_memory.remove("CancelDownloadMaps")
       params_memory.remove("DownloadMaps")
@@ -428,7 +495,15 @@ def update_maps(now, params, params_memory, manual_update=False):
       if not progress.active and started:
         break
 
-  final_progress = _publish_maps_progress(
+  final_storage = _reconcile_maps_storage(
+    params,
+    size_cache,
+    selected_key=selected_key,
+    baseline_storage_bytes=baseline_storage_bytes,
+    total_files=int(last_progress.totalFiles) if last_progress is not None else 0,
+    updated_at=now.isoformat(),
+  )
+  _publish_maps_progress(
     params_memory,
     maps_selected,
     baseline_storage_bytes,
@@ -438,14 +513,8 @@ def update_maps(now, params, params_memory, manual_update=False):
     completed=True,
     phase="complete",
     cached_estimate_bytes=cached_estimate_bytes,
+    current_storage_bytes=final_storage,
   )
-  if final_progress["downloadedBytes"] > 0:
-    size_cache[selection_key(maps_selected)] = {
-      "downloadBytes": final_progress["downloadedBytes"],
-      "totalFiles": final_progress["totalFiles"],
-      "updatedAt": now.isoformat(),
-    }
-    params.put(MAPS_DOWNLOAD_SIZE_CACHE_PARAM, json.dumps(size_cache, separators=(",", ":")))
 
   params.put("LastMapsUpdate", todays_date)
   params_memory.remove("DownloadMaps")

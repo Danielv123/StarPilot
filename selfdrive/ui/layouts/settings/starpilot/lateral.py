@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from openpilot.system.hardware import HARDWARE
 from openpilot.selfdrive.ui.lib.starpilot_state import starpilot_state
-from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.widgets import DialogResult
 
@@ -52,7 +52,7 @@ class SteeringManagerView(CardHubManagerView):
     super().__init__(controller, [], **kwargs)
 
   def _build_cards(self):
-    return [
+    cards = [
       {
         "title": tr("Steering Behavior"),
         "desc": tr("Configure Always On Lateral (AOL), pause speed thresholds, and turn signal behaviors."),
@@ -72,6 +72,7 @@ class SteeringManagerView(CardHubManagerView):
         "on_click": lambda: self._controller._navigate_to("advanced"),
       },
     ]
+    return cards
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -196,7 +197,8 @@ class StarPilotLateralLayout(_SettingsPage):
       ),
       SettingRow(
         "LaneChangeCloseGap", "toggle", tr_noop("Close Gap On Lane Change"),
-        subtitle=tr_noop("Allows for a temporary shorter follow distance behind lead so that openpilot merges smoothly out of current lane, it will allow car to accelerate as it changes lanes."),
+        subtitle=tr_noop("Allows for a temporary shorter follow distance behind lead so that openpilot merges smoothly " +
+                         "out of current lane, it will allow car to accelerate as it changes lanes."),
         get_state=lambda: p.get_bool("LaneChangeCloseGap"),
         set_state=lambda s: p.put_bool("LaneChangeCloseGap", s),
         visible=lc_on,
@@ -283,8 +285,8 @@ class StarPilotLateralLayout(_SettingsPage):
       SettingRow(
         "SteerDelay", "value", tr_noop("Actuator Delay"),
         subtitle=tr_noop("Exact full delay between steering command and vehicle response."),
-        get_value=lambda: f"{p.get_float('SteerDelay'):.2f}s",
-        on_click=lambda: self._show_slider("SteerDelay", 0.01, 1.0, step=0.01, unit="s", value_type="float"),
+        get_value=lambda: f"{p.get_float('SteerDelay'):.3f}s",
+        on_click=lambda: self._show_slider("SteerDelay", 0.01, 1.0, step=0.001, unit="s", value_type="float"),
         enabled=lambda: not p.get_bool("UseAutoSteerDelay"),
         disabled_label=tr_noop("Disabled while auto-learned delay is enabled."),
         visible=lambda: alt_on() and cs.steerActuatorDelay != 0,
@@ -314,7 +316,8 @@ class StarPilotLateralLayout(_SettingsPage):
         "SteerLatAccel", "value", tr_noop("Lateral Acceleration"),
         subtitle=tr_noop("Maps steering torque to turning response."),
         get_value=lambda: f"{p.get_float('SteerLatAccel'):.2f}",
-        on_click=lambda: self._show_slider("SteerLatAccel", max(0.01, cs.latAccelFactor) * 0.5, max(0.01, cs.latAccelFactor) * 1.5, step=0.01, value_type="float"),
+        on_click=lambda: self._show_slider("SteerLatAccel", max(0.01, cs.latAccelFactor) * 0.5,
+                                           max(0.01, cs.latAccelFactor) * 1.5, step=0.01, value_type="float"),
         visible=lambda: alt_on() and cs.latAccelFactor != 0 and cs.isTorqueCar and not cs.isAngleCar,
       ),
       SettingRow(

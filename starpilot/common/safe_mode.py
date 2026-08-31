@@ -92,7 +92,6 @@ SAFE_MODE_MANAGED_KEYS = (
   "MapGears",
   "MapAcceleration",
   "MapDeceleration",
-  "ReverseCruise",
   "SetSpeedOffset",
   "WeatherPresets",
   "IncreaseFollowingLowVisibility",
@@ -154,6 +153,8 @@ SAFE_MODE_MANAGED_KEYS = (
   "Offset7",
   "SpeedLimitFiller",
   "VisionSpeedLimitDetection",
+  "VisionSpeedLimitLowLimitFilter",
+  "VisionSpeedLimitLowLimitThreshold",
   "VASMEnabled",
   "CustomPersonalities",
   "TrafficPersonalityProfile",
@@ -191,6 +192,8 @@ SAFE_MODE_MANAGED_KEYS = (
   "ToyotaAutoHold",
   "SubaruSNG",
   "SubaruSNGManualParkingBrake",
+  "SubaruStopStartOff",
+  "SubaruAvhOnAtStartup",
   "VoltSNG",
   "JeepBrakeHold",
   "GMAutoHold",
@@ -208,6 +211,8 @@ SAFE_MODE_FIXED_VALUES = {
   "ExperimentalMode": False,
   "LongitudinalPersonality": int(log.LongitudinalPersonality.relaxed),
   "UseAutoSteerDelay": True,
+  "SubaruStopStartOff": False,
+  "SubaruAvhOnAtStartup": False,
 }
 
 SAFE_MODE_STOCK_PARAM_MAP = {

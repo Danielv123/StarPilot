@@ -14,9 +14,10 @@ from openpilot.system.manager.launch_param_migrations import (
   LAUNCH_PARAM_MIGRATION_MARKER,
   LATERAL_METHOD_REBRAND_MIGRATION_MARKER,
   MARKER_DIRNAME,
+  REVERSE_CRUISE_REMOVAL_MIGRATION_MARKER,
   STANDARD_ACCELERATION_PROFILE,
   SPEED_LIMIT_VISIBILITY_MIGRATION_MARKER,
-  USE_OLD_UI_MIGRATION_MARKER,
+  LEGACY_UI_SELECTION_MIGRATION_MARKER,
   VISION_SPEED_LIMIT_DETECTION_MIGRATION_MARKER,
   apply_launch_param_migrations,
 )
@@ -82,23 +83,6 @@ def test_apply_launch_param_migrations_sets_branch_defaults_once(tmp_path):
   assert params.get_float("SteerKP") == DEFAULT_STEER_KP
   assert params.get_float("SteerKPStock") == DEFAULT_STEER_KP
   assert marker_path(tmp_path, LAUNCH_PARAM_MIGRATION_MARKER).is_file()
-
-
-def test_apply_launch_param_migrations_initializes_use_prebuilt(tmp_path):
-  params = FileBackedFakeParams(tmp_path / "params")
-
-  apply_launch_param_migrations(params)
-
-  assert params.get_bool("UsePrebuilt")
-
-
-def test_apply_launch_param_migrations_does_not_overwrite_use_prebuilt(tmp_path):
-  params = FileBackedFakeParams(tmp_path / "params")
-  params.put_bool("UsePrebuilt", False)
-
-  apply_launch_param_migrations(params)
-
-  assert not params.get_bool("UsePrebuilt")
 
 
 def test_apply_launch_param_migrations_does_not_reapply_after_marker(tmp_path):
@@ -192,6 +176,16 @@ def test_apply_launch_param_migrations_preserves_custom_camera_view(tmp_path):
   apply_launch_param_migrations(params)
 
   assert params.get_int("CameraView") == 0
+
+
+def test_apply_launch_param_migrations_removes_reverse_cruise_param(tmp_path):
+  params = FileBackedFakeParams(tmp_path / "params")
+  params.put_bool("ReverseCruise", True)
+
+  apply_launch_param_migrations(params)
+
+  assert not Path(params.get_param_path("ReverseCruise")).exists()
+  assert marker_path(tmp_path, REVERSE_CRUISE_REMOVAL_MIGRATION_MARKER).is_file()
 
 
 def test_apply_launch_param_migrations_applies_branch_defaults_for_existing_installs(tmp_path):
@@ -297,33 +291,28 @@ def test_apply_launch_param_migrations_preserves_custom_acceleration_profile_wit
   assert params.get_int("AccelerationProfile") == 1
 
 
-def test_apply_launch_param_migrations_defaults_old_ui_off_from_try_raylib_enabled(tmp_path):
+def test_apply_launch_param_migrations_removes_legacy_ui_selection(tmp_path):
   params = FileBackedFakeParams(tmp_path / "params")
-  params.put_bool("TryRaylibUI", True)
-
-  apply_launch_param_migrations(params)
-
-  assert not params.get_bool("UseOldUI")
-  assert marker_path(tmp_path, USE_OLD_UI_MIGRATION_MARKER).is_file()
-
-
-def test_apply_launch_param_migrations_defaults_old_ui_off_from_try_raylib_disabled(tmp_path):
-  params = FileBackedFakeParams(tmp_path / "params")
+  params.put_bool("UseOldUI", True)
   params.put_bool("TryRaylibUI", False)
 
   apply_launch_param_migrations(params)
 
-  assert not params.get_bool("UseOldUI")
-  assert marker_path(tmp_path, USE_OLD_UI_MIGRATION_MARKER).is_file()
+  assert not Path(params.get_param_path("UseOldUI")).exists()
+  assert not Path(params.get_param_path("TryRaylibUI")).exists()
+  assert marker_path(tmp_path, LEGACY_UI_SELECTION_MIGRATION_MARKER).is_file()
 
 
-def test_apply_launch_param_migrations_resets_existing_use_old_ui(tmp_path):
+def test_apply_launch_param_migrations_removes_legacy_ui_selection_once(tmp_path):
   params = FileBackedFakeParams(tmp_path / "params")
-  params.put_bool("UseOldUI", True)
+  marker = marker_path(tmp_path, LEGACY_UI_SELECTION_MIGRATION_MARKER)
 
   apply_launch_param_migrations(params)
+  params.put_bool("UseOldUI", True)
+  marker.touch()
+  apply_launch_param_migrations(params)
 
-  assert not params.get_bool("UseOldUI")
+  assert Path(params.get_param_path("UseOldUI")).exists()
 
 
 def test_apply_launch_param_migrations_preserves_active_lateral_method_trial(tmp_path):

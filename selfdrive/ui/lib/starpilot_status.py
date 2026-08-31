@@ -18,19 +18,34 @@ LONGITUDINAL_ONLY_COLOR = rl.Color(255, 105, 180, 255)
 
 
 def is_longitudinal_only_active(state: UIState) -> bool:
-  """Return true when control is enabled but lateral control is inactive.
+  """Return true when the user has paused lateral while control is enabled.
 
-  Do not use carControl.longActive here: stock-cruise cars intentionally leave
-  that field false while the vehicle's own longitudinal controller is active.
+  carControl.latActive also becomes false when lateral is temporarily unavailable,
+  such as below minimum steer speed, so it does not represent user intent.
   """
-  car_control = state.sm["carControl"]
-  return bool(state.sm["selfdriveState"].enabled and not car_control.latActive)
+  return bool(state.sm["selfdriveState"].enabled and state.sm["starpilotCarState"].pauseLateral)
+
+
+def _override_color_applies(state: UIState) -> bool:
+  """Only gray the status when the active control mode is being overridden."""
+  if state.status != UIStatus.OVERRIDE:
+    return False
+
+  events = state.sm["onroadEvents"]
+  lateral_override = any(getattr(event, "overrideLateral", False) for event in events)
+  longitudinal_override = any(getattr(event, "overrideLongitudinal", False) for event in events)
+
+  if is_longitudinal_only_active(state):
+    return longitudinal_override
+  if state.always_on_lateral_active and not state.sm["selfdriveState"].enabled:
+    return lateral_override
+  return lateral_override or longitudinal_override
 
 
 def get_border_color(state: UIState):
   enabled = state.sm["selfdriveState"].enabled
   lateral_active = enabled or state.always_on_lateral_active
-  if state.status == UIStatus.OVERRIDE:
+  if _override_color_applies(state):
     return OVERRIDE_COLOR
   if is_longitudinal_only_active(state):
     return LONGITUDINAL_ONLY_COLOR
@@ -59,7 +74,7 @@ def get_path_edge_color(state: UIState):
 def get_screen_edge_color(state: UIState):
   enabled = state.sm["selfdriveState"].enabled
   lateral_active = enabled or state.always_on_lateral_active
-  if state.status == UIStatus.OVERRIDE:
+  if _override_color_applies(state):
     return OVERRIDE_COLOR
   if is_longitudinal_only_active(state):
     return LONGITUDINAL_ONLY_COLOR

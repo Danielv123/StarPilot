@@ -1302,9 +1302,9 @@ class WifiManager:
           changes = True
 
         if changes:
-          # Update the connection settings (temporary update)
+          # Persist the connection settings so the unmetered choice survives reconnects.
           conn_addr = DBusAddress(lte_connection_path, bus_name=NM, interface=NM_CONNECTION_IFACE)
-          reply = self._router_main.send_and_get_reply(new_method_call(conn_addr, 'UpdateUnsaved', 'a{sa{sv}}', (settings,)))
+          reply = self._router_main.send_and_get_reply(new_method_call(conn_addr, 'Update', 'a{sa{sv}}', (settings,)))
 
           if reply.header.message_type == MessageType.error:
             cloudlog.warning(f"Failed to update GSM settings: {reply}")

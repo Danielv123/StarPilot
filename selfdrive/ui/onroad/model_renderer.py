@@ -478,8 +478,6 @@ class ModelRenderer(Widget):
     self._shadow_path.raw_points = np.empty((0, 3), dtype=np.float32)
     self._shadow_path.projected_points = np.empty((0, 2), dtype=np.float32)
 
-    if not self._params.get_bool("TurnShadowPath"):
-      return
     if (sm.recv_frame.get("starpilotTurnShadow", 0) < ui_state.started_frame or
         not sm.valid.get("starpilotTurnShadow", False) or
         not sm.alive.get("starpilotTurnShadow", False)):

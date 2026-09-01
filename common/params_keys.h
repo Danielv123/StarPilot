@@ -491,7 +491,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ModelSortMode", {PERSISTENT, STRING, "alphabetical", "alphabetical", 1}},
     {"ModelToDownload", {CLEAR_ON_MANAGER_START, STRING, "", ""}},
     {"ModelUI", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
-    {"TurnShadowPath", {PERSISTENT, BOOL, "0", "0", 2}},
     {"ModelVersions", {PERSISTENT, STRING, "", "", 1}},
     {"ModelManifestVersion", {PERSISTENT, STRING, "", "", 1}},
     {"NavigationUI", {PERSISTENT, BOOL, "1", "0", 1, SETTINGS_SIMPLE}},

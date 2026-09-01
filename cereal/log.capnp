@@ -2795,7 +2795,7 @@ struct Event {
     customReserved9 @116 :Custom.CustomReserved9;
     starpilotLateralManeuverPlanDEPRECATED @136 :Custom.StarPilotLateralManeuverPlanDEPRECATED;
     starpilotLateralState @137 :Custom.StarPilotLateralState;
-    customReserved12 @138 :Custom.CustomReserved12;
+    starpilotTurnShadow @138 :Custom.StarPilotTurnShadow;
     customReserved13 @139 :Custom.CustomReserved13;
     customReserved14 @140 :Custom.CustomReserved14;
     customReserved15 @141 :Custom.CustomReserved15;

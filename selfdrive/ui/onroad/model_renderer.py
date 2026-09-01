@@ -79,6 +79,7 @@ class ModelRenderer(Widget):
 
     # Initialize ModelPoints objects
     self._path = ModelPoints()
+    self._shadow_path = ModelPoints()
     self._lane_lines = [ModelPoints() for _ in range(4)]
     self._road_edges = [ModelPoints() for _ in range(2)]
     self._acceleration_x = np.empty((0,), dtype=np.float32)
@@ -170,6 +171,8 @@ class ModelRenderer(Widget):
     # Draw elements
     self._draw_lane_lines()
     self._draw_path(sm)
+    self._update_shadow_path(sm, model)
+    self._draw_shadow_path()
 
     if render_lead_indicator and radar_state:
       self._draw_lead_indicator(radar_state)
@@ -469,6 +472,48 @@ class ModelRenderer(Widget):
         stops=[0.0, 0.5, 1.0],
       )
       draw_polygon(self._rect, self._path.projected_points, gradient=gradient)
+
+  def _update_shadow_path(self, sm, model):
+    """Project a fresh, active diagnostic path; fail closed on any mismatch."""
+    self._shadow_path.raw_points = np.empty((0, 3), dtype=np.float32)
+    self._shadow_path.projected_points = np.empty((0, 2), dtype=np.float32)
+
+    if not self._params.get_bool("TurnShadowPath"):
+      return
+    if (sm.recv_frame.get("starpilotTurnShadow", 0) < ui_state.started_frame or
+        not sm.valid.get("starpilotTurnShadow", False) or
+        not sm.alive.get("starpilotTurnShadow", False)):
+      return
+
+    shadow = sm["starpilotTurnShadow"]
+    if not shadow.valid or not shadow.active:
+      return
+    if abs(int(shadow.frameId) - int(model.frameId)) > 2:
+      return
+
+    path_x = np.asarray(shadow.pathX, dtype=np.float32)
+    path_y = np.asarray(shadow.pathY, dtype=np.float32)
+    path_z = np.asarray(shadow.pathZ, dtype=np.float32)
+    path_t = np.asarray(shadow.pathT, dtype=np.float32)
+    if not (path_x.shape == path_y.shape == path_z.shape == path_t.shape == (33,)):
+      return
+
+    visible = np.isfinite(path_t) & (path_t >= 0.0) & (path_t <= 5.0)
+    points = np.column_stack((path_x[visible], path_y[visible], path_z[visible]))
+    if points.shape[0] < 2 or not np.isfinite(points).all():
+      return
+    if np.any(np.diff(points[:, 0]) < 0.0):
+      return
+
+    max_distance = float(points[-1, 0])
+    self._shadow_path.raw_points = points
+    self._shadow_path.projected_points = self._map_line_to_polygon(
+      points, 0.06, self._path_offset_z, points.shape[0] - 1, max_distance, allow_invert=False
+    )
+
+  def _draw_shadow_path(self):
+    if self._shadow_path.projected_points.size:
+      draw_polygon(self._rect, self._shadow_path.projected_points, rl.Color(0, 220, 255, 190))
 
   def _draw_lead_indicator(self, radar_state):
     # Draw lead vehicles if available

@@ -177,6 +177,11 @@ class StarPilotAppearanceLayout(_SettingsPage):
 
         # ═══ 1. Model & Path Visualization ═══
         self._model_rows = [
+            SettingRow("TurnShadowPath", "toggle", tr_noop("Personalized Shadow Path"),
+                       subtitle=tr_noop("Show the diagnostic personalized turn path alongside the normal path. Visualization only; steering is unchanged."),
+                       get_state=lambda: self._params.get_bool("TurnShadowPath"),
+                       set_state=lambda s: self._params.put_bool("TurnShadowPath", s),
+                       visible=model_on),
             SettingRow("DynamicPathWidth", "toggle", tr_noop("Dynamic Path"),
                        subtitle="",
                        get_state=lambda: self._params.get_bool("DynamicPathWidth"),

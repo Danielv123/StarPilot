@@ -118,6 +118,7 @@ _services: dict[str, tuple] = {
   "starpilotPlan": (True, 20., 10),
   "starpilotRadarState": (True, 20., 5),
   "starpilotSelfdriveState": (True, 100., 10),
+  "starpilotTurnShadow": (True, 20.),
   "mapdExtendedOut": (True, 1., 1, QueueSize.MEDIUM),
   "mapdIn": (True, 1., 1, QueueSize.MEDIUM),
   "mapdOut": (True, 20., 20, QueueSize.MEDIUM),

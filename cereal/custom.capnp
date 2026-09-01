@@ -311,7 +311,21 @@ struct StarPilotLateralState @0xc2243c65e0340384 {
   unwindDetected @7 :Bool;
 }
 
-struct CustomReserved12 @0x9ccdc8676701b412 {
+struct StarPilotTurnShadow @0x9ccdc8676701b412 {
+  frameId @0 :UInt32;
+  timestampEof @1 :UInt64;
+  valid @2 :Bool;
+  active @3 :Bool;
+  inferenceTimeMs @4 :Float32;
+  maxAbsResidual @5 :Float32;
+  residualScale @6 :Float32;
+  modelSha256 @7 :Text;
+  artifactSha256 @8 :Text;
+  status @9 :Text;
+  pathX @10 :List(Float32);
+  pathY @11 :List(Float32);
+  pathZ @12 :List(Float32);
+  pathT @13 :List(Float32);
 }
 
 struct CustomReserved13 @0xcd96dafb67a082d0 {

@@ -97,6 +97,7 @@ static std::map<std::string, service> services = {
   { "starpilotPlan", {"starpilotPlan", true, 20.000000, 10, 256000}},
   { "starpilotRadarState", {"starpilotRadarState", true, 20.000000, 5, 256000}},
   { "starpilotSelfdriveState", {"starpilotSelfdriveState", true, 100.000000, 10, 256000}},
+  { "starpilotTurnShadow", {"starpilotTurnShadow", true, 20.000000, -1, 256000}},
   { "mapdExtendedOut", {"mapdExtendedOut", true, 1.000000, 1, 2097152}},
   { "mapdIn", {"mapdIn", true, 1.000000, 1, 2097152}},
   { "mapdOut", {"mapdOut", true, 20.000000, 20, 2097152}},

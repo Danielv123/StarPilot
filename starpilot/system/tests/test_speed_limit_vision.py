@@ -1,4 +1,5 @@
 from collections import deque
+from types import SimpleNamespace
 import gc
 import weakref
 
@@ -115,6 +116,35 @@ def test_debug_storage_failure_does_not_crash_detection(monkeypatch):
 )
 def test_memory_pressure_level(available_kb, usage_percent, expected):
   assert slv.memory_pressure_level(available_kb, usage_percent) == expected
+
+
+@pytest.mark.parametrize(
+  ("available_mib", "usage_percent", "previous", "expected"),
+  (
+    (513, 80, "normal", "normal"),
+    (512, 80, "normal", "pressure"),
+    (256, 80, "normal", "critical"),
+    (233, 90, "normal", "critical"),
+    (600, 80, "critical", "pressure"),
+    (767, 80, "pressure", "pressure"),
+    (768, 82, "critical", "normal"),
+    (768, 83, "critical", "pressure"),
+    (1024, 94, "normal", "critical"),
+  ),
+)
+def test_memory_pressure_converts_proclog_bytes(available_mib, usage_percent, previous, expected):
+  class Messages(dict):
+    valid = {"procLog": True, "deviceState": True}
+
+  daemon = SpeedLimitVisionDaemon.__new__(SpeedLimitVisionDaemon)
+  daemon.memory_pressure_state = previous
+  daemon.sm = Messages(
+    procLog=SimpleNamespace(mem=SimpleNamespace(available=available_mib * 1024 * 1024)),
+    deviceState=SimpleNamespace(memoryUsagePercent=usage_percent),
+  )
+
+  assert daemon._update_memory_pressure() == expected
+  assert daemon.last_memory_available_kb == available_mib * 1024
 
 
 def test_inference_interval_backs_off_after_expensive_inference():

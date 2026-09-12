@@ -36,7 +36,7 @@ type fileMutation struct {
 
 func Open(path string) (*Store, error) {
 	store := &Store{path: path, data: state.EmptyJournal()}
-	raw, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return nil, fmt.Errorf("create journal directory: %w", err)
@@ -49,8 +49,13 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read journal: %w", err)
 	}
-	if err := json.Unmarshal(raw, &store.data); err != nil {
-		return nil, fmt.Errorf("parse journal %s: %w", path, err)
+	decodeErr := decodeJournal(file, &store.data)
+	closeErr := file.Close()
+	if decodeErr != nil {
+		return nil, fmt.Errorf("parse journal %s: %w", path, decodeErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close journal: %w", closeErr)
 	}
 	store.data.Normalize()
 	if err := store.replayFileMutations(); err != nil {
@@ -492,10 +497,6 @@ func persist(path string, data state.Journal) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create journal directory: %w", err)
 	}
-	encoded, err := json.Marshal(data)
-	if err != nil {
-		return fmt.Errorf("encode journal: %w", err)
-	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".journal-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temporary journal: %w", err)
@@ -506,7 +507,7 @@ func persist(path string, data state.Journal) error {
 		tmp.Close()
 		return fmt.Errorf("chmod temporary journal: %w", err)
 	}
-	if _, err := tmp.Write(encoded); err != nil {
+	if err := encodeJournal(tmp, &data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write temporary journal: %w", err)
 	}

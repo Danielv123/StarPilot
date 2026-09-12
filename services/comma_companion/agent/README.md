@@ -6,6 +6,40 @@ binary with no StarPilot or openpilot imports. It lives under
 and makes outbound HTTPS requests only. A non-blocking process lock prevents
 two Linux instances from writing the journal or spool concurrently.
 
+## Journal memory and local profiling
+
+Journal snapshots are read and written one map entry at a time. This avoids
+holding a second complete JSON document alongside decoded history, and avoids
+the full-document allocation when checkpointing. The version-4 schema, atomic
+replace/fsync behavior, WAL replay and deep-copy isolation remain unchanged;
+historical manifests are retained. Decoded history still consumes memory, so
+this is not a constant-memory archive store.
+
+The opt-in `TestJournalMemoryProfile` uses `COMMA_JOURNAL_BENCHMARK` as a
+read-only source, copies it to a temporary directory, and measures opening,
+five updates, checkpointing and reopening. Run it with `GOMEMLIMIT=160MiB`:
+
+```sh
+COMMA_JOURNAL_BENCHMARK=/path/to/copied-journal.json GOMEMLIMIT=160MiB \
+  go test ./internal/journal -run '^TestJournalMemoryProfile$' -v -count=1
+```
+
+`TestAgentMemoryProfile` additionally exercises agent startup reconciliation,
+command recovery, scans and heartbeat generation. It requires
+`COMMA_BENCHMARK_ISOLATED=1` and must run in a disposable container with no
+device/archive mounts or external network. It uses no real credentials and
+does not start upload or command loops. Compile the test binary first, then
+run it with a 256-MiB memory limit, swap disabled and `GOMEMLIMIT=160MiB`.
+Do not set this isolation flag on the comma itself.
+
+On a copied 64-MiB journal with 1,591 route inventories, the original agent
+was OOM-killed during startup under that limit. The streaming version
+completed startup, scans and checkpointing with a 153-MiB peak RSS and no
+OOM kills in the local Linux simulation. The journal-only Windows test
+reduced peak Go-managed memory from 253 to 149 MiB and cumulative allocations
+from 1,635 to 384 MiB. These are local reproduction results, not an on-road
+memory guarantee; cgroup totals also include reclaimable file cache.
+
 ## Safety and retention model
 
 - A file is never queued while its segment has a `.lock`.

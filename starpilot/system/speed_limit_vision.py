@@ -908,7 +908,7 @@ class SpeedLimitVisionDaemon:
     if self.sm is not None:
       if self.sm.valid.get("procLog", False):
         try:
-          available_kb = int(self.sm["procLog"].mem.available)
+          available_kb = int(self.sm["procLog"].mem.available) // 1024
         except (AttributeError, TypeError, ValueError):
           available_kb = None
       if self.sm.valid.get("deviceState", False):

@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comma.danielv.no/schemas/media-job-v1.json",
+  "title": "Comma Companion media encode job",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job_id", "input", "outputs"],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "camera", "kind", "input_format", "segment_num"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute local path resolved by the backend under the immutable object root."
+        },
+        "camera": {
+          "enum": ["road", "wide", "driver", "qcamera", "unknown"]
+        },
+        "kind": {"type": "string", "minLength": 1},
+        "input_format": {
+          "enum": ["raw_hevc", "mpegts"],
+          "description": "Backend-derived from the exact canonical artifact kind/name; never client-selected."
+        },
+        "artifact_id": {"type": "string", "minLength": 1},
+        "expected_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "segment_num": {"type": "integer", "minimum": 0}
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["video_path", "metadata_path"],
+      "properties": {
+        "video_path": {
+          "type": "string",
+          "pattern": "\\.webm$",
+          "description": "Absolute local path under the configured derived-media root."
+        },
+        "metadata_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute local path under the configured derived-media root."
+        },
+        "poster_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute local path under the configured derived-media root."
+        },
+        "thumbnails_dir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute local path under the configured derived-media root."
+        },
+        "frame_index_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute local path under the configured derived-media root."
+        }
+      }
+    },
+    "encode": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "encoder": {"const": "libsvtav1", "default": "libsvtav1"},
+        "preset": {"type": "integer", "minimum": 0, "maximum": 13, "default": 10},
+        "crf": {"type": "integer", "minimum": 0, "maximum": 63, "default": 38},
+        "logical_processors": {"type": "integer", "minimum": 1, "maximum": 256, "default": 2},
+        "pixel_format": {"const": "yuv420p", "default": "yuv420p"},
+        "raw_hevc_frame_rate": {"type": "integer", "minimum": 1, "maximum": 240, "default": 20},
+        "keyframe_interval_seconds": {"type": "integer", "minimum": 1, "maximum": 60, "default": 4},
+        "thumbnail_count": {"type": "integer", "minimum": 0, "maximum": 100, "default": 6},
+        "thumbnail_width": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 480},
+        "preserve_audio": {"type": "boolean", "default": true},
+        "audio_bitrate_kbps": {"type": "integer", "minimum": 16, "maximum": 128, "default": 32},
+        "overwrite": {"const": false, "default": false}
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeout_seconds": {"type": "integer", "minimum": 1, "default": 14400},
+        "minimum_free_bytes": {"type": "integer", "minimum": 0, "default": 2147483648},
+        "working_space_multiplier": {"type": "number", "minimum": 1, "maximum": 10, "default": 1.25},
+        "cancel_file": {"type": "string", "minLength": 1}
+      }
+    },
+    "time_mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "artifact_id": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "retain_raw": {
+      "type": "boolean",
+      "default": true
+    }
+  }
+}

@@ -1,0 +1,1004 @@
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from openpilot.tools.tuning import train_lateral_plant_model as plant_data
+from openpilot.tools.tuning import train_ioniq5_nnff_neural_plant as nnff_policy
+from openpilot.tools.tuning import train_neural_lateral_plant as neural_plant
+from openpilot.tools.tuning import compare_neural_lateral_plants as compare_plants
+
+
+def synthetic_trajectory(rows: int = 500) -> plant_data.Trajectory:
+  times = np.arange(rows, dtype=np.float64) * 0.01
+  values = {
+    name: np.zeros(rows, dtype=np.float32)
+    for name in (*plant_data.BASE_FEATURES, *plant_data.DIAGNOSTIC_FIELDS)
+  }
+  values["lat_active"][:] = 1.0
+  values["sample_valid"][:] = 1.0
+  values["v_ego"][:] = 20.0
+  values["applied_torque"] = np.linspace(-0.5, 0.5, rows, dtype=np.float32)
+  values["actual_lateral_accel"] = 0.8 * values["applied_torque"]
+  values["steering_angle_deg"] = 10.0 * values["applied_torque"]
+  values["signed_steering_rate_deg_s"][1:] = np.diff(values["steering_angle_deg"]) / 0.01
+  values["steering_rate_deg"] = np.abs(values["signed_steering_rate_deg_s"])
+  values["steering_torque_eps"] = 100.0 * values["applied_torque"]
+  return plant_data.Trajectory(
+    segment="00000100--fixture--0",
+    route="00000100--fixture",
+    brand="hyundai",
+    car_fingerprint="HYUNDAI_IONIQ_5",
+    times=times,
+    values=values,
+    lateral_active_rows=rows,
+    driver_overlay_rows=0,
+  )
+
+
+def test_baseline_parameter_count_matches_previous_surrogate() -> None:
+  config = neural_plant.INITIAL_CANDIDATES[0]
+  assert neural_plant.parameter_count(neural_plant.build_model(config)) == 37_444
+
+
+def test_dense_candidates_expand_window_and_capacity() -> None:
+  baseline = neural_plant.INITIAL_CANDIDATES[0]
+  dense = next(candidate for candidate in neural_plant.INITIAL_CANDIDATES if candidate.name == "dense_2s_large_mlp")
+  assert dense.sample_period_s < baseline.sample_period_s
+  assert dense.history_s > baseline.history_s
+  assert neural_plant.parameter_count(neural_plant.build_model(dense)) > neural_plant.parameter_count(
+    neural_plant.build_model(baseline)
+  )
+
+
+def test_mlp_applies_configured_dropout() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16, 16), dropout=0.25)
+  model = neural_plant.build_model(config)
+  assert sum(isinstance(module, torch.nn.Dropout) for module in model.modules()) == 2
+
+
+def test_gru_rejects_multiple_hidden_sizes() -> None:
+  with pytest.raises(ValueError, match="exactly one hidden size"):
+    neural_plant.ModelConfig("fixture", "gru", 2, 10, (32, 16))
+
+
+def test_temporal_sweep_varies_interval_and_history_at_fixed_capacity() -> None:
+  settings = {
+    (candidate.sample_step, round(candidate.history_s, 1))
+    for candidate in neural_plant.TEMPORAL_CANDIDATES
+  }
+  assert settings == {
+    (sample_step, history_seconds)
+    for sample_step in (1, 2, 5)
+    for history_seconds in (0.5, 1.0, 1.5, 2.0, 3.0)
+  }
+  parameter_counts = {
+    neural_plant.parameter_count(neural_plant.build_model(candidate))
+    for candidate in neural_plant.TEMPORAL_CANDIDATES
+  }
+  assert len(parameter_counts) == 1
+
+
+def test_architecture_sweep_includes_controls_and_sequence_families() -> None:
+  families = {candidate.family for candidate in neural_plant.ARCHITECTURE_CANDIDATES}
+  assert families == {"mlp", "gru", "tcn", "transformer"}
+  assert any(candidate.sample_step == 2 for candidate in neural_plant.ARCHITECTURE_CANDIDATES)
+  assert all(candidate.history_s == 2.0 for candidate in neural_plant.ARCHITECTURE_CANDIDATES if candidate.sample_step == 1)
+
+
+def test_sequence_architectures_use_memory_safe_evaluation_batches() -> None:
+  transformer = next(
+    candidate for candidate in neural_plant.ARCHITECTURE_CANDIDATES
+    if candidate.family == "transformer"
+  )
+  gru = next(candidate for candidate in neural_plant.ARCHITECTURE_CANDIDATES if candidate.family == "gru")
+  assert neural_plant.evaluation_batch_size(transformer) < neural_plant.evaluation_batch_size(gru)
+
+
+@pytest.mark.parametrize("family", ("tcn", "transformer"))
+def test_sequence_architectures_return_state_delta(family: str) -> None:
+  config = neural_plant.ModelConfig(
+    "fixture",
+    family,
+    sample_step=2,
+    history_steps=20,
+    hidden_sizes=(32,),
+    temporal_layers=2,
+    attention_heads=4,
+    feedforward_size=64,
+  )
+  model = neural_plant.build_model(config)
+  inputs = torch.zeros((3, config.input_size))
+  assert model(inputs).shape == (3, len(plant_data.STATE_FEATURES))
+
+
+def test_build_windows_preserves_current_first_history() -> None:
+  trajectory = synthetic_trajectory()
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 20, (32,))
+  windows = neural_plant.build_windows(
+    [trajectory], {trajectory.route}, config, rollout_steps=10, cap=50, seed=1,
+  )
+  assert windows.history.shape == (50, 20, len(plant_data.BASE_FEATURES))
+  assert windows.future_base.shape == (50, 10, len(plant_data.BASE_FEATURES))
+  torque_index = plant_data.BASE_FEATURES.index("applied_torque")
+  assert np.all(windows.history[:, 0, torque_index] >= windows.history[:, 1, torque_index])
+
+
+def test_search_candidates_use_shared_physical_sources() -> None:
+  trajectory = synthetic_trajectory()
+  dense = neural_plant.ModelConfig("dense", "gru", 1, 20, (8,), dropout=0.0)
+  sparse = neural_plant.ModelConfig("sparse", "gru", 2, 10, (8,), dropout=0.0)
+  configs = (dense, sparse)
+  source_keys = neural_plant.sampled_source_keys(
+    neural_plant.common_source_keys(
+      [trajectory], {trajectory.route}, configs, rollout_seconds=0.2,
+    ),
+    cap=30,
+    seed=5,
+  )
+  torque_index = plant_data.BASE_FEATURES.index("applied_torque")
+  current_torque = []
+  for config in configs:
+    rollout_steps = round(0.2 / config.sample_period_s)
+    windows = neural_plant.build_windows(
+      [trajectory], {trajectory.route}, config, rollout_steps,
+      cap=None, seed=5, source_keys=source_keys,
+    )
+    assert len(windows) == 30
+    current_torque.append(windows.history[:, 0, torque_index])
+  assert np.array_equal(current_torque[0], current_torque[1])
+
+
+def test_resampling_uses_a_causal_time_grid() -> None:
+  trajectory = synthetic_trajectory(4)
+  trajectory.times = np.asarray([0.001, 0.011, 0.022, 0.031], dtype=np.float64)
+  trajectory.values["applied_torque"] = np.arange(4, dtype=np.float32)
+  times, values = neural_plant.resampled(trajectory, sample_step=1)
+  assert np.allclose(times, [0.01, 0.02, 0.03])
+  # Each grid point uses the latest source at or before that point, never the
+  # closer future source.
+  assert values["applied_torque"].tolist() == [0.0, 1.0, 2.0]
+  assert values["sample_valid"].tolist() == [1.0, 1.0, 1.0]
+  assert values["source_age_ms"].tolist() == pytest.approx([9.0, 9.0, 8.0])
+  assert values["source_time_error_ms"].tolist() == pytest.approx(
+    [-9.0, -9.0, -8.0],
+  )
+  assert np.all(values["source_age_ms"] >= 0)
+  assert np.array_equal(
+    values["source_time_error_ms"], -values["source_age_ms"],
+  )
+
+
+def test_joined_service_age_is_measured_from_absolute_grid_tick() -> None:
+  trajectory = synthetic_trajectory(4)
+  trajectory.times = np.asarray([0.001, 0.011, 0.022, 0.031], dtype=np.float64)
+  trajectory.values["car_output_age_ms"][0] = 30.0
+
+  _, values = neural_plant.resampled(trajectory, sample_step=1)
+
+  # The selected carState is 9 ms old at the first tick, so its 30 ms-old
+  # carOutput is 39 ms old at that absolute tick and must be invalid.
+  assert values["sample_valid"].tolist() == [0.0, 1.0, 1.0]
+
+
+def test_resampling_rejects_decreasing_source_timestamps() -> None:
+  trajectory = synthetic_trajectory(4)
+  trajectory.times = np.asarray([0.0, 0.02, 0.01, 0.03], dtype=np.float64)
+  with pytest.raises(ValueError, match="decreasing source timestamps"):
+    neural_plant.resampled(trajectory, sample_step=1)
+
+
+def test_eligible_sources_reject_nonpositive_source_gaps() -> None:
+  trajectory = synthetic_trajectory(100)
+  trajectory.times[40] = trajectory.times[39]
+  config = neural_plant.ModelConfig(
+    "fixture", "gru", 1, 10, (8,), dropout=0.0,
+  )
+  sources, _, values = neural_plant.eligible_sources(
+    trajectory, config, rollout_steps=5,
+  )
+  invalid = np.flatnonzero(values["sample_valid"] < 0.5)
+  assert invalid.tolist() == [39, 40]
+  for source in sources:
+    window = slice(source - config.history_steps + 1, source + 6)
+    assert values["sample_valid"][window].min() > 0.5
+
+
+def test_eligible_sources_include_final_complete_window() -> None:
+  trajectory = synthetic_trajectory(40)
+  config = neural_plant.ModelConfig(
+    "fixture", "gru", 1, 20, (8,), dropout=0.0,
+  )
+  rollout_steps = 10
+  sources, times, _ = neural_plant.eligible_sources(
+    trajectory, config, rollout_steps,
+  )
+  assert sources[-1] == len(times) - rollout_steps - 1
+
+
+def test_atomic_cache_dump_replaces_complete_file(tmp_path) -> None:
+  path = tmp_path / "trajectory.joblib"
+  neural_plant.atomic_joblib_dump({"version": 1}, path)
+  neural_plant.atomic_joblib_dump({"version": 2}, path)
+  assert neural_plant.load(path) == {"version": 2}
+  assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_unreadable_or_legacy_trajectory_cache_is_a_miss(tmp_path) -> None:
+  path = tmp_path / "trajectory.joblib"
+  path.write_bytes(b"truncated")
+  assert neural_plant.matching_trajectory_cache(
+    path,
+    {"version": 1},
+  ) is None
+
+  neural_plant.atomic_joblib_dump(
+    {
+      "cache_key": {"version": 1},
+      "trajectories": [],
+    },
+    path,
+  )
+  assert neural_plant.matching_trajectory_cache(
+    path,
+    {"version": 1},
+  ) is None
+
+
+def test_recursive_training_horizon_is_clamped_to_available_rollout() -> None:
+  config = neural_plant.ModelConfig("fixture", "gru", 2, 10, (8,), dropout=0.0)
+  assert neural_plant.effective_rollout_train_steps(5.0, config, rollout_steps=100) == 100
+  assert neural_plant.effective_rollout_train_steps(0.5, config, rollout_steps=100) == 25
+
+
+def test_rollout_recomputes_unsigned_rate_from_predicted_signed_rate() -> None:
+  class RecordingModel(torch.nn.Module):
+    def __init__(self) -> None:
+      super().__init__()
+      self.inputs: list[torch.Tensor] = []
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+      self.inputs.append(values.detach().clone())
+      return values.new_zeros((len(values), len(plant_data.STATE_FEATURES)))
+
+  config = neural_plant.ModelConfig("fixture", "gru", 1, 2, (8,))
+  model = RecordingModel()
+  history = torch.zeros((1, config.history_steps, len(plant_data.BASE_FEATURES)))
+  history[:, 0, neural_plant.SIGNED_STEERING_RATE_INDEX] = -3.0
+  history[:, 0, neural_plant.STEERING_RATE_INDEX] = 3.0
+  future = torch.zeros((1, 2, len(plant_data.BASE_FEATURES)))
+  future[:, :, neural_plant.STEERING_RATE_INDEX] = 999.0
+  stats = {
+    "x_mean": torch.zeros(config.input_size),
+    "x_std": torch.ones(config.input_size),
+    "y_mean": torch.zeros(len(plant_data.STATE_FEATURES)),
+    "y_std": torch.ones(len(plant_data.STATE_FEATURES)),
+    "state_std": torch.ones(len(plant_data.STATE_FEATURES)),
+  }
+  neural_plant.rollout(model, history, future, stats, steps=2)
+  assert model.inputs[1][0, neural_plant.STEERING_RATE_INDEX] == 3.0
+
+
+def test_rollout_with_derived_rate_backpropagates() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 1, 2, (8,), dropout=0.0)
+  model = neural_plant.build_model(config)
+  history = torch.zeros((2, config.history_steps, len(plant_data.BASE_FEATURES)))
+  future = torch.zeros((2, 3, len(plant_data.BASE_FEATURES)))
+  stats = {
+    "x_mean": torch.zeros(config.input_size),
+    "x_std": torch.ones(config.input_size),
+    "y_mean": torch.zeros(len(plant_data.STATE_FEATURES)),
+    "y_std": torch.ones(len(plant_data.STATE_FEATURES)),
+    "state_std": torch.ones(len(plant_data.STATE_FEATURES)),
+  }
+  neural_plant.rollout(model, history, future, stats, steps=3).sum().backward()
+  assert all(parameter.grad is not None for parameter in model.parameters())
+
+
+def test_early_stopping_subset_is_seeded_and_not_prefix_biased() -> None:
+  first = neural_plant.sampled_indexes(10_000, 5_000, 23)
+  second = neural_plant.sampled_indexes(10_000, 5_000, 23)
+  assert np.array_equal(first, second)
+  assert not np.array_equal(first, np.arange(5_000))
+  assert first.max() >= 5_000
+
+
+def test_high_overlay_routes_are_excluded_before_splitting() -> None:
+  clean = synthetic_trajectory(100)
+  clean.route = "clean"
+  clean.segment = "clean--0"
+  biased = synthetic_trajectory(100)
+  biased.route = "biased"
+  biased.segment = "biased--0"
+  biased.driver_overlay_rows = 51
+  retained, stats, excluded = neural_plant.filter_high_overlay_routes([clean, biased], 0.50)
+  assert excluded == ["biased"]
+  assert stats["biased"]["driver_overlay_fraction"] == 0.51
+  assert {trajectory.route for trajectory in retained} == {"clean"}
+
+
+def test_trajectory_inventory_discovers_supported_rlog_encodings(tmp_path) -> None:
+  for index, filename in enumerate(("rlog", "rlog.zst", "rlog.bz2")):
+    segment = tmp_path / f"segment-{index}"
+    segment.mkdir()
+    (segment / filename).write_bytes(b"fixture")
+  paths, inventory = neural_plant.trajectory_inventory(tmp_path)
+  assert {path.name for path in paths} == {"rlog", "rlog.zst", "rlog.bz2"}
+  assert inventory["rlog_count"] == 3
+
+
+def test_trajectory_inventory_deduplicates_segment_encodings(tmp_path) -> None:
+  segment = tmp_path / "segment"
+  segment.mkdir()
+  for filename in ("rlog", "rlog.zst", "rlog.bz2"):
+    (segment / filename).write_bytes(b"fixture")
+  paths, inventory = neural_plant.trajectory_inventory(tmp_path)
+  assert [path.name for path in paths] == ["rlog"]
+  assert inventory["rlog_count"] == 1
+
+
+def test_corpus_content_manifest_is_counted_and_hashed(tmp_path) -> None:
+  manifest = tmp_path / "corpus.sha256"
+  manifest.write_bytes(b"a  first\nb  second\n")
+  inventory = {"rlog_count": 2}
+
+  neural_plant.record_corpus_content_manifest(inventory, manifest)
+
+  assert inventory["content_manifest_entries"] == 2
+  assert inventory["content_manifest_sha256"] == (
+    "2aab0a152e58acdc96e0d25bdf215d4403bc12ff8250cd175ec2db58d63a260c"
+  )
+  with pytest.raises(ValueError, match="entry count"):
+    neural_plant.record_corpus_content_manifest(
+      {"rlog_count": 3}, manifest,
+    )
+
+
+def test_search_profiles_use_distinct_report_paths(tmp_path) -> None:
+  temporal = SimpleNamespace(output_dir=tmp_path, candidate_file=None, search_profile="temporal")
+  architecture = SimpleNamespace(output_dir=tmp_path, candidate_file=None, search_profile="architecture")
+  assert neural_plant.search_report_path(temporal).name == "temporal_search.json"
+  assert neural_plant.search_report_path(architecture).name == "architecture_search.json"
+
+
+def test_split_report_reuses_search_cohorts(tmp_path) -> None:
+  inventory = {
+    "rlog_count": 3,
+    "rlog_bytes": 30,
+    "newest_mtime_ns": 7,
+    "inventory_manifest_sha256": "manifest",
+    "inventory_manifest_basis": "fixture",
+    "trajectory_extraction": {
+      "version": plant_data.TRAJECTORY_EXTRACTION_VERSION,
+      "source_selection": "fixture",
+    },
+    "route_rejections": [],
+  }
+  report_path = tmp_path / "temporal_search.json"
+  report_path.write_text(json.dumps({
+    "data": {
+      "current": inventory,
+      "train_routes": ["train"],
+      "validation_routes": ["validation"],
+      "holdout_routes": ["holdout"],
+    },
+  }), encoding="utf-8")
+  split = neural_plant.split_from_report(
+    report_path,
+    {"train", "validation", "holdout", "unused"},
+    inventory,
+  )
+  assert split == ({"train"}, {"validation"}, {"holdout"})
+
+  with pytest.raises(
+    ValueError,
+    match="inventory_manifest_sha256",
+  ):
+    neural_plant.split_from_report(
+      report_path,
+      {"train", "validation", "holdout", "unused"},
+      {**inventory, "inventory_manifest_sha256": "different"},
+    )
+
+
+def test_pretraining_note_is_generic_unless_explicitly_supplied() -> None:
+  assert neural_plant.pretraining_note(SimpleNamespace(pretraining_note=None)) == (
+    "Pretraining was not performed by this command."
+  )
+  assert neural_plant.pretraining_note(SimpleNamespace(pretraining_note="Inspected archive.")) == "Inspected archive."
+
+
+def test_holdout_routes_are_never_selected_for_training() -> None:
+  trajectories = [
+    synthetic_trajectory()
+    for _ in range(5)
+  ]
+  routes = [
+    "000000f0--a",
+    "000000f1--b",
+    "000000f2--c",
+    "00000109--holdout-a",
+    "0000010b--holdout-b",
+  ]
+  for trajectory, route in zip(trajectories, routes, strict=True):
+    trajectory.route = route
+    trajectory.segment = route + "--0"
+  training, validation, holdout = neural_plant.split_routes(
+    trajectories, 0.25, ("00000109", "0000010b"), 7,
+  )
+  assert holdout == {"00000109--holdout-a", "0000010b--holdout-b"}
+  assert not training & holdout
+  assert not validation & holdout
+
+
+def test_ensemble_prediction_exposes_disagreement() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16,))
+  first = neural_plant.build_model(config)
+  second = neural_plant.build_model(config)
+  with torch.no_grad():
+    for parameter in first.parameters():
+      parameter.zero_()
+    for parameter in second.parameters():
+      parameter.fill_(0.01)
+  history = torch.zeros((4, config.history_steps, len(plant_data.BASE_FEATURES)))
+  stats = {
+    "x_mean": torch.zeros(config.input_size),
+    "x_std": torch.ones(config.input_size),
+    "y_mean": torch.zeros(len(plant_data.STATE_FEATURES)),
+    "y_std": torch.ones(len(plant_data.STATE_FEATURES)),
+    "state_std": torch.ones(len(plant_data.STATE_FEATURES)),
+  }
+  mean, disagreement = neural_plant.ensemble_predict_delta([first, second], history, stats)
+  assert mean.shape == (4, len(plant_data.STATE_FEATURES))
+  assert torch.all(disagreement > 0)
+
+
+def test_ensemble_rollout_exposes_temporal_disagreement() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16,))
+  first = neural_plant.build_model(config)
+  second = neural_plant.build_model(config)
+  with torch.no_grad():
+    for parameter in first.parameters():
+      parameter.zero_()
+    for parameter in second.parameters():
+      parameter.fill_(0.01)
+  batch_size = 4
+  feature_count = len(plant_data.BASE_FEATURES)
+  state_count = len(plant_data.STATE_FEATURES)
+  history = torch.zeros((batch_size, config.history_steps, feature_count))
+  future = torch.zeros((batch_size, 5, feature_count))
+  stats = {
+    "x_mean": torch.zeros(config.input_size),
+    "x_std": torch.ones(config.input_size),
+    "y_mean": torch.zeros(state_count),
+    "y_std": torch.ones(state_count),
+    "state_std": torch.ones(state_count),
+  }
+  mean, disagreement = neural_plant.ensemble_rollout(
+    [first, second], history, future, stats, steps=5,
+  )
+  assert mean.shape == (batch_size, 5, state_count)
+  assert disagreement.shape == mean.shape
+  assert torch.all(disagreement > 0)
+
+
+def test_ensemble_artifact_round_trip(tmp_path) -> None:
+  config = neural_plant.ModelConfig("fixture", "gru", 2, 10, (16,), gru_layers=2)
+  model = neural_plant.build_model(config)
+  feature_count = len(plant_data.BASE_FEATURES)
+  state_count = len(plant_data.STATE_FEATURES)
+  artifact = {
+    "format_version": neural_plant.FORMAT_VERSION,
+    "config": {
+      "name": config.name,
+      "family": config.family,
+      "sample_step": config.sample_step,
+      "history_steps": config.history_steps,
+      "hidden_sizes": config.hidden_sizes,
+      "gru_layers": config.gru_layers,
+    },
+    "normalization": {
+      "x_mean": np.zeros(config.history_steps * feature_count, dtype=np.float32),
+      "x_std": np.ones(config.history_steps * feature_count, dtype=np.float32),
+      "y_mean": np.zeros(state_count, dtype=np.float32),
+      "y_std": np.ones(state_count, dtype=np.float32),
+      "state_std": np.ones(state_count, dtype=np.float32),
+    },
+    "members": [neural_plant.state_dict_cpu(model)],
+  }
+  artifact_path = tmp_path / "plant.pt"
+  torch.save(artifact, artifact_path)
+  models, stats, payload = neural_plant.load_ensemble_artifact(artifact_path)
+  assert payload["format_version"] == neural_plant.FORMAT_VERSION
+  assert len(models) == 1
+  assert stats["x_mean"].shape == (config.input_size,)
+
+  differentiable_models, _, _ = neural_plant.load_ensemble_artifact(
+    artifact_path, differentiable=True,
+  )
+  assert all(not model.training for model in differentiable_models)
+  assert all(model.gru.training for model in differentiable_models)
+  assert all(model.gru.dropout == 0.0 for model in differentiable_models)
+  assert not any(parameter.requires_grad for model in differentiable_models for parameter in model.parameters())
+  history = torch.zeros(
+    (2, config.history_steps, feature_count),
+    requires_grad=True,
+  )
+  first = neural_plant.predict_delta(
+    differentiable_models[0], history, stats,
+  )
+  second = neural_plant.predict_delta(
+    differentiable_models[0], history, stats,
+  )
+  assert torch.equal(first, second)
+  first.sum().backward()
+  assert history.grad is not None
+
+
+def test_residual_gate_covers_low_speed_and_active_maneuvers() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16,))
+  gate = neural_plant.ResidualGateConfig()
+  history = torch.zeros((4, config.history_steps, len(plant_data.BASE_FEATURES)))
+  speed_index = plant_data.BASE_FEATURES.index("v_ego")
+  angle_index = plant_data.BASE_FEATURES.index("steering_angle_deg")
+  rate_index = plant_data.BASE_FEATURES.index("signed_steering_rate_deg_s")
+  history[:, 0, speed_index] = torch.tensor([2.0, 10.0, 10.0, 10.0])
+  history[2, 0, angle_index] = gate.maneuver_angle_full_deg
+  history[3, 0, rate_index] = gate.maneuver_rate_full_deg_s
+
+  activity = neural_plant.residual_activity_gate(history, gate)
+
+  assert torch.allclose(activity, torch.tensor([1.0, 0.0, 1.0, 1.0]))
+
+
+def test_residual_expert_sampler_keeps_training_regimes_separate() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16,))
+  gate = neural_plant.ResidualGateConfig()
+  history = np.zeros((6, config.history_steps, len(plant_data.BASE_FEATURES)), dtype=np.float32)
+  speed_index = plant_data.BASE_FEATURES.index("v_ego")
+  angle_index = plant_data.BASE_FEATURES.index("steering_angle_deg")
+  history[:, 0, speed_index] = (1.0, 4.0, 6.0, 10.0, 12.0, 20.0)
+  history[3:5, 0, angle_index] = 10.0
+  rng = np.random.default_rng(7)
+
+  low_indexes = neural_plant.residual_stratified_indexes(
+    history, 20, gate, "low_speed", rng,
+  )
+  maneuver_indexes = neural_plant.residual_stratified_indexes(
+    history, 20, gate, "maneuver", rng,
+  )
+
+  assert np.all(history[low_indexes, 0, speed_index] < gate.low_speed_off_above_mps)
+  assert set(maneuver_indexes) <= {3, 4}
+
+
+def test_zero_initialized_residual_matches_base_and_round_trips(tmp_path) -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16,))
+  gate = neural_plant.ResidualGateConfig()
+  model = neural_plant.SpeedGatedResidualPlant(config, gate)
+  feature_count = len(plant_data.BASE_FEATURES)
+  state_count = len(plant_data.STATE_FEATURES)
+  stats = {
+    "x_mean": torch.zeros(config.input_size),
+    "x_std": torch.ones(config.input_size),
+    "y_mean": torch.arange(state_count, dtype=torch.float32),
+    "y_std": torch.ones(state_count),
+    "state_std": torch.ones(state_count),
+  }
+  history = torch.randn((3, config.history_steps, feature_count))
+  history[:, 0, plant_data.BASE_FEATURES.index("v_ego")] = 2.0
+  expected = neural_plant.predict_delta(model.base, history, stats)
+  assert torch.allclose(neural_plant.predict_delta(model, history, stats), expected)
+
+  artifact = {
+    "format_version": neural_plant.FORMAT_VERSION,
+    "model_type": "neural_speed_gated_residual_lateral_plant_ensemble",
+    "config": {
+      "name": config.name,
+      "family": config.family,
+      "sample_step": config.sample_step,
+      "history_steps": config.history_steps,
+      "hidden_sizes": config.hidden_sizes,
+    },
+    "residual_gate": {
+      "low_speed_full_below_mps": gate.low_speed_full_below_mps,
+      "low_speed_off_above_mps": gate.low_speed_off_above_mps,
+      "maneuver_angle_on_deg": gate.maneuver_angle_on_deg,
+      "maneuver_angle_full_deg": gate.maneuver_angle_full_deg,
+      "maneuver_rate_on_deg_s": gate.maneuver_rate_on_deg_s,
+      "maneuver_rate_full_deg_s": gate.maneuver_rate_full_deg_s,
+    },
+    "normalization": {
+      name: value.numpy()
+      for name, value in stats.items()
+    },
+    "members": [neural_plant.state_dict_cpu(model)],
+  }
+  artifact_path = tmp_path / "residual_plant.pt"
+  torch.save(artifact, artifact_path)
+  models, loaded_stats, _ = neural_plant.load_ensemble_artifact(artifact_path)
+  actual = neural_plant.predict_delta(models[0], history, loaded_stats)
+  assert torch.allclose(actual, expected)
+
+
+def test_regime_metrics_separate_unwind_from_ordinary_cruise() -> None:
+  config = neural_plant.ModelConfig("fixture", "mlp", 2, 10, (16,))
+  feature_count = len(plant_data.BASE_FEATURES)
+  state_count = len(plant_data.STATE_FEATURES)
+  history = np.zeros((3, config.history_steps, feature_count), dtype=np.float32)
+  speed_index = plant_data.BASE_FEATURES.index("v_ego")
+  angle_index = plant_data.BASE_FEATURES.index("steering_angle_deg")
+  rate_index = plant_data.BASE_FEATURES.index("signed_steering_rate_deg_s")
+  history[:, 0, speed_index] = (2.0, 11.0, 11.0)
+  history[1, 0, angle_index] = 8.0
+  history[1, 0, rate_index] = -10.0
+  normalized_error = np.ones((3, 5, state_count), dtype=np.float32)
+
+  metrics = neural_plant.normalized_regime_metrics(
+    normalized_error, history, np.ones(state_count, dtype=np.float32),
+  )
+
+  assert metrics["low_speed_below_5mps"]["windows"] == 1
+  assert metrics["unwind_8-15mps"]["windows"] == 1
+  assert metrics["ordinary_cruise_above_5mps"]["windows"] == 1
+
+
+def test_nnff_policy_offsets_preserve_runtime_horizons() -> None:
+  assert nnff_policy.path_offsets(0.05) == (-6, -4, -2, 8, 14, 22, 32)
+  assert nnff_policy.path_offsets(0.01) == (-30, -20, -10, 40, 70, 110, 160)
+
+
+def test_nnff_policy_rollout_scores_response_against_delayed_reference() -> None:
+  class ZeroPolicy(torch.nn.Module):
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+      return torch.zeros((len(values), 1), dtype=values.dtype, device=values.device)
+
+  class ZeroPlant:
+    stats = {"state_std": torch.ones(len(plant_data.STATE_FEATURES))}
+
+    def predict(self, history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+      shape = (len(history), len(plant_data.STATE_FEATURES))
+      zeros = torch.zeros(shape, dtype=history.dtype, device=history.device)
+      return zeros, zeros
+
+  offsets = nnff_policy.path_offsets(0.05)
+  current_index = -min(offsets)
+  rollout_steps = 3
+  history = torch.zeros((1, 2, len(plant_data.BASE_FEATURES)))
+  path = torch.arange(50, dtype=torch.float32)[None, :] / 10.0
+  batch = {
+    "history": history,
+    "path": path,
+    "curvature": torch.zeros_like(path),
+    "jerk": torch.zeros((1, rollout_steps)),
+    "v_ego": torch.full((1, rollout_steps), 10.0),
+    "a_ego": torch.zeros((1, rollout_steps)),
+  }
+  trace = nnff_policy.rollout_policy(
+    ZeroPolicy(), ZeroPlant(),
+    torch.zeros(len(nnff_policy.INPUT_VARS)),
+    torch.ones(len(nnff_policy.INPUT_VARS)),
+    batch, offsets, 0.05, 0.10, 1.5, 0.0, 0.25,
+  )
+
+  expected_reference = path[:, current_index - 1:current_index + 2]
+  assert torch.allclose(trace["errors"], -expected_reference)
+
+
+def test_nnff_policy_interpolates_fractional_response_delay() -> None:
+  values = torch.arange(20, dtype=torch.float32)[None, :]
+  reference = nnff_policy.delayed_reference(
+    values, current_index=6, rollout_steps=3,
+    response_delay_s=torch.tensor(0.075), sample_period_s=0.05,
+  )
+  assert torch.allclose(reference, torch.tensor([[5.5, 6.5, 7.5]]))
+
+
+def test_nnff_policy_can_learn_continuous_response_delay() -> None:
+  values = torch.arange(30, dtype=torch.float32)[None, :]
+  target = nnff_policy.delayed_reference(
+    values, current_index=6, rollout_steps=5,
+    response_delay_s=0.22, sample_period_s=0.05,
+  )
+  response_delay = nnff_policy.LearnedResponseDelay(0.05, 0.0, 0.30)
+  optimizer = torch.optim.Adam([response_delay.raw], lr=0.1)
+  for _ in range(100):
+    prediction = nnff_policy.delayed_reference(
+      values, current_index=6, rollout_steps=5,
+      response_delay_s=response_delay(), sample_period_s=0.05,
+    )
+    loss = (prediction - target).square().mean()
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+  assert float(response_delay().detach()) == pytest.approx(0.22, abs=2e-3)
+
+
+def test_optimizer_step_rejects_nonfinite_gradients() -> None:
+  parameter = torch.nn.Parameter(torch.tensor(1.0))
+  optimizer = torch.optim.SGD([parameter], lr=0.1)
+
+  parameter.grad = torch.tensor(2.0)
+  grad_norm = nnff_policy.optimizer_step_if_finite(optimizer, [parameter], 5.0)
+  assert grad_norm == pytest.approx(2.0)
+  assert float(parameter.detach()) == pytest.approx(0.8)
+
+  parameter.grad = torch.tensor(float("inf"))
+  before = parameter.detach().clone()
+  assert nnff_policy.optimizer_step_if_finite(optimizer, [parameter], 5.0) is None
+  assert torch.equal(parameter.detach(), before)
+  assert parameter.grad is None
+
+
+def test_baseline_stability_excludes_only_nonfinite_windows(monkeypatch) -> None:
+  window_count = 4
+  histories = np.zeros(
+    (window_count, 1, len(plant_data.BASE_FEATURES)), dtype=np.float32,
+  )
+  histories[:, 0, 0] = np.arange(window_count)
+  windows = nnff_policy.PolicyWindows(
+    history=histories,
+    path=np.zeros((window_count, 1), dtype=np.float32),
+    curvature=np.zeros((window_count, 1), dtype=np.float32),
+    jerk=np.zeros((window_count, 1), dtype=np.float32),
+    v_ego=np.ones((window_count, 1), dtype=np.float32),
+    a_ego=np.zeros((window_count, 1), dtype=np.float32),
+    regimes=np.asarray(["steady"] * window_count),
+    segments=[f"segment-{index}" for index in range(window_count)],
+  )
+
+  def fake_rollout(*_args, **_kwargs):
+    batch = _args[4]
+    rows = len(batch["history"])
+    states = torch.zeros((rows, 1, len(plant_data.STATE_FEATURES)))
+    invalid = batch["history"][:, 0, 0] == 2
+    states[invalid] = float("nan")
+    return {
+      "errors": states[:, :, 0],
+      "commands": torch.zeros((rows, 1)),
+      "states": states,
+      "disagreement": torch.zeros_like(states),
+    }
+
+  monkeypatch.setattr(nnff_policy, "rollout_policy", fake_rollout)
+  args = SimpleNamespace(
+    max_policy_validation_windows=window_count,
+    policy_batch_size=window_count,
+    torch_device=torch.device("cpu"),
+    response_delay_s=0.1,
+    command_rate_limit_per_s=1.5,
+    low_speed_angle_assist_max=0.25,
+  )
+  stable, report = nnff_policy.baseline_stable_subset(
+    torch.nn.Identity(), None,
+    torch.zeros(len(nnff_policy.INPUT_VARS)),
+    torch.ones(len(nnff_policy.INPUT_VARS)),
+    windows, args, (0,), 0.01, 23,
+  )
+
+  assert len(stable) == 3
+  assert report["excluded_windows"] == 1
+  assert report["excluded"] == [{"window_index": 2, "segment": "segment-2"}]
+
+
+def test_validation_safety_gate_allows_baseline_at_zero_minimum_improvement() -> None:
+  metrics = {
+    "sharp_turn_in_rmse": 1.0,
+    "turn_in_rmse": 1.0,
+    "center_rmse": 1.0,
+    "unwind_rmse": 1.0,
+    "turn_in_bias": -0.1,
+    "unwind_bias": -0.1,
+    "wobble": 1.0,
+    "slew": 1.0,
+    "uncertainty": 1.0,
+    "intersection_angle_rmse_deg": 1.0,
+    "low_speed_rate_rmse_deg_s": 1.0,
+    "steady_curve_inside_rmse": 1.0,
+    "steady_curve_bias": -0.1,
+  }
+  args = SimpleNamespace(
+    max_turn_in_accel_regression=0.0,
+    max_center_regression=0.0,
+    max_unwind_regression=0.0,
+    max_inside_bias_increase=0.0,
+    max_wobble_regression=0.0,
+    max_slew_regression=0.0,
+    max_uncertainty_regression=0.0,
+    min_intersection_angle_improvement=0.0,
+    max_low_speed_rate_regression=0.0,
+    max_steady_curve_inside_regression=0.0,
+    min_steady_curve_bias_improvement=0.0,
+  )
+
+  checks = nnff_policy.validation_safety_checks(metrics, metrics, args)
+
+  assert all(checks.values())
+  args.min_intersection_angle_improvement = 0.01
+  args.min_steady_curve_bias_improvement = 0.01
+  checks = nnff_policy.validation_safety_checks(metrics, metrics, args)
+  assert not checks["intersection_angle"]
+  assert not checks["steady_curve_bias"]
+
+
+def test_nnff_policy_export_matches_runtime_schema() -> None:
+  report = {
+    "validation": {"optimized": {"rmse": 0.1}},
+    "data": {
+      "train_windows": 100,
+      "validation_windows": 20,
+      "holdout_windows": 30,
+    },
+  }
+  policy = nnff_policy.legacy.FluxPolicy((4,), len(nnff_policy.INPUT_VARS))
+  payload = nnff_policy.export_policy(
+    policy,
+    np.zeros(len(nnff_policy.INPUT_VARS)),
+    np.ones(len(nnff_policy.INPUT_VARS)),
+    report,
+  )
+  assert payload["input_size"] == len(nnff_policy.INPUT_VARS)
+  assert payload["output_size"] == 1
+  assert payload["input_vars"] == list(nnff_policy.INPUT_VARS)
+  assert payload["input_vars"][-1] == "desired_curvature"
+  assert payload["low_speed_angle_assist_gain"] == 0.0
+  assert payload["response_delay_s"] == 0.0
+  assert payload["response_delay_samples"] == 0.0
+
+
+def test_nnff_policy_regime_sampler_balances_rare_turns() -> None:
+  desired = np.asarray([0.0] * 100 + [0.5] * 5 + [0.4] * 10 + [0.4] * 10 + [0.4] * 10)
+  jerk = np.asarray([0.0] * 100 + [0.8] * 5 + [0.2] * 10 + [-0.2] * 10 + [0.0] * 10)
+  speed = np.asarray([20.0] * 100 + [8.0] * 5 + [20.0] * 30)
+  regimes = nnff_policy.classify_regime(desired, jerk, speed)
+  selected = nnff_policy.balanced_indexes(regimes, 100, np.random.default_rng(7))
+  counts = {
+    name: int(np.count_nonzero(regimes[selected] == name))
+    for name in nnff_policy.REGIMES
+  }
+  assert counts == dict.fromkeys(nnff_policy.REGIMES, 20)
+
+
+def test_low_speed_windows_are_retained() -> None:
+  trajectory = synthetic_trajectory()
+  trajectory.values["v_ego"][:] = 1.0
+  config = neural_plant.ModelConfig("fixture", "gru", 1, 20, (8,), dropout=0.0)
+  sources, _, _ = neural_plant.eligible_sources(trajectory, config, rollout_steps=10)
+  assert len(sources) > 0
+
+
+def test_plant_state_weights_change_with_speed() -> None:
+  weights = neural_plant.speed_conditioned_state_weights(torch.tensor([1.0, 20.0]))
+  accel_index = plant_data.STATE_FEATURES.index("actual_lateral_accel")
+  angle_index = plant_data.STATE_FEATURES.index("steering_angle_deg")
+  assert weights[0, angle_index] > weights[1, angle_index]
+  assert weights[0, accel_index] < weights[1, accel_index]
+
+
+def test_speed_sampler_balances_available_buckets() -> None:
+  speeds = np.concatenate([
+    np.full(10, 1.0),
+    np.full(10, 4.0),
+    np.full(10, 6.0),
+    np.full(10, 10.0),
+    np.full(10, 20.0),
+  ])
+  selected = neural_plant.speed_stratified_indexes(speeds, 100, np.random.default_rng(3))
+  counts = np.bincount(neural_plant.speed_bucket_indexes(speeds[selected]), minlength=5)
+  assert counts.tolist() == [20, 20, 20, 20, 20]
+
+
+def test_evaluation_speed_sampler_never_duplicates_sparse_buckets() -> None:
+  speeds = np.asarray([1.0, 4.0, 10.0, 10.0, 10.0, 20.0])
+  selected = neural_plant.speed_stratified_evaluation_indexes(
+    speeds, len(speeds), np.random.default_rng(3),
+  )
+  assert len(selected) == len(speeds)
+  assert len(np.unique(selected)) == len(selected)
+
+
+def test_comparison_reports_all_states_at_one_and_two_seconds() -> None:
+  window_count = 2
+  rollout_steps = 200
+  history = np.zeros(
+    (window_count, 1, len(plant_data.BASE_FEATURES)),
+    dtype=np.float32,
+  )
+  history[:, :, neural_plant.V_EGO_INDEX] = 20.0
+  target = np.zeros(
+    (window_count, rollout_steps, len(plant_data.STATE_FEATURES)),
+    dtype=np.float32,
+  )
+  windows = neural_plant.WindowBatch(
+    history=history,
+    future_base=np.zeros(
+      (window_count, rollout_steps, len(plant_data.BASE_FEATURES)),
+      dtype=np.float32,
+    ),
+    target_states=target,
+    routes=["route-a", "route-b"],
+  )
+  metrics = compare_plants.prediction_metrics(
+    prediction=np.full_like(target, 0.5),
+    disagreement=np.full_like(target, 0.1),
+    windows=windows,
+    shared_state_std=np.ones(len(plant_data.STATE_FEATURES), dtype=np.float32),
+    sample_period_s=0.01,
+  )
+  assert set(metrics["horizons"]) >= {"1.00s", "2.00s"}
+  assert set(metrics["horizons"]["1.00s"]) == set(plant_data.STATE_FEATURES)
+  assert set(metrics["horizons"]["2.00s"]) == set(plant_data.STATE_FEATURES)
+
+
+def test_comparison_window_hash_ignores_config_name() -> None:
+  windows = neural_plant.WindowBatch(
+    history=np.zeros(
+      (1, 10, len(plant_data.BASE_FEATURES)),
+      dtype=np.float32,
+    ),
+    future_base=np.zeros(
+      (1, 20, len(plant_data.BASE_FEATURES)),
+      dtype=np.float32,
+    ),
+    target_states=np.zeros(
+      (1, 20, len(plant_data.STATE_FEATURES)),
+      dtype=np.float32,
+    ),
+    routes=["route-a"],
+  )
+  first = neural_plant.ModelConfig("candidate-a", "gru", 1, 10, (8,))
+  second = neural_plant.ModelConfig("candidate-b", "gru", 1, 10, (8,))
+
+  assert compare_plants.window_hash(
+    windows, first,
+  ) == compare_plants.window_hash(windows, second)
+
+
+@pytest.mark.parametrize(
+  ("field", "wrong_value"),
+  (
+    ("training_contract_version", neural_plant.TRAINING_CONTRACT_VERSION - 1),
+    ("recursive_objective_horizon_s", 1.0),
+  ),
+)
+def test_comparison_rejects_wrong_training_contract(
+  field: str,
+  wrong_value: float,
+) -> None:
+  metadata = {
+    "training_alignment": "timestamp_causal_recorded_history_asof",
+    "causal_training_eligible": True,
+    "training_schema": "comma-companion.dynamics-row",
+    "training_schema_version": 1,
+    "training_extraction_version": plant_data.TRAJECTORY_EXTRACTION_VERSION,
+    "training_contract_version": neural_plant.TRAINING_CONTRACT_VERSION,
+    "recursive_objective_horizon_s": (
+      neural_plant.RECURSIVE_OBJECTIVE_HORIZON_S
+    ),
+    "trainer_schema": neural_plant.TRAINER_SCHEMA,
+    "trainer_schema_version": neural_plant.TRAINER_SCHEMA_VERSION,
+    "member_count": 3,
+    "pretraining_performed": False,
+  }
+  metadata[field] = wrong_value
+  with pytest.raises(
+    ValueError,
+    match=rf"{field} differs",
+  ):
+    compare_plants.validate_candidate_metadata(metadata)
+
+
+def test_low_speed_curvature_identifies_intersection_turn_in() -> None:
+  regimes = nnff_policy.classify_regime(
+    desired=np.asarray([0.02]),
+    jerk=np.asarray([0.01]),
+    speed=np.asarray([2.0]),
+    curvature=np.asarray([0.02]),
+    curvature_rate=np.asarray([0.08]),
+  )
+  assert regimes.tolist() == ["sharp_turn_in"]

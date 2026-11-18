@@ -69,6 +69,15 @@ class HKGShapedTorquePolicy:
   def pid_error_context(self, error):
     return error
 
+  def friction_jerk_gain(self):
+    return JERK_GAIN
+
+  def reset_damping(self, cs):
+    pass
+
+  def damping_error_rate(self, rate, setpoint, jerk, cs):
+    return -rate
+
   def output_context(self, value, setpoint, jerk, measurement, speed):
     return self.output(value, setpoint, speed)
 
@@ -85,6 +94,7 @@ class HKGShapedTorquePolicy:
       self.measurement_filter.x = self.jerk_filter.x = 0.0
       self.previous_setpoint = future
       self.previous_pressed = cs.steeringPressed
+      self.reset_damping(cs)
       pid_log.active = False
       return 0.0, 0.0, pid_log
     if self.previous_pressed and not cs.steeringPressed:
@@ -115,15 +125,16 @@ class HKGShapedTorquePolicy:
     friction_jerk = math.copysign(max(abs(jerk) - jerk_deadzone, 0.0), jerk)
     ff, threshold = auto_stages.apply_stages(parent, cs, setpoint, jerk, ff, threshold,
       active=active, limited=safety_limited or curvature_limited, curvature_limited=curvature_limited)
-    selected_friction = friction_scale * parent.friction(error + JERK_GAIN * friction_jerk, deadzone, threshold, cs, setpoint)
+    selected_friction = friction_scale * parent.friction(error + self.friction_jerk_gain() * friction_jerk, deadzone, threshold, cs, setpoint)
     ff += auto_stages.apply_selected_friction(parent, cs, setpoint, float(selected_friction),
       active=active, limited=safety_limited or curvature_limited, curvature_limited=curvature_limited)
     if cs.vEgo < self.low_speed_reset_threshold:
       parent.pid.reset()
     freeze = safety_limited or cs.steeringPressed or cs.vEgo < self.low_speed_reset_threshold or unwind
     pid_log.error = float(self.pid_error_context(error))
+    error_rate = self.damping_error_rate(rate, setpoint, jerk, cs)
     output = parent.torque_from_lateral_accel(
-      parent.pid.update(pid_log.error, error_rate=-rate, speed=cs.vEgo, feedforward=ff, freeze_integrator=freeze), parent.torque_params
+      parent.pid.update(pid_log.error, error_rate=error_rate, speed=cs.vEgo, feedforward=ff, freeze_integrator=freeze), parent.torque_params
     )
     output = apply_turn_assist(parent, cs, vm, params, curvature, output)
     output = self.output_context(output, setpoint, jerk, measurement, cs.vEgo)

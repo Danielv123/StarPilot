@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comma.danielv.no/schemas/media-frame-index-v1.json",
+  "title": "Comma Companion encoded-frame PTS index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mapping_type",
+    "join_key",
+    "ordinal_basis",
+    "source_frame_key",
+    "camera",
+    "segment_num",
+    "source_artifact_id",
+    "video",
+    "time_base",
+    "frame_count",
+    "first_pts",
+    "last_end_pts",
+    "duration_inference_count",
+    "frames"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "mapping_type": {"const": "encoded_frame_pts"},
+    "join_key": {
+      "const": ["camera", "segment_num", "segment_frame_id"]
+    },
+    "ordinal_basis": {"const": 0},
+    "source_frame_key": {"const": "segment_frame_id"},
+    "camera": {
+      "enum": ["road", "wide", "driver", "qcamera", "unknown"]
+    },
+    "segment_num": {"type": "integer", "minimum": 0},
+    "source_artifact_id": {
+      "type": ["string", "null"]
+    },
+    "video": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "time_base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["numerator", "denominator", "text"],
+      "properties": {
+        "numerator": {"type": "integer", "minimum": 1},
+        "denominator": {"type": "integer", "minimum": 1},
+        "text": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*/[1-9][0-9]*$"
+        }
+      }
+    },
+    "frame_count": {"type": "integer", "minimum": 1},
+    "first_pts": {"type": "integer"},
+    "last_end_pts": {"type": "integer"},
+    "duration_inference_count": {"type": "integer", "minimum": 0},
+    "frames": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ordinal",
+          "segment_frame_id",
+          "pts",
+          "duration",
+          "pts_us",
+          "duration_us",
+          "keyframe"
+        ],
+        "properties": {
+          "ordinal": {"type": "integer", "minimum": 0},
+          "segment_frame_id": {"type": "integer", "minimum": 0},
+          "pts": {"type": "integer"},
+          "duration": {"type": "integer", "minimum": 1},
+          "pts_us": {"type": "integer"},
+          "duration_us": {"type": "integer", "minimum": 1},
+          "keyframe": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

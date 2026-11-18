@@ -5,6 +5,7 @@ from opendbc.car.hyundai.values import CAR, HyundaiFlags
 from openpilot.starpilot.lateral import hkg_vehicle_shaping as shaping
 
 from openpilot.starpilot.lateral.hkg_torque_policy import HKGShapedTorquePolicy, supported_torque_cp
+from openpilot.starpilot.lateral.ioniq5_damping import Ioniq5Damping
 
 PROFILES = {
   'ioniq_5': (frozenset((CAR.HYUNDAI_IONIQ_5,)), shaping.IONIQ_5_BASE_LAT_ACCEL_FACTOR_MULT),
@@ -73,7 +74,13 @@ class HKGVehicleTorquePolicy(HKGShapedTorquePolicy):
     self.future_lateral_accel = 0.0
     self.steering_pressed = False
     self.hev_center_weight = 0.0
+    self.ioniq_5_damping = None
     super().__init__(parent, cp)
+    if self.profile == 'ioniq_5':
+      # Light measured-response damping reduces unwind-to-center oscillation
+      # without changing the feedforward turn profile.
+      parent.pid._k_d = [[0], [shaping.IONIQ_5_DAMPING_GAIN]]
+      self.ioniq_5_damping = Ioniq5Damping(self.dt)
 
   supported_cp = staticmethod(lambda cp: policy_for(cp) is not None)
 
@@ -141,6 +148,21 @@ class HKGVehicleTorquePolicy(HKGShapedTorquePolicy):
 
   def pid_error_context(self, error):
     return error * (1.0 - shaping.KIA_CARNIVAL_HEV_CENTER_ERROR_REDUCTION * self.hev_center_weight)
+
+  def friction_jerk_gain(self):
+    if self.profile == 'ioniq_5':
+      return shaping.IONIQ_5_FRICTION_JERK_GAIN
+    return super().friction_jerk_gain()
+
+  def reset_damping(self, cs):
+    if self.ioniq_5_damping is not None:
+      self.ioniq_5_damping.reset(cs.steeringAngleDeg)
+
+  def damping_error_rate(self, rate, setpoint, jerk, cs):
+    if self.ioniq_5_damping is None:
+      return -rate
+    steering_rate = self.ioniq_5_damping.steering_rate(cs.steeringAngleDeg)
+    return self.ioniq_5_damping.error_rate(rate, setpoint, jerk, cs.vEgo, steering_rate, cs.steeringPressed)
 
   def jerk_deadzone(self, setpoint, jerk, measurement, speed):
     if self.profile == 'ioniq_5':

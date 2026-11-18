@@ -316,7 +316,7 @@ KIA_FORTE_FRICTION_CALM_JERK_WIDTH = 0.08
 
 KIA_FORTE_FRICTION_THRESHOLD_GAIN = 0.10
 
-IONIQ_5_BASE_LAT_ACCEL_FACTOR_MULT = 1.22
+IONIQ_5_BASE_LAT_ACCEL_FACTOR_MULT = 1.36
 
 IONIQ_5_FF_ONSET = 0.10
 
@@ -330,25 +330,25 @@ IONIQ_5_TRANSITION_SPEED = 12.5
 
 IONIQ_5_PHASE_SCALE = 0.10
 
-IONIQ_5_FF_REDUCTION_LEFT = 0.15
+IONIQ_5_FF_REDUCTION_LEFT = 0.345
 
-IONIQ_5_FF_REDUCTION_RIGHT = 0.25
+IONIQ_5_FF_REDUCTION_RIGHT = 0.420
 
-IONIQ_5_TURN_IN_BOOST_LEFT = 0.10
+IONIQ_5_TURN_IN_BOOST_LEFT = 0.135
 
-IONIQ_5_TURN_IN_BOOST_RIGHT = 0.04
+IONIQ_5_TURN_IN_BOOST_RIGHT = 0.02
 
-IONIQ_5_UNWIND_TAPER_LEFT = 0.92
+IONIQ_5_UNWIND_TAPER_LEFT = 0.76
 
-IONIQ_5_UNWIND_TAPER_RIGHT = 1.04
+IONIQ_5_UNWIND_TAPER_RIGHT = 0.76
 
-IONIQ_5_TURN_IN_THRESHOLD_REDUCTION_LEFT = 0.05
+IONIQ_5_TURN_IN_THRESHOLD_REDUCTION_LEFT = 0.125
 
-IONIQ_5_TURN_IN_THRESHOLD_REDUCTION_RIGHT = 0.03
+IONIQ_5_TURN_IN_THRESHOLD_REDUCTION_RIGHT = 0.085
 
-IONIQ_5_UNWIND_THRESHOLD_INCREASE_LEFT = 0.46
+IONIQ_5_UNWIND_THRESHOLD_INCREASE_LEFT = 0.28
 
-IONIQ_5_UNWIND_THRESHOLD_INCREASE_RIGHT = 0.50
+IONIQ_5_UNWIND_THRESHOLD_INCREASE_RIGHT = 0.30
 
 IONIQ_5_TURN_IN_FRICTION_BOOST_LEFT = 0.02
 
@@ -358,7 +358,7 @@ IONIQ_5_UNWIND_FRICTION_REDUCTION_LEFT = 0.42
 
 IONIQ_5_UNWIND_FRICTION_REDUCTION_RIGHT = 0.44
 
-IONIQ_5_CENTER_TAPER_MAX = 0.18
+IONIQ_5_CENTER_TAPER_MAX = 0.17
 
 IONIQ_5_CENTER_TAPER_LAT = 0.16
 
@@ -368,9 +368,9 @@ IONIQ_5_CENTER_TAPER_SPEED = 15.0
 
 IONIQ_5_CENTER_TAPER_SPEED_WIDTH = 2.2
 
-IONIQ_5_SUSTAINED_TURN_IN_FF_BOOST_LEFT = 0.10
+IONIQ_5_SUSTAINED_TURN_IN_FF_BOOST_LEFT = 0.0
 
-IONIQ_5_SUSTAINED_TURN_IN_FF_BOOST_RIGHT = 0.16
+IONIQ_5_SUSTAINED_TURN_IN_FF_BOOST_RIGHT = 0.0
 
 IONIQ_5_SUSTAINED_TURN_IN_FF_SPEED = 13.5
 
@@ -381,6 +381,48 @@ IONIQ_5_SUSTAINED_TURN_IN_FF_LAT_START = 1.10
 IONIQ_5_SUSTAINED_TURN_IN_FF_LAT_END = 3.60
 
 IONIQ_5_SUSTAINED_TURN_IN_FF_LAT_WIDTH = 0.30
+
+# Ioniq 5 20-inch closed-loop plant tune (ported from the Starpilot-20inch-ioniq5 fork).
+IONIQ_5_STEADY_HIGH_LAT_TAPER = 0.015
+
+IONIQ_5_STEADY_HIGH_LAT_START = 0.35
+
+IONIQ_5_STEADY_HIGH_LAT_WIDTH = 0.12
+
+IONIQ_5_STEADY_JERK_WIDTH = 0.08
+
+# Delay-aligned closed-loop fit: less command-jerk friction avoids the brief
+# counter-command when a steering ramp becomes a hold.
+IONIQ_5_FRICTION_JERK_GAIN = 0.10
+
+# Extra measured-response damping is blended in only at highway speed.
+IONIQ_5_DAMPING_GAIN = 0.02
+
+IONIQ_5_HIGHWAY_DAMPING_GAIN = 0.08
+
+IONIQ_5_HIGHWAY_DAMPING_START_SPEED = 18.0
+
+IONIQ_5_HIGHWAY_DAMPING_FULL_SPEED = 22.0
+
+# Preserve nominal damping through a smooth unwind, then soften it briefly after
+# a measured wheel-rate reversal to reduce the following oscillation.
+IONIQ_5_REVERSAL_DAMPING_GAIN = 0.015
+
+IONIQ_5_REVERSAL_DAMPING_HOLD_SECONDS = 0.60
+
+IONIQ_5_TURN_EXIT_HOLD_SECONDS = 0.75
+
+IONIQ_5_TURN_EXIT_MIN_SPEED = 8.0
+
+IONIQ_5_TURN_EXIT_MAX_SPEED = 15.0
+
+IONIQ_5_TURN_EXIT_MIN_LAT_ACCEL = 0.12
+
+IONIQ_5_TURN_EXIT_NEAR_CENTER_LAT_ACCEL = 0.35
+
+IONIQ_5_TURN_EXIT_JERK_PRODUCT_THRESHOLD = -0.01
+
+IONIQ_5_REVERSAL_MIN_STEERING_RATE = 0.5
 
 IONIQ_5_LOW_SPEED_OUTPUT_LIMIT_BASE = 0.05
 
@@ -1072,7 +1114,12 @@ def get_ioniq_5_ff_scale(desired_lateral_accel: float, desired_lateral_jerk: flo
                                                    IONIQ_5_SUSTAINED_TURN_IN_FF_BOOST_LEFT,
                                                    IONIQ_5_SUSTAINED_TURN_IN_FF_BOOST_RIGHT) *
                                sustained_speed_weight * sustained_lat_onset * sustained_lat_cutoff)
-  return (1.0 + sustained_turn_in_scale) * (1.0 - base_reduction) * turn_in_boost * max(unwind_taper, 0.0)
+  steady_weight = math.exp(-((desired_lateral_jerk / IONIQ_5_STEADY_JERK_WIDTH) ** 2))
+  steady_high_lat_weight = _ioniq_5_sigmoid((abs_lateral_accel - IONIQ_5_STEADY_HIGH_LAT_START) /
+                                            IONIQ_5_STEADY_HIGH_LAT_WIDTH)
+  steady_taper = 1.0 - IONIQ_5_STEADY_HIGH_LAT_TAPER * steady_weight * steady_high_lat_weight
+  return ((1.0 + sustained_turn_in_scale) * (1.0 - base_reduction) * turn_in_boost *
+          max(unwind_taper, 0.0) * steady_taper)
 
 def get_ioniq_5_friction_threshold(v_ego: float, desired_lateral_accel: float = 0.0, desired_lateral_jerk: float = 0.0) -> float:
   base_threshold = get_hkg_canfd_base_friction_threshold(v_ego)

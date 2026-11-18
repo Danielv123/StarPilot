@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "comma-companion-dynamics"
+version = "0.1.0"
+description = "Isolated Ioniq 5 counterfactual dynamics replay adapter"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "numpy>=2.0,<3",
+  "torch>=2.6,<3",
+]
+
+[project.scripts]
+comma-companion-dynamics = "comma_companion_dynamics.cli:main"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/comma_companion_dynamics"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+indent-width = 2
+target-version = "py311"

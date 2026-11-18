@@ -53,6 +53,13 @@ def manager_init() -> None:
     cloudlog.warning('Cloud provider state needs repair; cloud services disabled for this session')
   save_bootlog()
 
+  if not PC:
+    from openpilot.starpilot.tailscale_boot import ensure_tailscale_service
+    try:
+      ensure_tailscale_service()
+    except Exception:
+      cloudlog.exception('Tailscale service restore failed; continuing startup')
+
   build_metadata = get_build_metadata()
 
   clear_bookmark_checkpoint()

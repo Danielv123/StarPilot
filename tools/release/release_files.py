@@ -18,6 +18,9 @@ blacklist = [
   ".lfsconfig",
   ".git$",
   ".gitmodules",
+
+  # server-only companion service
+  r"^services/comma_companion(?:/|$)",
 ]
 
 # Dependency sources are ordinary tracked files. A gitlink cannot be packaged

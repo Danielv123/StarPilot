@@ -153,7 +153,8 @@ class Controls:
     self.VM = VehicleModel(self.CP)
     self.LaC: LatControl
     self.LaC = create_lateral_controller(
-      self.CP, self.CI, DT_CTRL, mode=self.lateral_controller_selection.mode, turn_assist=self.vehicle_startup_preferences.turn_assist
+      self.CP, self.CI, DT_CTRL, mode=self.lateral_controller_selection.mode, turn_assist=self.vehicle_startup_preferences.turn_assist,
+      learned=self.lateral_controller_selection.learned,
     )
     if isinstance(self.LaC, LatControlTorque):
       # Only the actual startup owner reads configuration; replay clones stay pure.
@@ -169,6 +170,7 @@ class Controls:
           "source": self.lateral_controller_selection.source,
           "vehicle": self.CP.carFingerprint,
           "policy": self.LaC.controller_policy,
+          "learnedPolicy": type(getattr(self.LaC.starpilot_extension, 'policy', None)).__name__ == 'LearnedTorquePolicy',
           "automaticLearning": self.torque_learning_allowed,
           "startupParameterSource": "vehicle",
           "manualCoordinateStatus": self.LaC.manual_flm_status,

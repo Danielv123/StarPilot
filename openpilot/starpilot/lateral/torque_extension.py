@@ -22,7 +22,20 @@ class TorqueExtension:
 
 
 
-def create_extension(parent, cp, mode, selected, *, turn_assist=False):
+def with_learned_policy(policy, parent, cp):
+  """Wrap the vehicle policy with the learned steering law, or keep it as is if that cannot load."""
+  from openpilot.starpilot.lateral import learned_torque_policy as learned
+  if not learned.supported_cp(cp):
+    return policy
+  try:
+    return learned.LearnedTorquePolicy(policy, parent, learned.load_core())
+  except (OSError, ValueError, KeyError):
+    from openpilot.common.swaglog import cloudlog
+    cloudlog.exception('learned torque controller unavailable; using the StarPilot controller')
+    return policy
+
+
+def create_extension(parent, cp, mode, selected, *, turn_assist=False, learned=False):
   if mode != ControllerMode.STARPILOT:
     return None
   from openpilot.starpilot.lateral.hkg_vehicle_policy import HKGVehicleTorquePolicy, PROFILES, policy_for
@@ -30,6 +43,8 @@ def create_extension(parent, cp, mode, selected, *, turn_assist=False):
     if policy_for(cp) != selected:
       raise ValueError('HKG torque selection does not match CarParams')
     policy = HKGVehicleTorquePolicy(parent, cp)
+    if learned:
+      policy = with_learned_policy(policy, parent, cp)
     return TorqueExtension(policy, parameter_factor=policy.FACTOR_MULT)
   if selected == 'generic':
     from openpilot.starpilot.lateral.generic_torque_policy import GenericTorquePolicy

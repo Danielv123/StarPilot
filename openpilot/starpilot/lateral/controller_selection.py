@@ -88,11 +88,19 @@ class ControllerMode(StrEnum):
   STARPILOT = 'starpilot'
 
 
+LEARNED_POLICY = 'learned'
+# Platforms with a learned steering law that can replace the StarPilot vehicle
+# policy. It is saved as an optional policy inside StarPilot mode, so every
+# consumer of the controller mode keeps seeing a mode it already understands.
+LEARNED_VEHICLES = frozenset(('HYUNDAI_IONIQ_5',))
+
+
 @dataclass(frozen=True)
 class ControllerSelection:
   mode: ControllerMode
   policy: str | None
   source: str
+  learned: bool = False
 
 
 def policy_for(CP) -> str | None:
@@ -198,21 +206,29 @@ def parse_document(raw: bytes) -> dict:
   if not isinstance(vehicles, dict) or len(vehicles) > len(KNOWN_POLICIES):
     raise ValueError('Invalid controller selection vehicles')
   for fingerprint, choice in vehicles.items():
-    if (fingerprint not in KNOWN_POLICIES or not isinstance(choice, dict) or set(choice) != {'brand', 'mode'} or
+    if (fingerprint not in KNOWN_POLICIES or not isinstance(choice, dict) or
+        set(choice) not in ({'brand', 'mode'}, {'brand', 'mode', 'policy'}) or
         choice['brand'] != KNOWN_POLICIES[fingerprint] or type(choice['mode']) is not str or
         choice['mode'] not in (ControllerMode.STANDARD, ControllerMode.STARPILOT)):
       raise ValueError('Invalid controller selection choice')
+    if 'policy' in choice and (choice['policy'] != LEARNED_POLICY or choice['mode'] != ControllerMode.STARPILOT or
+                               fingerprint not in LEARNED_VEHICLES):
+      raise ValueError('Invalid controller selection policy')
   return document
 
 
-def replace_mode(raw: bytes | None, CP, mode: ControllerMode) -> bytes:
+def replace_mode(raw: bytes | None, CP, mode: ControllerMode, *, learned: bool = False) -> bytes:
   """Change only one exact platform's saved choice, preserving other entries."""
   if policy_for(CP) is None:
     raise ValueError('No exact torque policy for CarParams')
   mode = ControllerMode(mode)
+  if learned and (mode != ControllerMode.STARPILOT or str(CP.carFingerprint) not in LEARNED_VEHICLES):
+    raise ValueError('No learned torque policy for CarParams')
   document = {'version': DOCUMENT_VERSION, 'vehicles': {}} if raw is None else parse_document(raw)
   vehicles = dict(document['vehicles'])
   vehicles[str(CP.carFingerprint)] = {'brand': str(CP.brand), 'mode': mode.value}
+  if learned:
+    vehicles[str(CP.carFingerprint)]['policy'] = LEARNED_POLICY
   encoded = json.dumps({'version': DOCUMENT_VERSION, 'vehicles': vehicles},
                        sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
   if len(encoded) > MAX_DOCUMENT_BYTES:
@@ -228,7 +244,8 @@ def selection_from_bytes(CP, raw: bytes | None) -> ControllerSelection:
     choice = parse_document(raw)['vehicles'].get(str(CP.carFingerprint))
     if choice is None or choice['brand'] != str(CP.brand):
       return default
-    return ControllerSelection(ControllerMode(choice['mode']), default.policy, 'saved')
+    return ControllerSelection(ControllerMode(choice['mode']), default.policy, 'saved',
+                               learned=choice.get('policy') == LEARNED_POLICY)
   except (UnicodeError, ValueError, TypeError, OverflowError):
     return ControllerSelection(default.mode, default.policy, 'invalid')
 

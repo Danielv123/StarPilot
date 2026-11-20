@@ -41,7 +41,7 @@ VERSION = 1
 
 
 class LatControlTorque(LatControl):
-  def __init__(self, CP, CI, dt, *, controller_mode: ControllerMode | None = None, turn_assist: bool = False):
+  def __init__(self, CP, CI, dt, *, controller_mode: ControllerMode | None = None, turn_assist: bool = False, learned: bool = False):
     super().__init__(CP, CI, dt)
     self.hkg_canfd_torque = bool(
       CP.brand == 'hyundai'
@@ -66,7 +66,7 @@ class LatControlTorque(LatControl):
     self.lookahead_frames = int(JERK_LOOKAHEAD_SECONDS / self.dt)
     self.jerk_filter = FirstOrderFilter(0.0, 1 / (2 * np.pi * LP_FILTER_CUTOFF_HZ), self.dt)
     self.turn_assist = create_turn_assist(CP, turn_assist)
-    self.starpilot_extension = create_extension(self, CP, self.controller_mode, self.controller_policy, turn_assist=turn_assist)
+    self.starpilot_extension = create_extension(self, CP, self.controller_mode, self.controller_policy, turn_assist=turn_assist, learned=learned)
     if self.starpilot_extension is not None:
       self.pid._k_p = [[0.0], [STARPILOT_KP]]
     self.flm_source = flm.GmLiveSource(CP, self.controller_mode)

@@ -7,7 +7,7 @@ import math
 import json
 
 from openpilot.starpilot.lateral.controller_selection import (
-  DOCUMENT_KEY, LEARNING_OFF_KEY, MAX_DOCUMENT_BYTES, ControllerMode, policy_for, replace_mode, selection_from_bytes,
+  DOCUMENT_KEY, LEARNED_VEHICLES, LEARNING_OFF_KEY, MAX_DOCUMENT_BYTES, ControllerMode, policy_for, replace_mode, selection_from_bytes,
 )
 from openpilot.starpilot.lateral.learning_preferences import (
   KEY as LEARNING_PREFERENCES_KEY, MAX_BYTES as LEARNING_PREFERENCES_LIMIT, read_preference, replace_preference,
@@ -21,7 +21,11 @@ from openpilot.starpilot.ui.feature_settings_state import FeatureRow, FeatureSet
 
 
 CHOICES = ('Stock Controller', 'StarPilot Controller')
+LEARNED_CHOICE = 'Learned Controller'
 MODES = dict(zip(CHOICES, (ControllerMode.STANDARD, ControllerMode.STARPILOT), strict=True))
+MODES[LEARNED_CHOICE] = ControllerMode.STARPILOT
+LEARNED_GUIDANCE = (" Learned Controller steers with a torque law trained on this vehicle's recorded drives; " +
+                    "the StarPilot controller still steers at low speed and takes over if it fails.")
 TUNING_GUIDANCE = ("StarPilot's torque controller can provide higher low-speed steering accuracy, but may require additional tuning. " +
                    "Join the StarPilot Discord and open a tuning request: https://firestar.link/discord")
 SETUP_ACTION = 'torque_prepare_firestar'
@@ -30,6 +34,14 @@ SETUP_DEFAULTS = {'TurnAssist': b'0', LEARNING_OFF_KEY: b'1', 'LaneCentering': b
                   'LaneCenterOffset': b'0.0', 'LaneCenteringE2EAuthority': b'0.5', 'LaneCenteringPauseOnSignal': b'1'}
 SETUP_LIMITS = {**dict.fromkeys(SETUP_DEFAULTS, 128), LEARNING_PREFERENCES_KEY: LEARNING_PREFERENCES_LIMIT,
                 LANE_CHANGE_KEY: LANE_CHANGE_LIMIT, DOCUMENT_KEY: MAX_DOCUMENT_BYTES}
+
+
+def controller_choices(CP) -> tuple[str, ...]:
+  """The learned law is offered only where it exists and its weights shipped with this build."""
+  if str(CP.carFingerprint) not in LEARNED_VEHICLES:
+    return CHOICES
+  from openpilot.starpilot.lateral.learned_torque_policy import available
+  return (*CHOICES, LEARNED_CHOICE) if available(CP) else CHOICES
 
 
 def steering_controller(CP) -> str | None:
@@ -176,15 +188,18 @@ class ControllerFeature:
     raw, readable = read_saved(self.params, DOCUMENT_KEY, MAX_DOCUMENT_BYTES)
     selected = selection_from_bytes(CP, raw) if readable else None
     valid = readable and selected is not None and selected.source != 'invalid'
+    choices = controller_choices(CP)
     value = CHOICES[0] if valid and selected.mode == ControllerMode.STANDARD else \
+      LEARNED_CHOICE if valid and selected.learned and LEARNED_CHOICE in choices else \
       CHOICES[1] if valid else 'Invalid saved controller choice'
     learning, learning_readable = read_saved(self.params, LEARNING_OFF_KEY, 1)
     preference = read_preference(self.params, CP, legacy_snapshot=(learning, learning_readable))
     learning_valid = learning_readable and preference.valid
     allowed = valid and learning_valid and self.authority('preferences')
-    reason = ('Choose the steering controller for your next drive. ' + TUNING_GUIDANCE if valid and learning_valid else
+    reason = ('Choose the steering controller for your next drive. ' + TUNING_GUIDANCE +
+              (LEARNED_GUIDANCE if LEARNED_CHOICE in choices else '') if valid and learning_valid else
               'Saved steering preferences are unreadable or invalid; no change was made.')
-    return FeatureRow(DOCUMENT_KEY, 'Steering Controller', value, raw, CHOICES if valid else (),
+    return FeatureRow(DOCUMENT_KEY, 'Steering Controller', value, raw, choices if valid else (),
                       available=allowed, reason=reason, capability=capability,
                       dependencies=((LEARNING_OFF_KEY, learning), (LEARNING_PREFERENCES_KEY, preference.raw)),
                       default_value=CHOICES[0] if selection_from_bytes(CP, None).mode == ControllerMode.STANDARD else CHOICES[1])
@@ -238,7 +253,7 @@ class ControllerFeature:
         not request.vehicle_fingerprint or request.vehicle_fingerprint != self.vehicle_fingerprint()):
       return False
     CP = self.vehicle_params()
-    if CP is None or request.capability != self.capability(CP):
+    if CP is None or request.capability != self.capability(CP) or request.value not in controller_choices(CP):
       return False
     raw, readable = read_saved(self.params, DOCUMENT_KEY, MAX_DOCUMENT_BYTES)
     learning, learning_readable = read_saved(self.params, LEARNING_OFF_KEY, 1)
@@ -251,7 +266,7 @@ class ControllerFeature:
       selected = selection_from_bytes(CP, raw)
       if selected.source == 'invalid':
         return False
-      encoded = replace_mode(raw, CP, MODES[request.value])
+      encoded = replace_mode(raw, CP, MODES[request.value], learned=request.value == LEARNED_CHOICE)
     except (UnicodeError, ValueError, TypeError, OverflowError):
       return False
 

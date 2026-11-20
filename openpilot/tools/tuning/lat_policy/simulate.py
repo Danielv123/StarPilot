@@ -242,7 +242,9 @@ def main() -> int:
   if args.weights:
     from openpilot.starpilot.lateral import learned_torque_policy
     learned_torque_policy.WEIGHTS = Path(args.weights)
-  data = np.load(args.dataset, allow_pickle=False)
+  with np.load(args.dataset, allow_pickle=False) as archive:
+    # Materialise once: indexing the archive re-reads the whole array every time.
+    data = {name: archive[name] for name in archive.files}
   plant = NumpyPlant(args.plant)
   split = ("train", "val", "test").index(args.split)
   starts = pick_windows(data, split, WARMUP + args.horizon + 1, args.windows, args.seed, args.min_speed)

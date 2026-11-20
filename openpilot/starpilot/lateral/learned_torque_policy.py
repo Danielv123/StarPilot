@@ -17,7 +17,7 @@ import numpy as np
 from opendbc.car.hyundai.values import CAR
 from openpilot.common.swaglog import cloudlog
 from openpilot.starpilot.lateral.hkg_torque_policy import supported_torque_cp
-from openpilot.starpilot.lateral.learned_torque_core import DT, LearnedTorqueCore, delay_steps
+from openpilot.starpilot.lateral.learned_torque_core import DT, LearnedTorqueCore, delay_steps, yield_to_driver
 
 VEHICLES = frozenset((CAR.HYUNDAI_IONIQ_5,))
 WEIGHTS = Path(__file__).with_name('learned_torque_ioniq5.npz')
@@ -79,12 +79,17 @@ class LearnedTorquePolicy:
 
     base_torque = -float(result[0])
     previous = self.core.torque
-    learned = self.core.propose(measurement, angle, curvature, speed, float(params.roll), delay,
-                                -float(cs.steeringTorque), bool(cs.steeringPressed))
+    driver_torque = -float(cs.steeringTorque)
+    pressed = bool(cs.steeringPressed)
+    learned = self.core.propose(measurement, angle, curvature, speed, float(params.roll), delay, driver_torque, pressed)
     weight = float(np.interp(speed, BLEND_SPEEDS, (0.0, 1.0)))
     torque = weight * learned + (1.0 - weight) * base_torque
     if not math.isfinite(torque):
       raise ValueError('non-finite learned torque')
+    if pressed:
+      # A driver steering ahead of the plan, such as leading a turn at an
+      # intersection, is not pushed back, by either half of the blend.
+      torque = yield_to_driver(torque, previous, driver_torque, speed)
     torque = min(max(torque, -parent.steer_max), parent.steer_max)
     self.core.commit(torque)
 

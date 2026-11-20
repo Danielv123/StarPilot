@@ -149,22 +149,55 @@ def test_torque_range_matches_the_car_controller():
     assert abs(mine - expected) <= 0.5 + 1e-6, (speed, last, requested, driver, mine, expected)
 
 
-def test_core_moves_within_the_rate_limits_and_never_builds_against_the_driver():
+def test_core_moves_within_the_rate_limits_and_never_pushes_against_the_driver():
   controller = core.LearnedTorqueCore(random_weights(scale=2.0))
   rng = random.Random(1)
-  for frame in range(4000):
-    speed = 10.0 if frame < 2000 else 25.0
-    pressed = 1500 <= frame < 1800
+  for frame in range(6000):
+    speed = 10.0 if frame < 3000 else 25.0
+    pressed = 1500 <= frame < 1800 or 2200 <= frame < 2500 or 4000 <= frame < 4300
+    driver = 0.0 if frame < 2000 else (150.0 if (frame // 100) % 2 else -150.0)
     previous = controller.torque
-    wanted = controller.propose(rng.uniform(-2, 2), rng.uniform(-30, 30), rng.uniform(-0.01, 0.01), speed, 0.0, 0.33, 0.0, pressed)
+    wanted = controller.propose(rng.uniform(-2, 2), rng.uniform(-30, 30), rng.uniform(-0.01, 0.01), speed, 0.0, 0.33,
+                                driver if pressed else 0.0, pressed)
     up, down = (core.RATE_UP_LOW, core.RATE_DOWN_LOW) if speed < 15 else (core.RATE_UP_HIGH, core.RATE_DOWN_HIGH)
     assert abs(wanted) <= 1.0
     assert abs(wanted) - abs(previous) <= up + 1e-9
     assert abs(wanted - previous) <= max(up, down) + 1e-9
-    if pressed:
+    if pressed and driver == 0.0:
       assert abs(wanted) <= abs(previous) + 1e-12
       assert wanted * previous >= 0.0
+    elif pressed and wanted * driver < 0.0:
+      # Torque against the driver only ever fades, at least at the release rate.
+      assert abs(wanted) <= abs(previous) - down + 1e-9
     controller.commit(wanted)
+
+
+def test_yield_releases_torque_against_the_driver_and_keeps_torque_with_them():
+  assert core.yield_to_driver(-0.7, -0.7, 300.0, 5.0) == pytest.approx(-0.7 + core.RATE_DOWN_LOW)
+  assert core.yield_to_driver(-0.01, -0.01, 300.0, 5.0) == 0.0
+  assert core.yield_to_driver(0.4, 0.3, 300.0, 5.0) == 0.4
+  assert core.yield_to_driver(0.7, 0.7, -300.0, 25.0) == pytest.approx(0.7 - core.RATE_DOWN_HIGH)
+  assert core.yield_to_driver(-0.5, -0.4, -300.0, 25.0) == -0.5
+
+
+def test_a_driver_leading_a_turn_is_not_pushed_back():
+  # The wheel is already turned well past a gentle planned curve and the driver
+  # is holding it there; the blended controller must fade out rather than fight.
+  params = SimpleNamespace(angleOffsetDeg=0.0, roll=0.0)
+  for speed in (4.5, 10.0):
+    cp, controller = build()
+    vm = VehicleModel(cp)
+    torques = []
+    for frame in range(300):
+      pressed = frame >= 100
+      # steeringTorque is in the car's sign convention: negative pushes toward positive curvature.
+      cs = SimpleNamespace(vEgo=speed, steeringAngleDeg=90.0 if pressed else 0.0, steeringPressed=pressed,
+                           steeringTorque=-400.0 if pressed else 0.0)
+      steer, _, _ = controller.update(True, cs, vm, params, False, 0.002, False, 0.33)
+      torques.append(-steer)
+    pushed_back = [t for t in torques[100:] if t < 0.0]
+    assert torques[-1] >= 0.0, speed
+    assert all(b >= a - 1e-9 for a, b in zip(pushed_back, pushed_back[1:], strict=False)), speed
 
 
 def test_low_speed_is_left_to_the_starpilot_policy():

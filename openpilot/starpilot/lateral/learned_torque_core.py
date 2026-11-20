@@ -69,6 +69,22 @@ def torque_range(previous: float, driver_torque: float, speed: float) -> tuple[f
   return min(max(low, rate_low), rate_high), max(min(high, rate_high), rate_low)
 
 
+def yield_to_driver(torque: float, previous: float, driver_torque: float, speed: float) -> float:
+  """Stop pushing against a driver who is steering.
+
+  Torque that opposes the driver's torque fades toward zero at the car's
+  release rate; torque in the driver's direction is left alone. When the
+  driver torque is exactly zero there is no direction to defer to, so the
+  command may only relax.
+  """
+  down = RATE_DOWN_LOW if speed < LOW_SPEED_RATE_LIMIT_MPS else RATE_DOWN_HIGH
+  if driver_torque > 0.0:
+    return max(torque, min(previous + down, 0.0))
+  if driver_torque < 0.0:
+    return min(torque, max(previous - down, 0.0))
+  return min(max(torque, min(previous, 0.0)), max(previous, 0.0))
+
+
 def observation_terms(targets, y_now, y_10, y_30, u_1, u_6, u_16, u_31, speed, roll, delay, error_mean,
                       angle_now, angle_10, xp=np):
   """The network inputs, as a list of scalars or equally shaped arrays.
@@ -153,8 +169,7 @@ class LearnedTorqueCore:
     low, high = torque_range(self.torque, driver_torque, speed)
     torque = min(max(self.torque + self.increment(observation), low), high)
     if pressed:
-      # Never build torque against the driver; only let it relax toward zero.
-      torque = min(max(torque, min(self.torque, 0.0)), max(self.torque, 0.0))
+      torque = yield_to_driver(torque, self.torque, driver_torque, speed)
     return torque
 
   def commit(self, applied: float):

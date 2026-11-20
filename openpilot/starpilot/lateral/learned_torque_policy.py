@@ -23,7 +23,7 @@ VEHICLES = frozenset((CAR.HYUNDAI_IONIQ_5,))
 WEIGHTS = Path(__file__).with_name('learned_torque_ioniq5.npz')
 # Below the first speed the StarPilot policy steers alone, above the second the learned law does.
 BLEND_SPEEDS = (3.0, 6.0)
-# Fraction of the gap closed per frame while the StarPilot policy's integrator shadows the learned torque.
+# Fraction of the remaining distance covered per frame while the StarPilot policy's integrator shadows the learned torque.
 FOLLOW_RATE = 0.05
 LOG_VERSION = 3
 
@@ -89,10 +89,14 @@ class LearnedTorquePolicy:
     self.core.commit(torque)
 
     if weight >= 1.0:
-      # Keep the idle policy's integrator on the applied torque, so the low-speed
-      # blend and a mid-drive fallback both start from where the wheel already is.
-      gap = parent.lateral_accel_from_torque(torque - base_torque, parent.torque_params)
-      parent.pid.i = float(np.clip(parent.pid.i + FOLLOW_RATE * gap, parent.pid.neg_limit, parent.pid.pos_limit))
+      # Steer the idle policy's integrator toward the value that makes its PID
+      # sum equal the applied torque, so the low-speed blend and a mid-drive
+      # fallback both start from where the wheel already is. It tracks a target
+      # rather than accumulating a gap, so the policy's own output clamps
+      # cannot wind it up.
+      pid = parent.pid
+      wanted = parent.lateral_accel_from_torque(torque, parent.torque_params) - (pid.p + pid.d + pid.f)
+      pid.i = float(np.clip(pid.i + FOLLOW_RATE * (wanted - pid.i), pid.neg_limit, pid.pos_limit))
 
     at_limit = parent.steer_max - abs(torque) < 1e-3
     if (at_limit or curvature_limited) and speed > parent.sat_check_min_speed and not safety_limited and not cs.steeringPressed:

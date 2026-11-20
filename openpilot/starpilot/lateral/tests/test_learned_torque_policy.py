@@ -190,6 +190,29 @@ def test_learned_law_steers_at_speed_and_logs_its_terms():
   assert all(math.isfinite(value) for value in torques)
 
 
+def test_standby_integrator_follows_the_applied_torque_without_winding_up():
+  cp, controller = build()
+  policy = selected_policy(controller)
+  fast = drive(controller, cp, speed=20.0, curvature=0.003, frames=60)
+  log = fast[-1][1]
+  # At speed nothing clamps the StarPilot output, so its standby torque trails the
+  # still-ramping learned one by no more than the follow lag.
+  assert 0.2 < log.p < 0.5
+  assert log.i == pytest.approx(log.p, abs=0.15)
+  # At roundabout speed the StarPilot policy clamps its own output well below what a
+  # sharp turn needs, so its torque never reaches the learned one. The integrator
+  # must settle on its target and stay there rather than keep ramping on that gap.
+  drive(controller, cp, speed=7.0, curvature=0.03, frames=600)
+  pid = controller.pid
+  settled = pid.i
+  wanted = controller.lateral_accel_from_torque(policy.core.torque, controller.torque_params) - (pid.p + pid.d + pid.f)
+  assert settled == pytest.approx(wanted, abs=0.25)
+  assert pid.neg_limit < settled < pid.pos_limit
+  slow = drive(controller, cp, speed=7.0, curvature=0.03, frames=300)
+  assert abs(slow[-1][1].i) < abs(slow[-1][1].p)
+  assert pid.i == pytest.approx(settled, abs=0.05)
+
+
 def test_disengaged_frames_reset_to_zero_torque():
   cp, controller = build()
   drive(controller, cp, speed=20.0, curvature=0.003, frames=200)

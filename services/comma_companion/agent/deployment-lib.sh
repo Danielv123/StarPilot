@@ -14,6 +14,11 @@ continue_file=/data/continue.sh
 continue_backup="$agent_dir/backups/continue.sh.first-install"
 service_name=comma-companion-agent.service
 unit_target="/run/systemd/system/$service_name"
+# AGNOS caps every service at MemoryMax=128M with a type-level
+# service.d/background.conf. A drop-in overrides the unit file, so the unit's
+# own limit applies only while a same-named unit-level drop-in masks that one.
+memory_mask_dir="$unit_target.d"
+memory_mask="$memory_mask_dir/background.conf"
 ready_file=/run/comma-companion-agent/ready
 hook_marker="# comma-companion-agent bootstrap"
 hook_line="/usr/bin/timeout --kill-after=1s 8s /data/private-pond-agent/bootstrap.sh >/dev/null 2>&1 || true"
@@ -118,6 +123,8 @@ install_runtime_unit() {
   bounded_root /usr/bin/install -m 0644 -o root -g root -- \
     "$unit_source" "$temporary"
   bounded_root /usr/bin/mv -fT -- "$temporary" "$unit_target"
+  bounded_root /usr/bin/install -d -m 0755 -o root -g root "$memory_mask_dir"
+  bounded_root /usr/bin/ln -sfn /dev/null "$memory_mask"
 
   if [[ -x /usr/bin/systemd-analyze ]]; then
     bounded_root /usr/bin/systemd-analyze verify "$unit_target"
@@ -154,6 +161,7 @@ current_runtime_is_healthy() {
   [[ -f "$unit_target" ]] || return 1
   /usr/bin/cmp -s \
     "$release_path/comma-companion-agent.service" "$unit_target" || return 1
+  [[ "$(/usr/bin/readlink -- "$memory_mask" 2>/dev/null)" == /dev/null ]] || return 1
   bounded_root /usr/bin/systemctl is-active --quiet "$service_name" || return 1
   wait_for_healthy_service
 }
@@ -196,7 +204,8 @@ stop_and_remove_runtime_unit() {
     bounded_root /usr/bin/systemctl stop --no-block "$service_name"
     wait_for_inactive_service
   fi
-  bounded_root /usr/bin/rm -f -- "$unit_target"
+  bounded_root /usr/bin/rm -f -- "$unit_target" "$memory_mask"
+  bounded_root /usr/bin/rmdir -- "$memory_mask_dir" >/dev/null 2>&1 || true
   bounded_root /usr/bin/systemctl daemon-reload
   bounded_root /usr/bin/systemctl reset-failed "$service_name" >/dev/null 2>&1 || true
 }

@@ -17,9 +17,10 @@ import (
 )
 
 type Store struct {
-	path string
-	mu   sync.RWMutex
-	data state.Journal
+	path         string
+	mu           sync.RWMutex
+	data         state.Journal
+	prunedOnOpen int
 }
 
 var ErrFileNotFound = errors.New("journal file does not exist")
@@ -61,6 +62,12 @@ func Open(path string) (*Store, error) {
 	if err := store.replayFileMutations(); err != nil {
 		return nil, err
 	}
+	// Prune in place before the first Update: Update deep-copies the journal,
+	// and a backlog of superseded manifests can be most of the memory limit.
+	for _, key := range supersededInventoryKeys(store.data) {
+		delete(store.data.Inventories, key)
+		store.prunedOnOpen++
+	}
 	switch store.data.Version {
 	case 1, 2, 3:
 		store.data.Version = state.CurrentVersion
@@ -69,9 +76,9 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("migrate journal to version %d: %w", state.CurrentVersion, err)
 		}
 	case state.CurrentVersion:
-		if migrateUploadCancellations(&store.data) {
+		if migrateUploadCancellations(&store.data) || store.prunedOnOpen > 0 {
 			if err := store.persistLocked(); err != nil {
-				return nil, fmt.Errorf("repair upload cancellation queue: %w", err)
+				return nil, fmt.Errorf("persist repaired journal: %w", err)
 			}
 		}
 	default:

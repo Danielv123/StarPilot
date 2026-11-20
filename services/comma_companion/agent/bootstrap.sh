@@ -9,6 +9,7 @@ agent_dir=/data/private-pond-agent
 unit_source="$agent_dir/current/comma-companion-agent.service"
 unit_target=/run/systemd/system/comma-companion-agent.service
 unit_temporary="${unit_target}.new.$$"
+memory_mask_dir="${unit_target}.d"
 
 finish() {
   /usr/bin/timeout --kill-after=1s 3s /usr/bin/sudo -n /usr/bin/rm -f -- \
@@ -27,6 +28,13 @@ fi
   "$unit_source" "$unit_temporary" >/dev/null 2>&1 || exit 0
 /usr/bin/timeout --kill-after=1s 3s /usr/bin/sudo -n /usr/bin/mv -fT -- \
   "$unit_temporary" "$unit_target" >/dev/null 2>&1 || exit 0
+# AGNOS caps every service at MemoryMax=128M with a type-level
+# service.d/background.conf. A drop-in overrides the unit file, so the unit's
+# own limit applies only while a same-named unit-level drop-in masks that one.
+/usr/bin/timeout --kill-after=1s 3s /usr/bin/sudo -n /usr/bin/install -d -m 0755 \
+  "$memory_mask_dir" >/dev/null 2>&1 &&
+  /usr/bin/timeout --kill-after=1s 3s /usr/bin/sudo -n /usr/bin/ln -sfn /dev/null \
+    "$memory_mask_dir/background.conf" >/dev/null 2>&1 || true
 /usr/bin/timeout --kill-after=1s 3s /usr/bin/sudo -n /usr/bin/systemctl daemon-reload \
   >/dev/null 2>&1 || exit 0
 /usr/bin/timeout --kill-after=1s 3s /usr/bin/sudo -n /usr/bin/systemctl start --no-block \

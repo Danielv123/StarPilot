@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $agentRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$requiredGoVersion = [version]"1.26.5"
+$requiredGoVersion = [version]"1.26.11"
 $govulncheckVersion = "v1.6.0"
 $actualGoVersionText = (& go -C $agentRoot env GOVERSION).Trim()
 if ($actualGoVersionText -notmatch '^go(?<version>\d+\.\d+\.\d+)$') {

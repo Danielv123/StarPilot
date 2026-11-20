@@ -11,9 +11,28 @@ two Linux instances from writing the journal or spool concurrently.
 Journal snapshots are read and written one map entry at a time. This avoids
 holding a second complete JSON document alongside decoded history, and avoids
 the full-document allocation when checkpointing. The version-4 schema, atomic
-replace/fsync behavior, WAL replay and deep-copy isolation remain unchanged;
-historical manifests are retained. Decoded history still consumes memory, so
-this is not a constant-memory archive store.
+replace/fsync behavior, WAL replay and deep-copy isolation remain unchanged.
+
+Every hashed file produces a new immutable route-inventory generation, so a
+long route leaves dozens of full manifests behind. A generation is pruned once
+it is declared, a newer generation of the same route is declared too, and the
+retained generations still list every file of it that has a journal record.
+Pruning runs in place when the journal is opened, before the first deep copy,
+and again after each scan. The newest generation of every route is kept, so
+the journal still grows by roughly 35 KiB per archived route. On the device's
+120-MiB journal (2,561 generations for 232 routes) this left 234 generations
+and 11 MiB.
+
+Startup also removes `.journal-*.tmp` checkpoint temporaries stranded beside
+the journal by a killed process. Each is a full journal copy; an OOM kill loop
+left 57 of them (3.0 GiB) on the device.
+
+AGNOS 20 ships `/usr/lib/systemd/system/service.d/background.conf`, which caps
+every service at `MemoryMax=128M`. A drop-in overrides the unit file, so the
+unit's own 256-MiB limit applies only while a same-named unit-level drop-in
+masks it. `bootstrap.sh` and the updater therefore install
+`/run/systemd/system/comma-companion-agent.service.d/background.conf` as a
+symlink to `/dev/null`, the same convention AGNOS uses for its own units.
 
 The opt-in `TestJournalMemoryProfile` uses `COMMA_JOURNAL_BENCHMARK` as a
 read-only source, copies it to a temporary directory, and measures opening,
@@ -94,7 +113,7 @@ From Windows PowerShell:
 .\build.ps1 -Version 0.1.0
 ```
 
-The build is pinned to the reviewed Go 1.26.5 toolchain and fails if a
+The build is pinned to the reviewed Go 1.26.11 toolchain and fails if a
 different compiler is selected. It runs pinned govulncheck 1.6.0, all tests,
 disables CGO, and produces
 `dist/comma-companion-agent-linux-arm64`. It also builds

@@ -23,9 +23,9 @@ for script in "$script_dir"/*.sh; do
   /usr/bin/bash -n "$script"
 done
 
-require_line '$requiredGoVersion = [version]"1.26.5"' "$script_dir/build.ps1"
+require_line '$requiredGoVersion = [version]"1.26.11"' "$script_dir/build.ps1"
 require_line '$govulncheckVersion = "v1.6.0"' "$script_dir/build.ps1"
-require_line 'go 1.26.5' "$script_dir/go.mod"
+require_line 'go 1.26.11' "$script_dir/go.mod"
 
 if /usr/bin/grep -Fq "ConditionPathIsExecutable=" "$unit"; then
   fail "invalid ConditionPathIsExecutable directive remains"
@@ -128,6 +128,18 @@ if ! /usr/bin/grep -Fq 'putParam(paramsBase, "DoReboot", "1")' \
   fail "privileged helper lacks the manager-deferred reboot path"
 fi
 
+require_line "MemoryMax=256M" "$unit"
+require_line 'memory_mask_dir="${unit_target}.d"' "$script_dir/bootstrap.sh"
+require_line \
+  '    "$memory_mask_dir/background.conf" >/dev/null 2>&1 || true' \
+  "$script_dir/bootstrap.sh"
+require_line 'memory_mask="$memory_mask_dir/background.conf"' \
+  "$script_dir/deployment-lib.sh"
+require_line '  bounded_root /usr/bin/ln -sfn /dev/null "$memory_mask"' \
+  "$script_dir/deployment-lib.sh"
+require_line \
+  '  [[ "$(/usr/bin/readlink -- "$memory_mask" 2>/dev/null)" == /dev/null ]] || return 1' \
+  "$script_dir/deployment-lib.sh"
 require_line \
   '  atomic_symlink "$release_dir" "$current_link"' \
   "$script_dir/update-device.sh"

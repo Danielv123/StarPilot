@@ -72,9 +72,17 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Agent, error) 
 			return nil, fmt.Errorf("clear readiness file: %w", err)
 		}
 	}
+	if removed, err := journal.RemoveStaleTemporaries(cfg.JournalPath); err != nil {
+		logger.Printf("journal: remove stale checkpoint temporaries: %v", err)
+	} else if removed > 0 {
+		logger.Printf("journal: removed %d stale checkpoint temporary file(s)", removed)
+	}
 	store, err := journal.Open(cfg.JournalPath)
 	if err != nil {
 		return nil, err
+	}
+	if pruned := store.PrunedOnOpen(); pruned > 0 {
+		logger.Printf("journal: pruned %d superseded route inventory generation(s)", pruned)
 	}
 	if cfg.UserAgent == "" || cfg.UserAgent == "comma-companion-agent/dev" {
 		cfg.UserAgent = "comma-companion-agent/" + version
@@ -264,6 +272,11 @@ func (a *Agent) scanLoop(ctx context.Context) {
 			a.logger.Printf("journal: compact terminal records: %v", err)
 		} else if compacted > 0 {
 			a.logger.Printf("journal: compacted %d terminal record(s)", compacted)
+		}
+		if pruned, err := a.journal.PruneSupersededInventories(); err != nil {
+			a.logger.Printf("journal: prune superseded route inventories: %v", err)
+		} else if pruned > 0 {
+			a.logger.Printf("journal: pruned %d superseded route inventory generation(s)", pruned)
 		}
 		if result.Errors > 0 || result.FilesSpooled > 0 {
 			a.logger.Printf(

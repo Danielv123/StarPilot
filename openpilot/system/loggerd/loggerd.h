@@ -51,11 +51,11 @@ struct EncoderSettings {
   int gop_size;
   int b_frames = 0; // we don't use b frames
 
-  static EncoderSettings MainEncoderSettings(int in_width) {
+  static EncoderSettings MainEncoderSettings(int in_width, int full_width_bitrate) {
     if (in_width <= 1344) {
       return EncoderSettings{.encode_type = MAIN_ENCODE_TYPE, .bitrate = 5'000'000, .gop_size = 20};
     } else {
-      return EncoderSettings{.encode_type = MAIN_ENCODE_TYPE, .bitrate = 10'000'000, .gop_size = 30};
+      return EncoderSettings{.encode_type = MAIN_ENCODE_TYPE, .bitrate = full_width_bitrate, .gop_size = 30};
     }
   }
 
@@ -99,14 +99,14 @@ const EncoderInfo main_road_encoder_info = {
   .publish_name = "narrowRoadEncodeData",
   .thumbnail_name = "thumbnail",
   .filename = "fcamera.hevc",
-  .get_settings = [](int in_width){return EncoderSettings::MainEncoderSettings(in_width);},
+  .get_settings = [](int in_width){return EncoderSettings::MainEncoderSettings(in_width, 5'000'000);},
   INIT_ENCODE_FUNCTIONS(NarrowRoadEncode),
 };
 
 const EncoderInfo main_wide_road_encoder_info = {
   .publish_name = "wideRoadEncodeData",
   .filename = "ecamera.hevc",
-  .get_settings = [](int in_width){return EncoderSettings::MainEncoderSettings(in_width);},
+  .get_settings = [](int in_width){return EncoderSettings::MainEncoderSettings(in_width, 5'000'000);},
   INIT_ENCODE_FUNCTIONS(WideRoadEncode),
 };
 
@@ -114,7 +114,7 @@ const EncoderInfo main_cabin_encoder_info = {
   .publish_name = "cabinEncodeData",
   .filename = "dcamera.hevc",
   .record = Params().getBool("RecordFront"),
-  .get_settings = [](int in_width){return EncoderSettings::MainEncoderSettings(in_width);},
+  .get_settings = [](int in_width){return EncoderSettings::MainEncoderSettings(in_width, 10'000'000);},
   INIT_ENCODE_FUNCTIONS(CabinEncode),
 };
 

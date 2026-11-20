@@ -22,9 +22,9 @@ SEGMENT_LENGTH = 2
 FULL_SIZE = 2507572
 def hevc_size(w): return FULL_SIZE // 2 if w <= 1344 else FULL_SIZE
 CAMERAS = [
-  ("fcamera.hevc", 20, hevc_size, "narrowRoadEncodeIdx"),
+  ("fcamera.hevc", 20, lambda w: FULL_SIZE // 2, "narrowRoadEncodeIdx"),
   ("dcamera.hevc", 20, hevc_size, "cabinEncodeIdx"),
-  ("ecamera.hevc", 20, hevc_size, "wideRoadEncodeIdx"),
+  ("ecamera.hevc", 20, lambda w: FULL_SIZE // 2, "wideRoadEncodeIdx"),
   ("qcamera.ts", 20, lambda x: 130000, None),
 ]
 
